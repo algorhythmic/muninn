@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Muninn user data — privacy-sensitive; see SPEC.md "Constraints"
+# Never publish. MUNINN_RAW_DIR / MUNINN_DATA_DIR env vars can relocate.
+/raw/
+/data/
+
+# Compiled vault lives in its own Gitea repo — never in this repo
+# (see SPEC.md Decision 2: two vaults, never one)
+/vault/
+
+# Editor / IDE
+*.swp
+*.swo
+.idea/
+.vscode/
