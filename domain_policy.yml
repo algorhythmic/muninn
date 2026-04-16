@@ -1,0 +1,33 @@
+# Muninn domain policy — controls `content_visible` for matching bookmarks.
+# Per SPEC.md Decision 5(2): a single toggle per entry. When matched, the
+# bookmark row stays in `bookmarks` with `content_visible = 0` and is excluded
+# from scrape, enrich, vault, and MCP — but the event survives.
+#
+# Glob patterns (not regex). Match is case-insensitive on the host.
+# Ships empty in v1; below are commented examples of common categories.
+
+domains:
+  # ── banking / personal finance ────────────────────────────────────
+  # - chase.com
+  # - bankofamerica.com
+  # - "*.wellsfargo.com"
+
+  # ── medical / patient portals ─────────────────────────────────────
+  # - "*.kaiserpermanente.org"
+  # - mychart.com
+  # - "*.epic.com"
+
+  # ── work SaaS / intranet ──────────────────────────────────────────
+  # - "*.atlassian.net"
+  # - "*.slack.com"
+  # - "*.notion.so"
+  # - "*.googleworkspace.com"
+
+  # ── personal / private docs ───────────────────────────────────────
+  # - docs.google.com
+  # - drive.google.com
+
+paths:
+  # Path-level patterns — useful when only a subset of a domain is private.
+  # - "github.com/acme-corp/*"
+  # - "linear.app/acme/*"

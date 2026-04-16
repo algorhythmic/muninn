@@ -1,0 +1,61 @@
+---
+bookmark_id: {{ bookmark.bookmark_id }}
+source: {{ bookmark.source }}
+source_id: {{ bookmark.source_id }}
+era: {{ bookmark.era_label or 'unknown' }}
+domain: {{ bookmark.domain or '' }}
+captured_at: {{ bookmark.captured_at }}
+enrichment_source: {{ bookmark.enrichment_source or 'none' }}
+{% if tags %}tags: {{ tags | tojson }}
+{% else %}tags: []
+{% endif %}
+---
+
+# {{ bookmark.title or '(untitled)' }}
+
+{% if bookmark.url %}
+**URL (sanitized):** {{ bookmark.url }}
+{% endif %}
+
+{% if bookmark.folder_path %}
+**Folder:** {{ bookmark.folder_path | join(' / ') }}
+{% endif %}
+
+{% if summary %}
+## Summary
+
+{{ summary }}
+{% endif %}
+
+{% if tags %}
+## Tags
+
+{% for tag in tags %}
+- {{ tag }}
+{% endfor %}
+{% endif %}
+
+{% if entities %}
+## Entities
+
+{% for entity in entities %}
+- {{ entity }}
+{% endfor %}
+{% endif %}
+
+{% if key_quotes %}
+## Key quotes
+
+{% for quote in key_quotes %}
+> {{ quote }}
+
+{% endfor %}
+{% endif %}
+
+{% if cross_refs %}
+## Related
+
+{% for ref in cross_refs %}
+- [[{{ ref }}]]
+{% endfor %}
+{% endif %}

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "ad-hoc-analysis.schema.json",
+  "title": "Ad-Hoc Analysis",
+  "description": "Schema for ad-hoc cross-corpus analysis output",
+  "type": "object",
+  "required": [
+    "narrative",
+    "key_findings",
+    "referenced_bookmarks",
+    "synthesis_metadata"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "prompt": { "type": "string" },
+    "title": { "type": "string", "minLength": 1 },
+    "narrative": { "type": "string", "minLength": 200 },
+    "key_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding", "supporting_evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "finding": { "type": "string", "minLength": 1 },
+          "supporting_evidence": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "minItems": 1,
+      "maxItems": 20
+    },
+    "referenced_bookmarks": {
+      "type": "array",
+      "items": { "type": "integer" }
+    },
+    "synthesis_metadata": {
+      "type": "object",
+      "required": [
+        "model",
+        "prompt_version",
+        "input_token_count",
+        "output_token_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "input_token_count": { "type": "integer", "minimum": 0 },
+        "output_token_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

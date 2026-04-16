@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "task-input.schema.json",
+  "title": "Synthesis Task Input",
+  "description": "Schema for the JSON dropped into /workspace/input/<task-id>.json. Common envelope for era_narrative, deep_pass, and ad_hoc_analysis tasks.",
+  "type": "object",
+  "required": ["task_id", "task_type", "materials"],
+  "additionalProperties": false,
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_type": {
+      "type": "string",
+      "enum": ["era_narrative", "deep_pass", "ad_hoc_analysis"]
+    },
+    "era_label": {
+      "type": ["string", "null"]
+    },
+    "bookmark_id": {
+      "type": ["integer", "null"]
+    },
+    "prompt": {
+      "type": ["string", "null"]
+    },
+    "filter_query": {
+      "type": ["string", "null"]
+    },
+    "correction_instructions": {
+      "type": ["string", "null"],
+      "description": "Populated on retry attempts. Contains the validation errors from the prior attempt the model must fix."
+    },
+    "materials": {
+      "type": "object",
+      "description": "Task-specific input payload. Era passes bookmarks+neighbors; deep_pass passes source_text+known_bookmark_ids; ad_hoc passes corpus subset.",
+      "additionalProperties": true
+    }
+  }
+}

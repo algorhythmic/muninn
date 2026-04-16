@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "era-narrative.schema.json",
+  "title": "Era Narrative",
+  "description": "Schema for era narrative synthesis output",
+  "type": "object",
+  "required": [
+    "narrative",
+    "inferred_year",
+    "dominant_topics",
+    "dominant_domains",
+    "synthesis_metadata"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "era_label": {
+      "type": "string",
+      "minLength": 1
+    },
+    "narrative": {
+      "type": "string",
+      "minLength": 50,
+      "maxLength": 4000
+    },
+    "inferred_year": {
+      "type": "integer",
+      "minimum": 1990,
+      "maximum": 2027
+    },
+    "dominant_topics": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "maxItems": 10
+    },
+    "dominant_domains": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1,
+      "maxItems": 10
+    },
+    "synthesis_metadata": {
+      "type": "object",
+      "required": [
+        "model",
+        "prompt_version",
+        "input_token_count",
+        "output_token_count",
+        "neighboring_eras_used"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "input_token_count": { "type": "integer", "minimum": 0 },
+        "output_token_count": { "type": "integer", "minimum": 0 },
+        "neighboring_eras_used": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}
