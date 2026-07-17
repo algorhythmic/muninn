@@ -104,12 +104,17 @@ async def scrape_all(
     *,
     client: Optional[ScrapeClient] = None,
     concurrency: int = 4,
+    limit: Optional[int] = None,
 ) -> dict:
     """Run dual-pass scrape for every ``content_visible=1`` bookmark.
 
+    ``limit``: scrape only the N most recently captured bookmarks
+    (newest ``captured_at`` first) — the roadmap's ~100-bookmark
+    smoke-test workflow. Default: all visible bookmarks.
+
     Returns aggregated stats: ``{processed, errors, by_source: {…}}``.
     """
-    bookmarks = _list_visible_bookmarks(conn)
+    bookmarks = _list_visible_bookmarks(conn, limit=limit)
     log.info("scraping %d visible bookmarks", len(bookmarks))
 
     own_client = client is None
@@ -160,6 +165,14 @@ _VISIBLE_BOOKMARKS_SQL = """
     ORDER BY bookmark_id
 """
 
+_VISIBLE_BOOKMARKS_NEWEST_SQL = """
+    SELECT bookmark_id, url, captured_at, content_visible
+    FROM bookmarks
+    WHERE content_visible = 1
+    ORDER BY captured_at DESC, bookmark_id DESC
+    LIMIT ?
+"""
+
 _UPSERT_SCRAPE_SQL = """
     INSERT INTO scrape_results (
         bookmark_id, pass, fetched_at, target_timestamp, actual_snapshot_at,
@@ -186,8 +199,13 @@ _UPSERT_SCRAPE_SQL = """
 """
 
 
-def _list_visible_bookmarks(conn: sqlite3.Connection) -> list[dict]:
-    cur = conn.execute(_VISIBLE_BOOKMARKS_SQL)
+def _list_visible_bookmarks(
+    conn: sqlite3.Connection, limit: Optional[int] = None
+) -> list[dict]:
+    if limit is not None:
+        cur = conn.execute(_VISIBLE_BOOKMARKS_NEWEST_SQL, (limit,))
+    else:
+        cur = conn.execute(_VISIBLE_BOOKMARKS_SQL)
     return [dict(row) for row in cur.fetchall()]
 
 
@@ -221,11 +239,16 @@ def _update_enrichment_source(
 
 # ── Sync entry point (CLI / scripts) ─────────────────────────────
 
-def run_scrape(db_path: Optional[str] = None, *, concurrency: int = 4) -> dict:
+def run_scrape(
+    db_path: Optional[str] = None,
+    *,
+    concurrency: int = 4,
+    limit: Optional[int] = None,
+) -> dict:
     """Synchronous wrapper for ``scrape_all``: opens a connection, runs,
     closes. For use from ``__main__`` or click commands."""
     conn = connect(db_path)
     try:
-        return asyncio.run(scrape_all(conn, concurrency=concurrency))
+        return asyncio.run(scrape_all(conn, concurrency=concurrency, limit=limit))
     finally:
         conn.close()

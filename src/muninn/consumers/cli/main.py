@@ -80,12 +80,18 @@ def ingest_cmd(ctx: click.Context, path: str) -> None:
     default=4,
     help="Max concurrent bookmarks scraped (each runs dual-pass serially).",
 )
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Scrape only the N most recently captured bookmarks (newest first).",
+)
 @click.pass_context
-def scrape_cmd(ctx: click.Context, concurrency: int) -> None:
+def scrape_cmd(ctx: click.Context, concurrency: int, limit: int | None) -> None:
     """Run dual-pass scrape (live + at_capture + recent_archive fallback) for visible bookmarks."""
     from muninn.scrape.pipeline import run_scrape  # lazy
 
-    result = run_scrape(db_path=ctx.obj.get("db"), concurrency=concurrency)
+    result = run_scrape(db_path=ctx.obj.get("db"), concurrency=concurrency, limit=limit)
     click.echo(f"Scrape complete: {result}")
 
 
