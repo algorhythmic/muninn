@@ -147,11 +147,14 @@ def test_compile_writes_visible_only(db_path: Path, tmp_path: Path) -> None:
         db_path=db_path, output_dir=output, personal_dir=personal
     )
     assert count == 3  # only visible bookmarks
-    files = sorted(p.name for p in output.glob("*.md"))
+    pages_dir = output / "wiki" / "bookmarks"
+    files = sorted(p.name for p in pages_dir.glob("*.md"))
     assert len(files) == 3
+    # Nothing is written outside the compiler-owned namespace.
+    assert sorted(p.name for p in output.iterdir()) == ["wiki"]
     # Hidden bookmark id=4: no file should mention "Secret".
     for f in files:
-        assert "Secret" not in (output / f).read_text()
+        assert "Secret" not in (pages_dir / f).read_text()
 
 
 def test_compile_frontmatter_and_wikilinks(db_path: Path, tmp_path: Path) -> None:
@@ -160,11 +163,15 @@ def test_compile_frontmatter_and_wikilinks(db_path: Path, tmp_path: Path) -> Non
     compile_vault(db_path=db_path, output_dir=output, personal_dir=None)
 
     # Find the page for bookmark_id=1 ("First Bookmark") — slug ends in "-1".
-    pages = list(output.glob("*-1.md"))
+    pages = list((output / "wiki" / "bookmarks").glob("*-1.md"))
     assert len(pages) == 1
     text = pages[0].read_text()
+    assert "page_type: bookmark" in text
     assert "bookmark_id: 1" in text
+    assert 'title: "First Bookmark"' in text
+    assert 'url: "https://example.com/a"' in text
     assert "era: early-web" in text
+    assert "contributors: []" in text
     # Cross-reference: bookmark 2 shares era + 'web' tag.
     assert "[[" in text and "-2]]" in text
 

@@ -1,5 +1,8 @@
 ---
+page_type: bookmark
 bookmark_id: {{ bookmark.bookmark_id }}
+title: {{ (bookmark.title or '(untitled)') | tojson }}
+url: {{ (bookmark.url or '') | tojson }}
 source: {{ bookmark.source }}
 source_id: {{ bookmark.source_id }}
 era: {{ bookmark.era_label or 'unknown' }}
@@ -8,7 +11,7 @@ captured_at: {{ bookmark.captured_at }}
 enrichment_source: {{ bookmark.enrichment_source or 'none' }}
 {% if tags %}tags: {{ tags | tojson }}
 {% else %}tags: []
-{% endif %}
+{% endif %}contributors: []
 ---
 
 # {{ bookmark.title or '(untitled)' }}

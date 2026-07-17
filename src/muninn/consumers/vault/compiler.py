@@ -1,9 +1,11 @@
 """Vault compiler — one Obsidian-compatible markdown page per visible bookmark.
 
 Reads bookmarks + enriched rows from the canonical SQLite store and renders
-them through `templates/bookmark_page.md.j2`. Hidden bookmarks
-(`content_visible = 0`) are skipped entirely — no page is written and no
-wikilink target is registered.
+them through `templates/bookmark_page.md.j2` into the unified vault's
+`wiki/bookmarks/` namespace (ADR-001/ADR-008: the output dir is the vault
+ROOT; this compiler owns — and only writes — `wiki/bookmarks/` beneath it).
+Hidden bookmarks (`content_visible = 0`) are skipped entirely — no page is
+written and no wikilink target is registered.
 
 CRITICAL: this module enforces SPEC.md Decision 2 (two distinct vaults — the
 COMPILED Muninn output vault must NEVER be the same as the user's PERSONAL
@@ -148,6 +150,9 @@ def compile_vault(
 ) -> int:
     """Compile the vault. Returns the count of pages written.
 
+    `output_dir` is the vault ROOT (the muninn-vault repo checkout); pages
+    are written to `{output_dir}/wiki/bookmarks/{slug}.md`.
+
     Resolution order for output_dir / personal_dir:
         explicit argument → muninn.config.load_paths() → error if neither.
     """
@@ -167,7 +172,8 @@ def compile_vault(
     out = Path(out)
     _validate_vault_paths(out, Path(pers) if pers is not None else None)
 
-    out.mkdir(parents=True, exist_ok=True)
+    pages_dir = out / "wiki" / "bookmarks"
+    pages_dir.mkdir(parents=True, exist_ok=True)
     env = _get_template_env()
     template = env.get_template(TEMPLATE_NAME)
 
@@ -211,7 +217,7 @@ def compile_vault(
                 cross_refs=cross_refs,
             )
 
-            (out / f"{slug_by_id[bm['bookmark_id']]}.md").write_text(content)
+            (pages_dir / f"{slug_by_id[bm['bookmark_id']]}.md").write_text(content)
             count += 1
 
         return count
