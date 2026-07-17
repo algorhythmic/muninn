@@ -36,12 +36,11 @@ CLI: `muninn ingest|scrape|enrich|synthesize|triage|status|deep-pass|export|time
 ## Known gaps (audited 2026-07-16 — verify before trusting, fix opportunistically)
 
 1. `vector/embed.py` produces deterministic SHA256 vectors, not semantic embeddings; the Qdrant query path also sends raw text where a vector belongs. Blocks roadmap item "Index wiki/bookmarks/ into Qdrant."
-2. Vault compiler doesn't yet target the vault repo's `wiki/bookmarks/` with slug filenames; "Related" links come from era/tag heuristics, not `cross_references`.
-3. MCP `get_bookmark()` returns `content_visible=0` rows by direct ID — privacy leak.
-4. Missing `domain_policy.yml` silently yields an empty policy (scrape-everything) — SPEC says abort.
-5. Synthesis container launches interactive `claude` but never feeds it the task JSON; `task-input.schema.json` rejects the orchestrator's own `attempt` field. (Phase 4 — don't fix ahead of the roadmap.)
-6. Successful deep pass never clears `deep_pass_requested`; `--pending` reprocesses forever.
-7. No `.env` loader (`config.py` reads only `os.environ`); no robots.txt respect; CLI lacks advertised `--force`/`--prompt-version`.
+2. Vault "Related" links come from era/tag heuristics, not `cross_references` (SPEC wants bidirectional model-produced refs) — revisit once deep passes populate that table.
+3. Synthesis container launches interactive `claude` but never feeds it the task JSON; `task-input.schema.json` rejects the orchestrator's own `attempt` field. (Phase 4 — don't fix ahead of the roadmap.)
+4. No robots.txt respect in the live scraper.
+
+Closed 2026-07-16 (same-day fix pass): compiler now targets `{vault}/wiki/bookmarks/{slug}.md`; missing/malformed `domain_policy.yml` aborts; MCP `get_bookmark()` hides `content_visible=0` rows; deep pass clears `deep_pass_requested`; `.env` is loaded (env wins); enrich CLI has `--force`/`--prompt-version`; FTS re-enrichment no longer fails (contentless FTS5 rejected DELETE — table is now content-storing).
 
 ## Design decisions
 
