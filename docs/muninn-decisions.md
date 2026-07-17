@@ -192,6 +192,28 @@ Raw RAG is simpler to implement and well-understood. The wiki pattern has more m
 
 ---
 
+## ADR-008 — Two lanes, two canonical stores: SQLite for the bookmark pipeline, vault-first for skald pages
+
+**Status:** Proposed (2026-07-16, drafted in-session; pending operator ratification)
+
+**Context.** SPEC.md's delivery-shape decision makes SQLite the single canonical store, with the vault as a compiled consumer — and commit `ab874cb` implemented exactly that. ADR-001/ADR-006 then made the unified vault the product surface (`raw/` originals, `wiki/` synthesis). The Skald Protocol (2026-07-16) goes further: emitters write `wiki/sessions/`, `wiki/projects/`, and `wiki/log.md` directly via git, with no SQLite involvement and explicitly zero Muninn-side code. Left unreconciled, "SQLite is the single canonical store" and "skalds write the vault directly" contradict each other, and every future session re-litigates it.
+
+**Decision.** Muninn has two content lanes with different canonical stores:
+
+- **Bookmark lane** (and any future scraped-source lane — articles, Huginn promotions): SQLite remains canonical. `wiki/bookmarks/` is compiled output of the enrichment pipeline; the vault compiler is its only writer; hand-edits there are overwritten on recompile.
+- **Skald lane** (`wiki/sessions/`, `wiki/projects/`, `wiki/log.md`): vault-first. The markdown in git *is* the canonical record; it is never mirrored into SQLite. Machine writes are confined to managed regions per skald-protocol.md §5.2.
+- **Qdrant is derived data in both lanes** — rebuildable from SQLite (bookmarks) or the vault (skald pages) at any time.
+
+**Rationale.** SQLite buys the bookmark lane idempotent, resumable enrichment over ~10k items — re-running expensive stages safely is the whole point (`enrichment_prompt_version` + `content_hash` + `enrichment_model`). Session narratives have none of that shape: they are synthesis at birth (protocol §4.4), low-volume, human-readable, and git already provides their atomicity and audit trail. Routing them through SQLite adds a store without adding a guarantee.
+
+**Consequences.**
+- SPEC.md's "single canonical store" wording is scoped to the bookmark pipeline; amend on next SPEC pass.
+- Per-namespace write ownership must be documented in the vault's own CLAUDE.md (which namespaces are compiled, which are skald-managed, which are operator-owned).
+- The Phase 2 watcher indexes `wiki/` uniformly for retrieval but must never "repair" skald pages from SQLite, because there is nothing to repair from.
+- Consumers wanting one queryable surface over both lanes use Qdrant/MCP, not SQLite.
+
+---
+
 ## Superseded
 
 *Entries here when earlier decisions are explicitly replaced by later ones. None yet.*
