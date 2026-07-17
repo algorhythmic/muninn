@@ -14,7 +14,7 @@ For operator guidance to Claude Code sessions working on this repo, see [`CLAUDE
 
 Items that must be done to ship v1. Nothing in later sections starts until these are complete.
 
-- [x] **Stand up the vault skeleton.** *Done 2026-07-16: `~/Documents/Code/muninn-vault`, tagged `v1-skeleton`, with `scripts/skald_lint.py` deployed. Push to Gitea `.18` pending — create `david/muninn-vault` there first.* One git repo with the full unified namespace structure:
+- [x] **Stand up the vault skeleton.** *Done 2026-07-16: `~/Documents/Code/muninn-vault`, tagged `v1-skeleton`, with `scripts/skald_lint.py` deployed; pushed to Gitea `david/muninn-vault`.* One git repo with the full unified namespace structure:
   ```
   vault/
   ├── raw/
@@ -48,7 +48,7 @@ Items that must be done to ship v1. Nothing in later sections starts until these
 
 - [ ] **Smoke-test retrieval.** Seed ~100 bookmarks. Query Qdrant directly with representative questions. Tune embedding choice and chunk size if recall is poor.
 - [ ] **Populate `wiki/projects/` manually.** *Partial 2026-07-16: `muninn`, `saga`, `huginn`, `homelab` drafted from repo docs (verify `saga`'s state — sourced from April-vendored docs); `nexus` and `esp32-surveillance` are stubs awaiting operator content.* One markdown file per active project: `saga.md`, `muninn.md`, `nexus.md`, `huginn.md`, `homelab.md`, `esp32-surveillance.md`. Each ~200-400 words: current status, architecture summary, phase, open questions, links to the source repo or design docs. This is an hour or two of writing; it makes the MCP immediately useful for Claude sessions even before Bragi automates updates.
-- [ ] **Git-initialize the vault.** *Partial 2026-07-16: committed and tagged `v1-skeleton` locally; push blocked on creating `david/muninn-vault` in Gitea.* Commit the full skeleton + seeded projects. Push to Gitea at `.18`. Tag `v1-skeleton`.
+- [x] **Git-initialize the vault.** *Done 2026-07-16: pushed to Gitea `david/muninn-vault` (private) with tag `v1-skeleton`.* Commit the full skeleton + seeded projects. Push to Gitea at `.18`. Tag `v1-skeleton`.
 - [x] **Write `wiki/index.md` initial version.** *Done 2026-07-16.* Manually, for v1. LLM auto-maintenance comes in Phase 2.
 
 ## Phase 2 — MCP server
