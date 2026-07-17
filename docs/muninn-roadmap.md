@@ -14,7 +14,7 @@ For operator guidance to Claude Code sessions working on this repo, see [`CLAUDE
 
 Items that must be done to ship v1. Nothing in later sections starts until these are complete.
 
-- [ ] **Stand up the vault skeleton.** One git repo with the full unified namespace structure:
+- [x] **Stand up the vault skeleton.** *Done 2026-07-16: `~/Documents/Code/muninn-vault`, tagged `v1-skeleton`, with `scripts/skald_lint.py` deployed. Push to Gitea `.18` pending — create `david/muninn-vault` there first.* One git repo with the full unified namespace structure:
   ```
   vault/
   ├── raw/
@@ -38,7 +38,7 @@ Items that must be done to ship v1. Nothing in later sections starts until these
   └── ROADMAP.md           # this file
   ```
   See ADR-001 and ADR-005 in DECISIONS.md for why the unified structure exists at v1 even though only `wiki/bookmarks/` is populated.
-- [ ] **Update CLAUDE.md for unified-wiki pattern.** Current CLAUDE.md assumes bookmarks-only scope. Extend with per-namespace sections describing expected page format, ingest rules, and invariants. v1 fleshes out the `bookmarks/` section; other namespaces get short placeholder sections.
+- [x] **Update CLAUDE.md for unified-wiki pattern.** *Done 2026-07-16: repo CLAUDE.md rewritten (unified-wiki, two-lane stores, code map, known gaps); vault CLAUDE.md written with per-namespace page formats, ingest rules, and write-ownership table.*
 - [ ] **Implement bulk bookmark enrichment worker.** Per SPEC.md §4 — Python asyncio pool, Haiku 4.5 via direct Anthropic API. Input: `raw/bookmarks/bookmarks.html` export. Output: one `wiki/bookmarks/{slug}.md` per bookmark with summary, tags, cross-references, archive fallback URL.
   *Status 2026-07-16: the SQLite pipeline behind this (ingest → dual-pass scrape → Haiku enrich → vault compiler) shipped in commit `ab874cb`. Remaining: point the vault compiler at the vault repo's `wiki/bookmarks/` with slug filenames, and close the gaps listed in CLAUDE.md "Known gaps."*
 - [ ] **Stand up Qdrant at `.19`.** LXC on Proxmox, Debian 13. Persistent volume for the vector index. Restart policy: always. Health check endpoint monitored by Uptime Kuma at `.16`.
@@ -47,9 +47,9 @@ Items that must be done to ship v1. Nothing in later sections starts until these
 ## Parallel with v1 (do while ingest is running)
 
 - [ ] **Smoke-test retrieval.** Seed ~100 bookmarks. Query Qdrant directly with representative questions. Tune embedding choice and chunk size if recall is poor.
-- [ ] **Populate `wiki/projects/` manually.** One markdown file per active project: `saga.md`, `muninn.md`, `nexus.md`, `huginn.md`, `homelab.md`, `esp32-surveillance.md`. Each ~200-400 words: current status, architecture summary, phase, open questions, links to the source repo or design docs. This is an hour or two of writing; it makes the MCP immediately useful for Claude sessions even before Bragi automates updates.
-- [ ] **Git-initialize the vault.** Commit the full skeleton + seeded projects. Push to Gitea at `.18`. Tag `v1-skeleton`.
-- [ ] **Write `wiki/index.md` initial version.** Manually, for v1. LLM auto-maintenance comes in Phase 2.
+- [ ] **Populate `wiki/projects/` manually.** *Partial 2026-07-16: `muninn`, `saga`, `huginn`, `homelab` drafted from repo docs (verify `saga`'s state — sourced from April-vendored docs); `nexus` and `esp32-surveillance` are stubs awaiting operator content.* One markdown file per active project: `saga.md`, `muninn.md`, `nexus.md`, `huginn.md`, `homelab.md`, `esp32-surveillance.md`. Each ~200-400 words: current status, architecture summary, phase, open questions, links to the source repo or design docs. This is an hour or two of writing; it makes the MCP immediately useful for Claude sessions even before Bragi automates updates.
+- [ ] **Git-initialize the vault.** *Partial 2026-07-16: committed and tagged `v1-skeleton` locally; push blocked on creating `david/muninn-vault` in Gitea.* Commit the full skeleton + seeded projects. Push to Gitea at `.18`. Tag `v1-skeleton`.
+- [x] **Write `wiki/index.md` initial version.** *Done 2026-07-16.* Manually, for v1. LLM auto-maintenance comes in Phase 2.
 
 ## Phase 2 — MCP server
 
