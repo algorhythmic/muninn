@@ -122,7 +122,11 @@ def fts_search(
 
 
 def get_bookmark(bookmark_id: int, db_path: str | Path | None = None) -> str:
-    """Full bookmark view — bookmarks JOIN enriched plus per-pass scrape rows."""
+    """Full bookmark view — bookmarks JOIN enriched plus per-pass scrape rows.
+
+    Hidden bookmarks (`content_visible = 0`) are indistinguishable from
+    missing IDs: same not-found error, so MCP callers can't enumerate them.
+    """
     conn = _open(db_path)
     try:
         row = conn.execute(
@@ -132,7 +136,7 @@ def get_bookmark(bookmark_id: int, db_path: str | Path | None = None) -> str:
             "       e.deep_pass_requested, e.key_quotes "
             "FROM bookmarks b LEFT JOIN enriched e "
             "  ON e.bookmark_id = b.bookmark_id "
-            "WHERE b.bookmark_id = ?",
+            "WHERE b.bookmark_id = ? AND b.content_visible = 1",
             (bookmark_id,),
         ).fetchone()
         if row is None:

@@ -19,6 +19,15 @@ from urllib.parse import urlsplit
 import yaml
 
 
+class DomainPolicyError(RuntimeError):
+    """The policy file is missing or malformed.
+
+    Per SPEC Decision 5 the pipeline must never silently default to
+    scrape-everything: an absent or unreadable policy aborts the run. An
+    EXISTING empty file is a deliberate "no rules" statement and is fine.
+    """
+
+
 @dataclass(frozen=True)
 class DomainPolicy:
     """Compiled policy: glob patterns matched case-insensitively against
@@ -54,7 +63,11 @@ class DomainPolicy:
 
 
 def load_domain_policy(path: Path | str | None = None) -> DomainPolicy:
-    """Load policy from `domain_policy.yml`. Missing/empty file → empty policy.
+    """Load policy from `domain_policy.yml`. Missing file → DomainPolicyError.
+
+    An existing-but-empty file is a deliberate "no rules" statement and
+    yields an empty policy; a missing or malformed file aborts (SPEC
+    Decision 5: never silently default to scrape-everything).
 
     Schema (per the canonical `domain_policy.yml`):
 
@@ -69,21 +82,30 @@ def load_domain_policy(path: Path | str | None = None) -> DomainPolicy:
         path = Path(__file__).resolve().parents[3] / "domain_policy.yml"
     p = Path(path)
     if not p.exists():
-        return DomainPolicy.empty()
+        raise DomainPolicyError(
+            f"domain_policy.yml not found at {p}. Refusing to default to "
+            f"scrape-everything (SPEC Decision 5). Create the file — an "
+            f"empty file explicitly means 'no rules'."
+        )
 
     raw = p.read_text(encoding="utf-8")
     if not raw.strip():
         return DomainPolicy.empty()
 
-    data = yaml.safe_load(raw) or {}
-    domains = tuple(_clean_list(data.get("domains")))
-    paths = tuple(_clean_list(data.get("paths")))
+    try:
+        data = yaml.safe_load(raw) or {}
+    except yaml.YAMLError as exc:
+        raise DomainPolicyError(f"{p} is not valid YAML: {exc}") from exc
+    if not isinstance(data, dict):
+        raise DomainPolicyError(f"{p} must be a mapping with 'domains'/'paths' keys")
+    domains = tuple(_clean_list(data.get("domains"), "domains", p))
+    paths = tuple(_clean_list(data.get("paths"), "paths", p))
     return DomainPolicy(domain_patterns=domains, path_patterns=paths)
 
 
-def _clean_list(value: object) -> list[str]:
-    if not value:
+def _clean_list(value: object, key: str, source: Path) -> list[str]:
+    if value is None:
         return []
     if not isinstance(value, list):
-        return []
+        raise DomainPolicyError(f"{source}: '{key}' must be a list, got {type(value).__name__}")
     return [str(item).strip() for item in value if item is not None and str(item).strip()]

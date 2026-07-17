@@ -118,6 +118,35 @@ def test_get_bookmark_not_found(db_path: Path):
     assert "error" in out
 
 
+def test_get_bookmark_hidden_indistinguishable_from_missing(db_path: Path):
+    """content_visible=0 rows must not leak through direct-ID fetch, and the
+    error must not reveal that the ID exists."""
+    _seed(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT INTO bookmarks (source, source_id, captured_at, title, url, "
+            "  era_label, domain, content_visible, enrichment_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("netscape", "hidden-1", int(time.time()), "Hidden thing",
+             "https://intra.example/x", "ai-era", "intra.example", 0, "none"),
+        )
+        hidden_id = conn.execute(
+            "SELECT bookmark_id FROM bookmarks WHERE source_id = 'hidden-1'"
+        ).fetchone()[0]
+        conn.commit()
+    finally:
+        conn.close()
+
+    hidden = json.loads(tools.get_bookmark(hidden_id, db_path=db_path))
+    missing = json.loads(tools.get_bookmark(99999, db_path=db_path))
+    assert "error" in hidden
+    assert "Hidden thing" not in json.dumps(hidden)
+    assert hidden["error"].replace(str(hidden_id), "{id}") == missing["error"].replace(
+        "99999", "{id}"
+    )
+
+
 def test_get_era(db_path: Path):
     _seed(db_path)
     out = json.loads(tools.get_era("early-web", db_path=db_path))
