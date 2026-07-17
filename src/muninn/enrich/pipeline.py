@@ -43,7 +43,7 @@ from muninn.enrich.idempotency import (
     compute_content_hash,
     would_skip,
 )
-from muninn.vector.embed import text_to_vector
+from muninn.vector.embed import EmbeddingBackendError, embed_document
 from muninn.vector.qdrant import (
     ensure_collection,
     get_client,
@@ -338,21 +338,32 @@ def enrich_all(
             continue
 
         # Qdrant write — best-effort; reconcile catches up on failures.
+        # Embedding errors (missing backend package) are part of that
+        # best-effort contract: enrichment itself must not fail on them.
         if qdrant is not None:
-            embedding_text = build_embedding_text(title, result.summary, result.tags)
-            vector = text_to_vector(embedding_text)
-            payload = {
-                "bookmark_id": bookmark_id,
-                "title": title,
-                "summary": result.summary,
-                "tags": result.tags,
-                "content_type": result.content_type,
-                "language": result.language,
-            }
-            if upsert_point(qdrant, bookmark_id, vector, payload):
-                stats.qdrant_writes += 1
-            else:
+            try:
+                embedding_text = build_embedding_text(title, result.summary, result.tags)
+                vector = embed_document(embedding_text)
+            except EmbeddingBackendError as exc:
+                logger.warning(
+                    "Embedding backend unavailable — skipping Qdrant write for %d: %s",
+                    bookmark_id,
+                    exc,
+                )
                 stats.qdrant_skipped += 1
+            else:
+                payload = {
+                    "bookmark_id": bookmark_id,
+                    "title": title,
+                    "summary": result.summary,
+                    "tags": result.tags,
+                    "content_type": result.content_type,
+                    "language": result.language,
+                }
+                if upsert_point(qdrant, bookmark_id, vector, payload):
+                    stats.qdrant_writes += 1
+                else:
+                    stats.qdrant_skipped += 1
         else:
             stats.qdrant_skipped += 1
 

@@ -462,6 +462,24 @@ class TestQdrantBestEffort:
         assert stats.errors == 0  # Qdrant failures don't count as errors.
 
     @patch("muninn.enrich.pipeline.enrich_bookmark")
+    def test_missing_embedding_backend_skips_qdrant_not_enrichment(
+        self, mock_enrich, seeded_db: sqlite3.Connection, monkeypatch
+    ) -> None:
+        """An unavailable embedding backend is a Qdrant-lane problem: rows
+        still enrich; the vector writes are skipped for reconcile to redo."""
+        import sys
+
+        mock_enrich.side_effect = _mock_enrich_factory()
+        monkeypatch.setenv("MUNINN_EMBEDDING_BACKEND", "sentence-transformers")
+        monkeypatch.setitem(sys.modules, "sentence_transformers", None)
+
+        stats = enrich_all(seeded_db, client=MagicMock(), qdrant=MagicMock())
+        assert stats.enriched == 5
+        assert stats.errors == 0
+        assert stats.qdrant_writes == 0
+        assert stats.qdrant_skipped == 5
+
+    @patch("muninn.enrich.pipeline.enrich_bookmark")
     def test_qdrant_writes_keyed_by_bookmark_id(
         self, mock_enrich, seeded_db: sqlite3.Connection
     ) -> None:

@@ -79,10 +79,17 @@ OPUS_MODEL = "claude-opus-4-6"
 # ── Prompt versions ───────────────────────────────────────────────
 PER_BOOKMARK_PROMPT_VERSION = "per_bookmark_v1"
 
+# ── Embeddings ────────────────────────────────────────────────────
+# Backend is read at call time (muninn.vector.embed) so tests can switch it;
+# model + dim are import-time constants. EmbeddingGemma is Matryoshka-
+# truncatable: 768 native, 512/256/128 valid via MUNINN_EMBEDDING_DIM.
+EMBEDDING_MODEL = os.environ.get("MUNINN_EMBEDDING_MODEL", "google/embeddinggemma-300m")
+EMBEDDING_DIM = int(os.environ.get("MUNINN_EMBEDDING_DIM", "768"))
+
 # ── Qdrant ────────────────────────────────────────────────────────
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://192.168.86.19:6333")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "muninn_bookmarks")
-QDRANT_VECTOR_DIM = 1024
+QDRANT_VECTOR_DIM = EMBEDDING_DIM  # the collection is sized by the embedding model
 
 # ── Anthropic ─────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")

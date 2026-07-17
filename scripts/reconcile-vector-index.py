@@ -6,7 +6,7 @@ Workflow:
 1. Read every ``enriched.bookmark_id`` from the canonical SQL store.
 2. Scroll every point ID out of the Qdrant collection.
 3. The set difference ``enriched - qdrant`` is the backfill list.
-4. For each missing row, recompute the embedding deterministically from
+4. For each missing row, recompute the embedding from
    ``(title, summary, tags)`` (the canonical schema does not persist
    embedding text — see :mod:`muninn.vector.embed`) and batch-upsert.
 
@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from muninn.config import load_paths  # noqa: E402
 from muninn.db import connect  # noqa: E402
 from muninn.enrich.haiku import build_embedding_text  # noqa: E402
-from muninn.vector.embed import text_to_vector  # noqa: E402
+from muninn.vector.embed import embed_document  # noqa: E402
 from muninn.vector.qdrant import (  # noqa: E402
     ensure_collection,
     get_client,
@@ -127,7 +127,7 @@ def reconcile(
         except json.JSONDecodeError:
             tags = []
         embedding_text = build_embedding_text(row["title"], row["summary"], tags)
-        vector = text_to_vector(embedding_text)
+        vector = embed_document(embedding_text)
         payload = {
             "bookmark_id": bid,
             "title": row["title"],

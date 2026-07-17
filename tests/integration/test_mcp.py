@@ -118,6 +118,48 @@ def test_get_bookmark_not_found(db_path: Path):
     assert "error" in out
 
 
+class _FakeQdrant:
+    """Captures the query passed to query_points and returns canned points."""
+
+    class _Point:
+        def __init__(self, bid: int, score: float):
+            self.payload = {"bookmark_id": bid}
+            self.score = score
+
+    class _Results:
+        def __init__(self, points):
+            self.points = points
+
+    def __init__(self, hits: list[tuple[int, float]]):
+        self._hits = hits
+        self.captured_query = None
+
+    def query_points(self, collection_name, query, limit):
+        self.captured_query = query
+        return self._Results([self._Point(b, s) for b, s in self._hits])
+
+
+def test_semantic_search_embeds_query_and_hydrates(db_path: Path):
+    """The query must reach Qdrant as an embedding vector (not raw text),
+    and hits must hydrate from SQLite with scores attached."""
+    _seed(db_path)
+    fake = _FakeQdrant(hits=[(1, 0.93)])
+    out = json.loads(tools.semantic_search("quokka", db_path=db_path, client=fake))
+    assert isinstance(fake.captured_query, list)
+    assert all(isinstance(x, float) for x in fake.captured_query)
+    assert out[0]["bookmark_id"] == 1
+    assert out[0]["title"] == "Quokka rescue"
+    assert out[0]["score"] == 0.93
+
+
+def test_semantic_search_empty_hits_falls_back_to_fts(db_path: Path):
+    _seed(db_path)
+    fake = _FakeQdrant(hits=[])
+    out = json.loads(tools.semantic_search("quokka", db_path=db_path, client=fake))
+    # FTS fallback still finds the seeded bookmark by keyword.
+    assert any(r["bookmark_id"] == 1 for r in out)
+
+
 def test_get_bookmark_hidden_indistinguishable_from_missing(db_path: Path):
     """content_visible=0 rows must not leak through direct-ID fetch, and the
     error must not reveal that the ID exists."""

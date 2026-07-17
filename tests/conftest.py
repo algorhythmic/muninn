@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 
-from muninn.db import init_db
+# The suite must run offline and deterministic: use the hash embedding
+# backend unless a test explicitly overrides it.
+os.environ.setdefault("MUNINN_EMBEDDING_BACKEND", "hash")
+
+from muninn.db import init_db  # noqa: E402
 
 
 @pytest.fixture

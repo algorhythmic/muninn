@@ -38,6 +38,12 @@ dev = [
     "respx>=0.22",
     "pandas>=2.2",
 ]
+# Local semantic embeddings (EmbeddingGemma via sentence-transformers).
+# Heavy (pulls torch) — required for real indexing/search; the pipeline
+# runs without it using MUNINN_EMBEDDING_BACKEND=hash (tests, offline).
+embeddings = [
+    "sentence-transformers>=3.3",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/muninn"]

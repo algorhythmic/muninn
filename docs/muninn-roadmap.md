@@ -43,6 +43,7 @@ Items that must be done to ship v1. Nothing in later sections starts until these
   *Status 2026-07-16: the SQLite pipeline behind this (ingest → dual-pass scrape → Haiku enrich → vault compiler) shipped in commit `ab874cb`; the compiler now writes `{vault}/wiki/bookmarks/{slug}.md` and the privacy/correctness gaps are closed (fail-closed domain policy, MCP visibility, deep-pass drain, .env loading, `--force`/`--prompt-version`). Remaining: real embeddings + Qdrant (next two items), then run the ingest on the real export.*
 - [ ] **Stand up Qdrant at `.19`.** LXC on Proxmox, Debian 13. Persistent volume for the vector index. Restart policy: always. Health check endpoint monitored by Uptime Kuma at `.16`.
 - [ ] **Index `wiki/bookmarks/` into Qdrant.** Full-text + summary embeddings. Embedding model choice is a sub-decision (to resolve): EmbeddingGemma-300M via local inference, `text-embedding-3-small` via OpenAI, or voyage-3 via Anthropic-adjacent service. Default: local EmbeddingGemma unless cost/latency data argues otherwise.
+  *Status 2026-07-16: code side done — pluggable backends in `vector/embed.py` (default `google/embeddinggemma-300m`, 768-dim, asymmetric query/document prompts, `hash` placeholder kept for tests), MCP query path now embeds queries instead of sending raw text, collection dim follows `MUNINN_EMBEDDING_DIM`. Remaining: stand up Qdrant, `pip install -e '.[embeddings]'`, run `scripts/reconcile-vector-index.py`, then the recall smoke test settles the model sub-decision.*
 
 ## Parallel with v1 (do while ingest is running)
 

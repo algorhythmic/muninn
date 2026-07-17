@@ -54,6 +54,18 @@ def ensure_collection(
 
     existing = {c.name for c in client.get_collections().collections}
     if collection_name in existing:
+        try:
+            size = client.get_collection(collection_name).config.params.vectors.size
+            if size != vector_dim:
+                logger.warning(
+                    "Collection '%s' has vector dim %s but config wants %d — "
+                    "recreate the collection or set MUNINN_EMBEDDING_DIM to match",
+                    collection_name,
+                    size,
+                    vector_dim,
+                )
+        except Exception:  # noqa: BLE001 — dim check is advisory only
+            pass
         return
     client.create_collection(
         collection_name=collection_name,

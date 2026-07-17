@@ -51,19 +51,26 @@ def semantic_search(
     query: str,
     limit: int = 10,
     db_path: str | Path | None = None,
+    client=None,
 ) -> str:
     """Search bookmarks by semantic similarity using Qdrant.
 
-    Falls back to FTS if Qdrant is unavailable or empty. Result rows are
-    hydrated from SQLite so the schema is canonical.
+    The query is embedded locally with the same model (and asymmetric
+    query prompt) used to index documents. Falls back to FTS if the
+    embedding backend or Qdrant is unavailable or returns nothing.
+    Result rows are hydrated from SQLite so the schema is canonical.
     """
     try:
-        from qdrant_client import QdrantClient
+        from muninn.vector.embed import embed_query
 
-        client = QdrantClient(url=QDRANT_URL)
+        vector = embed_query(query)
+        if client is None:
+            from qdrant_client import QdrantClient
+
+            client = QdrantClient(url=QDRANT_URL)
         results = client.query_points(
             collection_name=QDRANT_COLLECTION,
-            query=query,
+            query=vector,
             limit=limit,
         )
         ids_with_scores: list[tuple[int, float]] = []
