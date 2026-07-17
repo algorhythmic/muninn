@@ -35,7 +35,7 @@ CLI: `muninn ingest|scrape|enrich|synthesize|triage|status|deep-pass|export|time
 
 ## Known gaps (audited 2026-07-16 — verify before trusting, fix opportunistically)
 
-1. Semantic search is implemented but unproven: real embeddings (EmbeddingGemma via `muninn[embeddings]` extra) and the query-path fix landed 2026-07-16, but the extra isn't installed in any environment, Qdrant isn't stood up, and recall is untested (roadmap smoke test). Note `google/embeddinggemma-300m` is HF-gated — accept the license + `hf auth login`, or set `MUNINN_EMBEDDING_MODEL` to an ungated 768-dim model.
+1. Haiku prompt caching never hits (0% on the 58-call smoke run — the shared prefix is likely below the model's minimum cacheable token count). Investigate before the ~39k-call bulk enrichment run; cost impact is modest at Haiku prices but nonzero.
 2. Vault "Related" links come from era/tag heuristics, not `cross_references` (SPEC wants bidirectional model-produced refs) — revisit once deep passes populate that table.
 3. Synthesis container launches interactive `claude` but never feeds it the task JSON; `task-input.schema.json` rejects the orchestrator's own `attempt` field. (Phase 4 — don't fix ahead of the roadmap.)
 4. No robots.txt respect in the live scraper.

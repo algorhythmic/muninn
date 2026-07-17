@@ -47,7 +47,7 @@ Items that must be done to ship v1. Nothing in later sections starts until these
 
 ## Parallel with v1 (do while ingest is running)
 
-- [ ] **Smoke-test retrieval.** Seed ~100 bookmarks. Query Qdrant directly with representative questions. Tune embedding choice and chunk size if recall is poor.
+- [x] **Smoke-test retrieval.** *Done 2026-07-16: newest 100 bookmarks scraped (`--limit`), 58 enriched + indexed (42 were auth-walled dashboards or partial extractions), recall verified through the MCP search path — topical queries hit at 0.3–0.5 cosine, off-topic control at ~0.1. **Embedding sub-decision resolved: EmbeddingGemma-300m confirmed.*** Seed ~100 bookmarks. Query Qdrant directly with representative questions. Tune embedding choice and chunk size if recall is poor.
 - [ ] **Populate `wiki/projects/` manually.** *Partial 2026-07-16: `muninn`, `saga`, `huginn`, `homelab` drafted from repo docs (verify `saga`'s state — sourced from April-vendored docs); `nexus` and `esp32-surveillance` are stubs awaiting operator content.* One markdown file per active project: `saga.md`, `muninn.md`, `nexus.md`, `huginn.md`, `homelab.md`, `esp32-surveillance.md`. Each ~200-400 words: current status, architecture summary, phase, open questions, links to the source repo or design docs. This is an hour or two of writing; it makes the MCP immediately useful for Claude sessions even before Bragi automates updates.
 - [x] **Git-initialize the vault.** *Done 2026-07-16: pushed to Gitea `david/muninn-vault` (private) with tag `v1-skeleton`.* Commit the full skeleton + seeded projects. Push to Gitea at `.18`. Tag `v1-skeleton`.
 - [x] **Write `wiki/index.md` initial version.** *Done 2026-07-16.* Manually, for v1. LLM auto-maintenance comes in Phase 2.
