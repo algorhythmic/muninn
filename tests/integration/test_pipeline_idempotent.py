@@ -268,6 +268,52 @@ class TestIdempotentRerun:
         assert stats.skipped_idempotent == 4
 
 
+class TestForceAndPromptVersion:
+    """`--force` bypasses the skip gate; `--prompt-version` re-keys the triple."""
+
+    @patch("muninn.enrich.pipeline.enrich_bookmark")
+    def test_force_reenriches_everything(
+        self, mock_enrich, seeded_db: sqlite3.Connection
+    ) -> None:
+        mock_enrich.side_effect = _mock_enrich_factory()
+        enrich_all(seeded_db, client=MagicMock(), qdrant=None)
+
+        mock_enrich.reset_mock()
+        stats = enrich_all(seeded_db, client=MagicMock(), qdrant=None, force=True)
+        assert stats.api_calls == 5
+        assert stats.skipped_idempotent == 0
+        # The rewrites must actually land (guards the FTS re-sync path).
+        assert stats.enriched == 5
+        assert stats.errors == 0
+
+    @patch("muninn.enrich.pipeline.enrich_bookmark")
+    def test_new_prompt_version_invalidates_and_is_recorded(
+        self, mock_enrich, seeded_db: sqlite3.Connection
+    ) -> None:
+        mock_enrich.side_effect = _mock_enrich_factory()
+        enrich_all(seeded_db, client=MagicMock(), qdrant=None)
+
+        mock_enrich.reset_mock()
+        stats = enrich_all(
+            seeded_db, client=MagicMock(), qdrant=None, prompt_version="per_bookmark_v2"
+        )
+        assert stats.api_calls == 5
+        assert stats.enriched == 5
+        assert stats.errors == 0
+        row = seeded_db.execute(
+            "SELECT enrichment_prompt_version FROM enriched WHERE bookmark_id = 1"
+        ).fetchone()
+        assert row["enrichment_prompt_version"] == "per_bookmark_v2"
+
+        # Re-running under the same new version is idempotent again.
+        mock_enrich.reset_mock()
+        stats2 = enrich_all(
+            seeded_db, client=MagicMock(), qdrant=None, prompt_version="per_bookmark_v2"
+        )
+        assert stats2.api_calls == 0
+        assert stats2.skipped_idempotent == 5
+
+
 class TestNotNullEnforcement:
     """SC: enrichment_model, enrichment_prompt_version, content_hash NOT NULL."""
 

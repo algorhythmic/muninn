@@ -10,8 +10,8 @@ import-time side effects.
 Subcommand layout matches the SPEC's pipeline order:
 
     muninn ingest <path>
-    muninn scrape [--pass live|at_capture|recent_archive|all]
-    muninn enrich [--force] [--prompt-version vN]
+    muninn scrape [--concurrency N]
+    muninn enrich [--dry-run] [--force] [--prompt-version vN]
     muninn synthesize era <era_label>
     muninn synthesize deep-pass <id> | --pending
     muninn synthesize analyze "<prompt>"
@@ -91,15 +91,17 @@ def scrape_cmd(ctx: click.Context, concurrency: int) -> None:
 
 @cli.command("enrich")
 @click.option("--dry-run", is_flag=True, help="Plan calls without invoking Anthropic API or Qdrant.")
+@click.option("--force", is_flag=True, help="Re-enrich even when the idempotency triple matches (burns tokens).")
+@click.option("--prompt-version", default=None, help="Override the enrichment prompt version (re-enriches everything under the new triple).")
 @click.pass_context
-def enrich_cmd(ctx: click.Context, dry_run: bool) -> None:
+def enrich_cmd(ctx: click.Context, dry_run: bool, force: bool, prompt_version: str | None) -> None:
     """Per-bookmark Haiku enrichment with idempotency by content_hash."""
     from muninn.db import connect  # lazy
     from muninn.enrich.pipeline import enrich_all  # lazy
 
     conn = connect(ctx.obj.get("db"))
     try:
-        stats = enrich_all(conn, dry_run=dry_run)
+        stats = enrich_all(conn, dry_run=dry_run, force=force, prompt_version=prompt_version)
     finally:
         conn.close()
     click.echo(f"Enrich complete: {stats}")

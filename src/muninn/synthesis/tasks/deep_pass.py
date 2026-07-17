@@ -10,7 +10,8 @@ Materials passed to the container:
 
 DB writes (in order, single transaction):
   1. UPDATE enriched SET summary, tags, entities, content_type, language,
-     word_count, key_quotes, deep_pass_requested=1, enrichment_model,
+     word_count, key_quotes, deep_pass_requested=0 (the request is now
+     served — clearing it drains the --pending queue), enrichment_model,
      enrichment_prompt_version, content_hash, enriched_at
   2. INSERT INTO cross_references with created_by='deep_pass' (skipped on
      UNIQUE conflict).
@@ -131,7 +132,7 @@ def write_output(
             bookmark_id, summary, tags, entities, content_type, language,
             word_count, key_quotes, deep_pass_requested,
             enrichment_model, enrichment_prompt_version, content_hash, enriched_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
         ON CONFLICT(bookmark_id) DO UPDATE SET
             summary                   = excluded.summary,
             tags                      = excluded.tags,
@@ -140,7 +141,7 @@ def write_output(
             language                  = excluded.language,
             word_count                = excluded.word_count,
             key_quotes                = excluded.key_quotes,
-            deep_pass_requested       = 1,
+            deep_pass_requested       = 0,
             enrichment_model          = excluded.enrichment_model,
             enrichment_prompt_version = excluded.enrichment_prompt_version,
             content_hash              = excluded.content_hash,

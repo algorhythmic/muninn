@@ -163,6 +163,7 @@ def _upsert_enriched_row(
     result: EnrichmentResult,
     content_hash: str,
     enriched_at: int,
+    prompt_version: str = PER_BOOKMARK_PROMPT_VERSION,
 ) -> None:
     """Write the ``enriched`` row + sync the contentless ``fts_bookmarks`` index.
 
@@ -205,7 +206,7 @@ def _upsert_enriched_row(
                 result.language,
                 word_count,
                 HAIKU_MODEL,
-                PER_BOOKMARK_PROMPT_VERSION,
+                prompt_version,
                 content_hash,
                 enriched_at,
             ),
@@ -235,17 +236,25 @@ def enrich_all(
     qdrant: "QdrantClient | None | str" = "auto",
     dry_run: bool = False,
     now: int | None = None,
+    force: bool = False,
+    prompt_version: str | None = None,
 ) -> EnrichmentStats:
     """Enrich every eligible bookmark; write ``enriched`` rows + Qdrant points.
 
     ``qdrant``: pass a client to inject one (tests), ``None`` to skip Qdrant
     writes entirely, or leave the sentinel ``"auto"`` to call
     ``get_client()`` and probe ``QDRANT_URL``.
+
+    ``force``: re-enrich even when the idempotency triple matches (burns
+    tokens; for prompt/model debugging).
+    ``prompt_version``: override ``PER_BOOKMARK_PROMPT_VERSION`` — becomes
+    part of the idempotency triple, so a new version re-enriches everything.
     """
     import time
 
     stats = EnrichmentStats()
     now_ts = now if now is not None else int(time.time())
+    pv = prompt_version or PER_BOOKMARK_PROMPT_VERSION
 
     if client is None and not dry_run:
         import anthropic
@@ -275,11 +284,11 @@ def enrich_all(
         content_hash = compute_content_hash(content_text)
         candidate = IdempotencyTriple(
             enrichment_model=HAIKU_MODEL,
-            enrichment_prompt_version=PER_BOOKMARK_PROMPT_VERSION,
+            enrichment_prompt_version=pv,
             content_hash=content_hash,
         )
 
-        if would_skip(conn, bookmark_id, candidate):
+        if not force and would_skip(conn, bookmark_id, candidate):
             stats.skipped_idempotent += 1
             logger.debug("Skipping bookmark %d (idempotent)", bookmark_id)
             continue
@@ -318,6 +327,7 @@ def enrich_all(
                 result=result,
                 content_hash=content_hash,
                 enriched_at=now_ts,
+                prompt_version=pv,
             )
             stats.enriched += 1
         except Exception as exc:  # noqa: BLE001

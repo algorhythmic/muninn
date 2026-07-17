@@ -1,10 +1,41 @@
-"""Environment-driven config: paths, model IDs, prompt versions."""
+"""Environment-driven config: paths, model IDs, prompt versions.
+
+A `.env` file at the repo root (or at $MUNINN_ENV_FILE) is loaded on import;
+real environment variables always win over file values.
+"""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def _load_dotenv(path: Path | None = None) -> None:
+    """Minimal KEY=VALUE loader — no dependency, no interpolation.
+
+    Lines starting with '#' and lines without '=' are ignored. Values may be
+    single- or double-quoted. Existing environment variables are never
+    overwritten.
+    """
+    p = path or Path(__file__).resolve().parents[2] / ".env"
+    if not p.is_file():
+        return
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] in "'\"" and value.endswith(value[0]):
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_env_file = os.environ.get("MUNINN_ENV_FILE")
+_load_dotenv(Path(_env_file) if _env_file else None)
 
 
 def _env_path(var: str, default: Path) -> Path:

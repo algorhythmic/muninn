@@ -374,7 +374,8 @@ class TestDeepPassOrchestration:
         cur.execute("SELECT summary, key_quotes, deep_pass_requested FROM enriched WHERE bookmark_id=1")
         row = cur.fetchone()
         assert row is not None
-        assert row["deep_pass_requested"] == 1
+        # A served request is cleared so `synthesize deep-pass --pending` drains.
+        assert row["deep_pass_requested"] == 0
         assert "verbatim quote from source" in row["key_quotes"]
 
         cur.execute(

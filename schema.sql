@@ -159,12 +159,14 @@ CREATE TABLE synthesis_runs (
 CREATE INDEX idx_synthesis_runs_status ON synthesis_runs (status);
 
 -- ── fts_bookmarks ──────────────────────────────────────────────────
--- Contentless FTS5 index. Application-layer sync (no triggers); rowid
--- is bookmark_id.
+-- Regular (content-storing) FTS5 index. Application-layer sync (no
+-- triggers); rowid is bookmark_id. NOT contentless: contentless tables
+-- reject the DELETE that re-enrichment needs, and the newer
+-- contentless_delete=1 option breaks DuckDB's sqlite attach. Duplicated
+-- text is an acceptable cost at personal-corpus scale.
 CREATE VIRTUAL TABLE fts_bookmarks USING fts5 (
     title,
     summary,
     content_text,
-    tags,
-    content=''
+    tags
 );
