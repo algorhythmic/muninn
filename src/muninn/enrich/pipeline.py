@@ -35,6 +35,7 @@ from muninn.config import HAIKU_MODEL, PER_BOOKMARK_PROMPT_VERSION
 from muninn.db import transaction
 from muninn.enrich.haiku import (
     EnrichmentResult,
+    _load_system_prompt,
     build_embedding_text,
     enrich_bookmark,
 )
@@ -255,6 +256,8 @@ def enrich_all(
     stats = EnrichmentStats()
     now_ts = now if now is not None else int(time.time())
     pv = prompt_version or PER_BOOKMARK_PROMPT_VERSION
+    # Fail fast on an unknown prompt version instead of erroring every row.
+    _load_system_prompt(pv)
 
     if client is None and not dry_run:
         import anthropic
@@ -306,7 +309,9 @@ def enrich_all(
 
         # Haiku call.
         try:
-            result = enrich_bookmark(title, content_text, client)
+            result = enrich_bookmark(
+                title, content_text, client, prompt_version=pv
+            )
             stats.api_calls += 1
             if result.cache_hit:
                 stats.cache_hits += 1

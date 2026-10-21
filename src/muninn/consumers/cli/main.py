@@ -11,7 +11,7 @@ Subcommand layout matches the SPEC's pipeline order:
 
     muninn ingest <path>
     muninn scrape [--concurrency N]
-    muninn enrich [--dry-run] [--force] [--prompt-version vN]
+    muninn enrich [--dry-run] [--force] [--prompt-version per_bookmark_vN]
     muninn synthesize era <era_label>
     muninn synthesize deep-pass <id> | --pending
     muninn synthesize analyze "<prompt>"
@@ -98,7 +98,7 @@ def scrape_cmd(ctx: click.Context, concurrency: int, limit: int | None) -> None:
 @cli.command("enrich")
 @click.option("--dry-run", is_flag=True, help="Plan calls without invoking Anthropic API or Qdrant.")
 @click.option("--force", is_flag=True, help="Re-enrich even when the idempotency triple matches (burns tokens).")
-@click.option("--prompt-version", default=None, help="Override the enrichment prompt version (re-enriches everything under the new triple).")
+@click.option("--prompt-version", default=None, help="Override the enrichment prompt version: a prompt file stem such as per_bookmark_v2 (re-enriches everything under the new triple).")
 @click.pass_context
 def enrich_cmd(ctx: click.Context, dry_run: bool, force: bool, prompt_version: str | None) -> None:
     """Per-bookmark Haiku enrichment with idempotency by content_hash."""
@@ -108,6 +108,8 @@ def enrich_cmd(ctx: click.Context, dry_run: bool, force: bool, prompt_version: s
     conn = connect(ctx.obj.get("db"))
     try:
         stats = enrich_all(conn, dry_run=dry_run, force=force, prompt_version=prompt_version)
+    except FileNotFoundError as exc:
+        raise click.ClickException(f"Unknown prompt version {prompt_version!r}: {exc}") from exc
     finally:
         conn.close()
     click.echo(f"Enrich complete: {stats}")
