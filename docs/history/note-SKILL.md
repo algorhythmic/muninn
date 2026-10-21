@@ -3,6 +3,11 @@ name: note
 description: Persist the current work session into the Muninn vault as a Skald Protocol session page, and upsert the touched project pages. Use when the operator invokes /note, asks to "note this session", "write this up", "persist a summary", or when a substantial work session is clearly wrapping up and its outcome should be recorded. Not for general note-taking, not for writing docs inside project repos, and never inside Saga agent containers (Bragi owns those sessions).
 ---
 
+> **Status: retired 2026-10-21 by ADR-011.** The `/note` session-page skill is no longer
+> part of muninn; do not install it. Session recall is expected to come from the standalone
+> Skald archive (a possible future muninn source). Kept for history only.
+
+
 # /note — session skald
 
 Install at `~/.claude/skills/note/SKILL.md` on the homelab VM (user-level, so it

@@ -1,12 +1,22 @@
 # Muninn — Specification
 
-Working spec doc. Decisions are pinned here as we settle them; open questions stay in `MUNINN.MD` until resolved.
+Working spec doc. Decisions are pinned here as we settle them; open questions stay in `docs/history/MUNINN.MD` until resolved.
+
+> **Amended 2026-10-21 by ADR-008 – ADR-015** ([`docs/muninn-decisions.md`](docs/muninn-decisions.md)). Where this spec and an ADR disagree, the ADR wins. Changes in brief:
+>
+> - **Scope:** v1 is X bookmarks first, and browser bookmarks are v1.1 (ADR-012). Muninn is a standalone tool with no Saga runtime or build dependency (ADR-010).
+> - **State:** muninn holds no canonical project or session state (ADR-011). SQLite is canonical for the *captured lane* only (ADR-008). Explicit migrations replace "drop DB, re-ingest" (ADR-009).
+> - **Synthesis** runs through a harness-agnostic task/result contract, not the Saga-style subscription container (ADR-013).
+> - **Retrieval** sits behind a pluggable interface (ADR-014).
+> - **Huginn** is deferred (ADR-015).
+>
+> Sections superseded wholesale carry their own banner below.
 
 ---
 
 ## Vision (long-term)
 
-Muninn is a **digital-footprint aggregator**: a clean, normalized, queryable record of the services and content that have shaped the user's digital life over time. Bookmarks are the v1 ingest because they're the largest and oldest corpus, but the long-term scope explicitly includes:
+Muninn is a **digital-footprint aggregator**: a clean, normalized, queryable record of the services and content that have shaped the user's digital life over time. Saved material is the core. v1 ingests X bookmarks (ADR-012, small and easy to test), and browser bookmarks follow as v1.1 (the largest and oldest corpus). The long-term scope explicitly includes:
 
 - Notes systems: Evernote, Apple Notes, Obsidian
 - Media: YouTube (history, likes, subscriptions), Spotify, SoundCloud
@@ -18,20 +28,18 @@ This vision shapes the v1 schema even though v1 only ingests one source: the sch
 
 ## Constraints (binding on all v1 work)
 
-These are the assumptions every dvergr should treat as fixed. Decisions that contradict them require explicit spec amendment, not silent override.
+These are the assumptions every implementer should treat as fixed. Decisions that contradict them require explicit spec amendment, not silent override.
 
 ### Scope and scale
 - **Single user, single machine** at v1. No multi-tenant concerns, no shared state, no concurrent-user contention.
 - **Personal corpus, never published.** Privacy is binding throughout — see "Sensitive data" constraints below.
-- **v1 corpus size assumption:** ~10k bookmarks. Architecture choices (single SQLite file, async worker pool for scraping, single Opus instance for synthesis) are calibrated for this scale. v2 multi-source ingest may push to 100k+ which triggers parallel-dvergr re-evaluation for synthesis specifically.
-- **v1 ingests bookmarks only.** Other sources (Evernote, Apple Notes, Obsidian, YouTube, Spotify, SoundCloud) are v2+ adapters into the same source-agnostic schema. Don't build them in v1.
+- **v1 corpus size assumption:** ~10k bookmarks. Architecture choices (single SQLite file, async worker pool for scraping, single Opus instance for synthesis) are calibrated for this scale. v2 multi-source ingest may push to 100k+ which triggers re-evaluation of parallel synthesis specifically.
+- **v1 ingests one source at a time.** ~~v1 ingests bookmarks only.~~ *Amended by ADR-012:* v1 is the operator's **X bookmarks** plus their linked articles and repositories. Browser bookmarks (`bookmarks.html`) are v1.1. Other sources (Evernote, Apple Notes, Obsidian, YouTube, Spotify, SoundCloud, Reddit, GitHub) are later adapters into the same source-agnostic schema.
 
 ### LLM and authentication
-- **Anthropic API key required** for bulk Haiku enrichment (`ANTHROPIC_API_KEY` env var).
-- **Anthropic Max subscription required** for synthesis tier (Opus 4.6 + 1M context). Subscription is consumed via the existing `saga-claude-credentials` Docker named volume — Muninn does not manage the subscription auth.
-- **Saga Phase 1+2 infrastructure must be present on the host machine at runtime** — credentials volume, keepalive cron, Trail of Bits devcontainer base image. These are **not** Muninn's responsibility to provision; if absent, Muninn fails loudly at synthesis-stage startup.
-- **Saga Phase 3 (Odin spec decomposition + multi-dvergr launch) is NOT required at runtime.** Phase 3 may be used at *implementation* time to decompose this spec into dvergar streams (this is the first such use), but Muninn's runtime architecture does not depend on Phase 3 features.
-- **`claude -p` and `CLAUDE_CODE_OAUTH_TOKEN` are off-limits for the synthesis path** — both silently force API billing per SAGA_ARCHITECTURE.MD:141. Subscription-mode synthesis requires the mounted-credentials-volume + interactive-mode pattern.
+- **Anthropic API key required** for bulk enrichment and suitability assessment (`ANTHROPIC_API_KEY` env var).
+- **No Saga infrastructure is required at runtime, build or test time** (ADR-010). Earlier versions of this spec required a Max subscription via Saga's `saga-claude-credentials` volume, its keepalive cron and its devcontainer base image, and banned `claude -p` for synthesis. Those rules are superseded by ADR-013: synthesis uses a harness-agnostic task-file → result-file contract, and the default runner is a budgeted direct API call. Muninn encodes no rule about which harness or billing mode an operator-chosen runner uses.
+- **X API access** (ADR-012) uses OAuth 2.0 user-context tokens, which the operator provisions. Tokens never enter the repo, logs or exports.
 
 ### Networking and scraping
 - **HTTP-only scraping in v1.** No Playwright, no headless browser, no JavaScript execution, no screenshots. Deferred to v1.5/v2.
@@ -46,8 +54,15 @@ These are the assumptions every dvergr should treat as fixed. Decisions that con
 - **No log statement may emit a raw URL.** Logging passes through `redact_url_for_log()` first.
 
 ### Storage and compute
-- **SQLite is the single canonical store.** Pipeline writes go through SQLite only. DuckDB attaches read-only as the analytics engine.
-- **No Alembic-style migration framework in v1.** Recovery from schema change is "drop DB, re-ingest" — `raw/` is the source of truth and the pipeline is idempotent.
+- **SQLite is the canonical store for the captured lane** (ADR-008): every bookmark source, its scrapes, enrichments and assessments. Pipeline writes go through SQLite only. DuckDB attaches read-only as the analytics engine. Authored-lane vault pages are canonical in git and never mirrored into SQLite.
+- **Explicit migrations** (ADR-009), replacing ~~"drop DB, re-ingest"~~:
+  - numbered `schemas/sql/NNN_*.sql` files
+  - `PRAGMA user_version` as the applied version
+  - backup before migrating
+  - an explicit `muninn db migrate`
+  - additive-only changes to existing tables
+
+  Paid enrichments, archive captures and evidence revisions are not reproducible from `raw/`.
 - **Qdrant runs on the homelab LXC at `.19`**, no auth in v1 (homelab-internal). Reassessable at first MCP integration.
 - **Vector store choice (Qdrant vs. DuckDB-vss) is reassessable at first MCP integration**, not locked.
 - **Embedding model is deferred** to first MCP integration; spec doesn't pin one yet.
@@ -60,25 +75,21 @@ These are the assumptions every dvergr should treat as fixed. Decisions that con
 
 ## External services and secrets registry
 
-Exhaustive list of every external dependency, what provisions its secret, and what happens when it's missing. Heimdall's future `secrets:` field (per FEATURE-SECRETS-MANAGEMENT) should provision these; for v1, manual workarounds are acceptable where noted.
+Exhaustive list of every external dependency, what provisions its secret, and what happens when it's missing. Muninn manages its own secrets (`.env`, or a sops/age-encrypted file the operator maintains outside the repo); no external provisioning service is assumed.
 
 | Service | Purpose | Secret kind | Provisioning | Failure mode |
 |---|---|---|---|---|
 | **Anthropic API** | Bulk Haiku enrichment per bookmark; prompt caching for cost control | `ANTHROPIC_API_KEY` env var | User sets in `.env`; `src/muninn/config.py` reads at startup. **Manual workaround:** populate `.env` from a secrets file the user maintains outside the repo. | `muninn enrich` halts at startup with explicit "ANTHROPIC_API_KEY missing or invalid" message. No partial enrichment. |
-| **Anthropic Max (subscription)** | Synthesis container — Opus 4.6 + 1M context for era narratives, deep-passes, ad-hoc analysis | Docker named volume `saga-claude-credentials` containing `/home/vscode/.claude/.credentials.json` | One-time human bootstrap via Saga's `scripts/auth/bootstrap-credentials.sh` (lives in the Saga repo, not this one). Maintained by Saga's keepalive cron (refresh-token rotation every 4h). **Manual workaround:** ensure the volume exists before running any `muninn synthesize` command; if missing, Saga's bootstrap script must be re-run. | `muninn synthesize` exits with "synthesis credentials volume not found — see SAGA_SETUP.MD §5". |
+| ~~**Anthropic Max (subscription)**~~ | *Superseded by ADR-013.* The synthesis container and its `saga-claude-credentials` volume are being retired. Synthesis uses a task/result file contract, and its default runner is the Anthropic API (row above) with an explicit budget | — | — | — |
+| **X API** (ADR-012) | Syncing the operator's bookmarks (`GET /2/users/:id/bookmarks`) | OAuth 2.0 PKCE user-context access + refresh tokens (scopes `tweet.read users.read bookmark.read offline.access`) | Operator authorizes once; tokens are stored outside the repo with the newest refresh token persisted on every use. Pay-per-use credits with a console spending limit | `muninn ingest x` stops with an exhaustion or auth status. `usage-capped` is a hard stop, not a retry. Capture checkpoints survive for resume |
 | **Internet Archive (Wayback + CDX)** | At-capture and recent_archive scraper passes | None — public API. Identifying `User-Agent` required: `Muninn/v1 (+<contact-url>)`. Contact URL configurable via `MUNINN_CONTACT_URL` env var. | User sets `MUNINN_CONTACT_URL` in `.env` at first run; UA string is constructed in `src/muninn/scrape/client.py`. | Pass returns `scrape_status=network_error` or `no_archive`; pipeline continues per dead-link policy. Persistent IA outages surface in triage CLI. |
 | **Qdrant (homelab LXC `.19`)** | Vector embeddings storage keyed by `bookmark_id` | `QDRANT_URL` env var (e.g., `http://192.168.86.19:6333`); v1 no auth (homelab-internal) | User sets in `.env`; Qdrant service must be running on the LXC. **Manual workaround:** if Qdrant is unavailable at enrich time, SQLite write still happens; `scripts/reconcile-vector-index.py` backfills missing embeddings on next run. | Embedding write fails with logged warning; SQLite enrich row still persists; reconcile script catches up later. |
 | **`domain_policy.yml`** | Per-domain `content_visible` policy (sensitive data handling) | Plain YAML config file, committed to repo (with sensitive entries user-edited but un-pushed) | User-edited at repo root | If file missing or malformed: ingest aborts with explicit error. **Never silently default to "scrape everything"** — the safety property requires the file's presence to be acknowledged. |
 | **`.env` file** | All env vars above | dotenv format | User copies `.env.example` and fills in values | Pipeline aborts at startup with which-var-missing message. |
 
-### Notes for heimdall provisioning (future)
+### Secrets provisioning
 
-When FEATURE-SECRETS-MANAGEMENT Tier 1 lands, the heimdall `secrets:` field should be able to provision:
-- `ANTHROPIC_API_KEY` from a sops-encrypted secrets file
-- `QDRANT_URL` and `MUNINN_CONTACT_URL` from the same source
-- The `saga-claude-credentials` volume reference (volume already exists; just needs binding)
-
-Until then, the `.env` + manual volume reference is the workaround.
+*Replaced 2026-10-21.* This section used to plan provisioning through "heimdall". That was the legacy name of Saga's launcher, which muninn no longer depends on (ADR-010). The standalone Heimdall tool does not provision secrets. Muninn reads `.env`, and real environment variables win over it. Operators who want encryption at rest keep a sops- or age-encrypted file outside the repo and render `.env` from it. Private non-secret artifacts, such as X API qualification results, go to dotprivate (`.private/muninn/`), not to this repo.
 
 ---
 
@@ -139,9 +150,12 @@ v1 implementation decomposes into **5 streams**. Each stream owns specific table
 **Owns (writes):** `eras`, `analyses`, `cross_references`, `synthesis_runs`; updates `enriched` (deep-pass overwrites + `key_quotes` column).
 **Reads:** `bookmarks`, `enriched`, `scrape_results`.
 **Modules:** `src/muninn/synthesis/`, `containers/synthesis/`, `scripts/launch-synthesis.sh`, `schemas/json/`.
-**Depends on:** Stream 3, plus the **Saga Phase 1+2 infrastructure** (credentials volume, keepalive cron) being present on the host.
+**Depends on:** Stream 3. *(Originally also on Saga Phase 1+2 infrastructure, a dependency removed by ADR-010/ADR-013. The synthesis runner is now a task/result contract.)*
 
 **Success criteria:**
+
+> **Superseded (2026-10-21, ADR-013):** criteria 1–2 belong to the frozen subscription container and no longer apply. The runner's acceptance criteria will come with the task/result contract.
+
 1. `containers/synthesis/Dockerfile` builds successfully; resulting image extends Trail of Bits devcontainer with the schemas and persona baked in.
 2. Container starts with `saga-claude-credentials` volume mounted read-only and `/status` (run inside the container) reports `Login method: Claude Max Account` (subscription mode confirmed, NOT API mode).
 3. `muninn synthesize era <era_label>` produces a JSON output that validates against `schemas/json/era-narrative.schema.json`. The `eras` row gets written with all required fields populated; `enrichment_model` records the resolved Opus version.
@@ -177,6 +191,8 @@ v1 implementation decomposes into **5 streams**. Each stream owns specific table
 - `enrichment_prompt_version` naming convention (`<task>_v<N>` matching the file name in `prompts/`).
 
 ### Decomposition note for Odin
+
+> *Historical (April 2026).* This note was written for Saga's Phase 3 decomposition. It does not describe current development practice (ADR-010).
 
 Streams 1–3 are fully sequential (Stream N depends on Stream N-1's success criteria). Streams 4 and 5 can begin in parallel once Stream 3 starts but cannot complete until Stream 3 is done. Total sequencing:
 
@@ -220,16 +236,16 @@ Consolidated record of design decisions taken AND the alternatives explicitly re
 - **Vault inside this repo.** Rejected: vault is data with its own git lifecycle; mixing it with the build pipeline conflates tool with data. Compiled vault lives in its own Gitea repo.
 - **Compiled vault and personal vault as the same vault.** Rejected (hard rule): ingest loops, authorship ambiguity. Two vaults, sentinel file enforces.
 - **DuckDB-vss replacing Qdrant for v1 vector store.** Rejected at v1 (revisable): Qdrant is more mature, slot already allocated on `.19`, MCP wants production-shaped backend. Reassessable at first MCP integration.
-- **Append-mode `scrape_results` history.** Rejected at v1: adds complexity. `scrape_results` is upsert-by-`(bookmark_id, pass)`; if attempt history matters later, a separate `scrape_attempts` log table can be added non-breakingly.
+- **Append-mode `scrape_results` history.** *Amended by ADR-009: `scrape_results` stays upsert, and an append-only `scrape_history` table is added alongside.* Rejected at v1: adds complexity. `scrape_results` is upsert-by-`(bookmark_id, pass)`; if attempt history matters later, a separate `scrape_attempts` log table can be added non-breakingly.
 - **Tombstone-on-removal for un-bookmark events.** Rejected at v1: hard delete is simpler. Tombstones become interesting at v2 when the digital-footprint vision (where event removal carries meaning) actually matters.
-- **Alembic-style migration framework at v1.** Rejected: overkill when re-ingest is the recovery path and `raw/` is the source of truth.
+- **Alembic-style migration framework at v1.** *Still rejected; ADR-009 adds a small built-in migrator instead (re-ingest is no longer an acceptable recovery path).* Rejected: overkill when re-ingest is the recovery path and `raw/` is the source of truth.
 - **SQL-trigger FTS5 sync.** Rejected: multi-table denormalization triggers are notoriously fiddly; application-layer sync in the same transaction is cleaner.
 
 ### LLM execution
 
-- **`claude -p` for synthesis.** Rejected: silently forces API billing per SAGA_ARCHITECTURE.MD:141, defeating the whole point of subscription-mode synthesis. Only the mounted-credentials-volume + interactive-mode pattern preserves subscription billing.
-- **`CLAUDE_CODE_OAUTH_TOKEN` for synthesis.** Rejected for the same reason — silently forces API mode.
-- **Multi-instance synthesis (parallel dvergar) at v1.** Rejected: total synthesis volume is small (dozens of era narratives, sparse deep-passes). Single Opus-1M instance fits within Max-plan rate windows. Saga's parallel-dvergr pattern earns its keep at v2 scale.
+- **`claude -p` for synthesis.** *Historical; superseded by ADR-013, which encodes no harness or billing rule.* Rejected: silently forces API billing per Saga's April 2026 architecture notes, defeating the whole point of subscription-mode synthesis. Only the mounted-credentials-volume + interactive-mode pattern preserves subscription billing.
+- **`CLAUDE_CODE_OAUTH_TOKEN` for synthesis.** *Historical (ADR-013).* Rejected for the same reason — silently forces API mode.
+- **Multi-instance synthesis (parallel dvergar) at v1.** *Historical (ADR-010, ADR-013).* Rejected: total synthesis volume is small (dozens of era narratives, sparse deep-passes). Single Opus-1M instance fits within Max-plan rate windows. Saga's parallel-dvergr pattern earns its keep at v2 scale.
 - **Three-tier model split** (Haiku → Sonnet → Opus). Rejected in favor of two-tier (Haiku → Opus-1M) once 1M context made it unnecessary to split synthesis between Sonnet (eras) and Opus (deep-passes). Fewer model-version-drift surfaces; simpler tier boundary.
 - **Silent fallback to API Opus on subscription cap-hit.** Rejected: surprise charges are worse than an explicit "resume after cooldown" message. Fail loudly; manual `--llm-mode=api-only` override exists for emergencies.
 
@@ -283,7 +299,7 @@ Defaults, revisable per-component if a concrete need surfaces:
 
 The "vault" has two roles that must be separate vaults to avoid loops and authorship confusion:
 
-- **Compiled vault (Muninn output, Layer 1 of the README):** Bragi-style, one markdown page per `enriched/` row. Machine-generated and regeneratable. Lives in its own Gitea repo, separate from this repo. User browses it in Obsidian but treats it as derived data — hand-edits are a v2 question (round-tripping user-added tags/notes back into `enriched/` is non-trivial).
+- **Compiled vault (Muninn output, Layer 1 of the README):** one markdown page per `enriched/` row. Machine-generated and regeneratable. Lives in its own Gitea repo, separate from this repo. User browses it in Obsidian but treats it as derived data — hand-edits are a v2 question (round-tripping user-added tags/notes back into `enriched/` is non-trivial).
 - **Personal vault (future Muninn input):** the user's own hand-authored Obsidian notes. Read by the `obsidian` ingest adapter when that adapter ships. Lives wherever the user keeps their personal vault — Muninn does not manage it.
 
 **Hard constraint on the future `obsidian` ingest adapter:** it must refuse to ingest from the compiled vault. Enforce by sentinel file (e.g., `.muninn-compiled-vault` at the vault root) that the adapter checks for and aborts on.
@@ -444,11 +460,17 @@ Outputs per bookmark: `summary`, `tags[]`, `entities[]`, `content_type`, `langua
 
 ### Tier 2 — Synthesis: Opus 4.6 + 1M context via subscription-mode container
 
+> **Superseded by ADR-013 (2026-10-21).** The text below records the April 2026 design and is kept for rationale. It was never made to work: the container never received its task, and its base image was unpinned.
+>
+> Replacement: muninn writes a validated task file and validates and ingests a result file, using the same `schemas/json/*` I/O schemas. The default runner is a budgeted direct API call. Any operator-chosen harness may run the task instead.
+>
+> The premise below that "`claude -p` forces API billing" is an unverified April 2026 observation and is not encoded in muninn (ADR-013).
+
 Per-era narratives, flagged deep-passes, and ad-hoc cross-corpus analysis. Lower volume, much higher synthesis demand, and benefits from very large context (an era + its neighbors as context, or a topic-cluster spanning years).
 
 #### Auth and execution mechanics (grounded in Saga's pattern)
 
-- **Subscription billing requires interactive mode, not `claude -p`.** Per SAGA_ARCHITECTURE.MD:141, `CLAUDE_CODE_OAUTH_TOKEN` silently forces API billing — so `-p` mode and any env-var-based auth are off the table for subscription-billed work. The only subscription-mode path is Saga's: a container with the `saga-claude-credentials` Docker named volume mounted at `/home/vscode/.claude`, running `claude --dangerously-skip-permissions` in a tmux session.
+- **Subscription billing requires interactive mode, not `claude -p`.** Per Saga's April 2026 architecture notes, `CLAUDE_CODE_OAUTH_TOKEN` silently forces API billing — so `-p` mode and any env-var-based auth are off the table for subscription-billed work. The only subscription-mode path is Saga's: a container with the `saga-claude-credentials` Docker named volume mounted at `/home/vscode/.claude`, running `claude --dangerously-skip-permissions` in a tmux session.
 - **Muninn's synthesis container is a sibling of dvergr**, not a consumer of Odin/heimdall:
   - Base image: Trail of Bits devcontainer (same as dvergr), with iptables extended to whitelist `api.anthropic.com` (already in base) and `web.archive.org` / `archive.org` (Muninn-specific, only needed if synthesis pass re-fetches archived content).
   - Mount: `saga-claude-credentials:/home/vscode/.claude:ro` (read-only — synthesis containers don't need to mutate auth state).
@@ -471,6 +493,8 @@ Per-era narratives, flagged deep-passes, and ad-hoc cross-corpus analysis. Lower
 - **Model version drift on subscription side:** `enrichment_model` column records the resolved Opus version (e.g., `claude-opus-4-6`). When subscription's Opus rev's, version-drift is visible per-row. Era narratives can be flagged for regeneration when their `enrichment_model` is older than the current subscription version.
 
 ### What this means for the Saga dependency
+
+> *Historical.* Superseded by ADR-010: muninn has no Saga dependency.
 
 Muninn depends on Saga **infrastructure (Phase 1+2, already done as of 2026-04-13)** — credentials volume, keepalive cron, Trail of Bits base image, the dvergr container-launch pattern. Muninn does **not** depend on Saga **orchestration (Phase 3, not yet shipped)** — Odin's spec-decomposition and multi-dvergr launch machinery aren't needed at v1's single-instance synthesis volume.
 
@@ -998,7 +1022,6 @@ Modern `src/`-layout Python package for code, with non-Python artifacts (Docker,
 muninn/
 ├── README.md                       # public framing
 ├── SPEC.md                         # this document — authoritative spec
-├── MUNINN.MD                       # original brainstorming history (kept for context)
 ├── CLAUDE.md                       # guidance for Claude Code sessions developing this repo
 ├── pyproject.toml                  # uv-managed; Python ≥3.12
 ├── uv.lock
@@ -1125,11 +1148,9 @@ muninn/
 │       ├── bookmarks_redaction.html    # exports containing tokens, magic links, webhooks for sanitize tests
 │       └── readability_pages/          # captured HTML for extraction tests
 │
-├── docs/                           # already exists
-│   ├── SAGA_ARCHITECTURE.MD
-│   ├── SAGA_INSIGHTS_1.MD
-│   ├── SAGA_INSIGHTS_2.MD
-│   └── SAGA_SETUP.MD
+├── docs/                           # ADRs, roadmap, research-intake/; history/ holds retired designs
+│   │                               #   (MUNINN.MD brainstorm, rawspec.md, skald-protocol, huginn-spec).
+│   │                               #   Vendored Saga docs were removed 2026-10-21 (kept privately).
 │
 ├── raw/                            # GITIGNORED — user's bookmark HTML. Override with MUNINN_RAW_DIR.
 │   └── (bookmarks.html, dated re-exports)
@@ -1440,7 +1461,9 @@ PRAGMA temp_store = MEMORY;
 
 ### Migration story
 
-**No migration framework in v1.** The DB is a derived artifact — `raw/bookmarks.html` is the source of truth, the pipeline is idempotent, and recovery from any schema change is "drop the DB, re-ingest." Alembic-style migrations are overkill at this stage. When v2 multi-source ingest lands, schema changes that genuinely need preservation (e.g., user-added tags or `deep_pass_requested` flags that aren't reproducible from raw/) will force the migration question — handle it then.
+> **Superseded by ADR-009 (2026-10-21):** use explicit numbered migrations with `PRAGMA user_version`, backup-before-migrate and `muninn db migrate`. The question this paragraph deferred to multi-source ingest has arrived with X bookmarks.
+
+~~**No migration framework in v1.**~~ The DB is a derived artifact — `raw/bookmarks.html` is the source of truth, the pipeline is idempotent, and recovery from any schema change is "drop the DB, re-ingest." Alembic-style migrations are overkill at this stage. When v2 multi-source ingest lands, schema changes that genuinely need preservation (e.g., user-added tags or `deep_pass_requested` flags that aren't reproducible from raw/) will force the migration question — handle it then.
 
 ### Bookmark removal on re-ingest
 
