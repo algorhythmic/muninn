@@ -3,7 +3,10 @@
 The container runs `claude --dangerously-skip-permissions` inside a tmux
 session against the saga-claude-credentials volume (subscription billing).
 We never use `claude -p` and never set CLAUDE_CODE_OAUTH_TOKEN — both
-silently force API billing (see docs/SAGA_ARCHITECTURE.MD line 141).
+were found (April 2026) to force API billing; that finding is under re-test.
+
+FROZEN: this container path is kept only until the harness-agnostic
+synthesis contract (ADR-013) replaces it. Do not extend it.
 
 This module is responsible for:
 1. `docker run` invocation with the credentials volume mounted read-only

@@ -3,8 +3,11 @@
 # tmux session against the saga-claude-credentials volume.
 #
 # Hard rule: this script uses `claude --dangerously-skip-permissions`.
-# It does NOT use `claude -p`, which silently forces API billing
-# (see docs/SAGA_ARCHITECTURE.MD line 141).
+# It does NOT use `claude -p` (found in April 2026 to force API billing;
+# under re-test).
+#
+# FROZEN: kept only until the harness-agnostic synthesis contract (ADR-013)
+# replaces this container. Do not extend it.
 
 set -euo pipefail
 

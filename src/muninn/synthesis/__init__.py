@@ -11,8 +11,10 @@ JSON Schemas in `schemas/json/`, run a single self-correction retry on
 validation failure, and write to canonical tables on success.
 
 The container is invoked via `claude --dangerously-skip-permissions`,
-NEVER `claude -p` (which silently forces API billing — see
-docs/SAGA_ARCHITECTURE.MD line 141).
+NEVER `claude -p` (found in April 2026 to force API billing; under re-test).
+
+FROZEN: the container launch path is kept only until the harness-agnostic
+synthesis contract (ADR-013) replaces it. Do not extend it.
 """
 
 from muninn.synthesis.orchestrator import (
