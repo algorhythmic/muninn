@@ -479,3 +479,132 @@ def test_dry_run_applies_due_withdrawals_to_its_plan(fresh_db, tmp_path) -> None
 
     real = export_packets(conn, out, now=T0 + 200)
     assert real.written == [] and real.skipped == dry.skipped
+
+
+# ── Finding 5: rows sharing one item are assessed once ───────────────
+
+
+def _two_browser_rows_one_page(conn) -> None:
+    from muninn.consumers.packets import link_item_id
+    from tests.integration.intake_seed import Seeded
+
+    url = "https://example.com/article"
+    ids = [
+        conn.execute(
+            "INSERT INTO bookmarks (source, source_id, captured_at, title, url, domain, content_visible) "
+            "VALUES ('bookmarks_html', ?, ?, 'Synthetic', ?, 'example.com', 1)",
+            (f"sid{n}", T0 + n, url),
+        ).lastrowid
+        for n in range(2)
+    ]
+    conn.commit()
+    add_revision(conn, Seeded(ids[0], link_item_id(url)), "Synthetic retrieval article text.",
+                 retrieval_method="live", retrieved_at=T0 + 10)
+
+
+def _count(conn, table: str) -> int:
+    return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def test_rows_sharing_one_revision_make_one_paid_call(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    _two_browser_rows_one_page(conn)
+    profile = load_interest_profile(write_profile(tmp_path))
+    client = fake_client()
+    run = assess_suitability(conn, profile, client, model=MODEL, sources=("bookmarks_html",), now=T0 + 100)
+    assert client.messages.create.call_count == 1
+    assert [o.status for o in run.outcomes] == ["skipped_idempotent", "assessed"]
+    assert run.assessed == 1 and run.skipped_idempotent == 1 and run.planned == 1
+    assert (_count(conn, "usage_records"), _count(conn, "assessments")) == (1, 1)
+
+
+def test_a_write_conflict_still_records_the_paid_call(fresh_db, tmp_path, monkeypatch) -> None:
+    from muninn.enrich import suitability
+
+    conn = fresh_db
+    _post_with_link(conn)
+    seed_x_post(conn, "1900000000000000071", "Second synthetic post.", captured_at=T0 - 50, published_at=T0 - 100)
+    profile = load_interest_profile(write_profile(tmp_path))
+    assess_suitability(conn, profile, fake_client(), model=MODEL, now=T0 + 100)
+    assert (_count(conn, "usage_records"), _count(conn, "assessments")) == (2, 2)
+    # As if another run wrote the same keys between our check and our insert.
+    monkeypatch.setattr(suitability, "_assessment_exists", lambda *a, **k: False)
+    client = fake_client()
+    run = assess_suitability(conn, profile, client, model=MODEL, now=T0 + 200)
+    assert client.messages.create.call_count == 2  # the conflict did not abandon the rest of the plan
+    assert [o.status for o in run.outcomes] == ["skipped_idempotent", "skipped_idempotent"]
+    assert all(o.cost_micro_usd > 0 and "usage recorded" in o.detail for o in run.outcomes)
+    assert (_count(conn, "usage_records"), _count(conn, "assessments")) == (4, 2)
+
+
+# ── Finding 15: retries, failed calls and the token bound ─────────────
+
+
+def test_the_client_made_for_suitability_never_retries(monkeypatch) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    from muninn.enrich import suitability
+
+    made = {}
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=lambda **kw: made.update(kw) or "client"))
+    assert suitability._make_client() == "client" and made == {"max_retries": 0}
+
+
+class _StatusError(Exception):
+    status_code = 529
+
+
+class _ErrorWithUsage(Exception):
+    status_code = 500
+    body = {"usage": {"input_tokens": 1000, "output_tokens": 0}}
+
+
+def test_failed_calls_are_recorded_or_reserved(fresh_db, tmp_path) -> None:
+    from muninn.enrich.pricing import PRICES, cost_micro_usd
+
+    conn = fresh_db
+    for n, post_id in enumerate(("1900000000000000081", "1900000000000000082", "1900000000000000083")):
+        seed_x_post(conn, post_id, f"Synthetic post {n}.", captured_at=T0 - n, published_at=T0 - 100)
+    a, b, c = (f"x:post:{p}" for p in ("1900000000000000081", "1900000000000000082", "1900000000000000083"))
+    profile = load_interest_profile(write_profile(tmp_path))
+    client = fake_client({a: _ErrorWithUsage("billed"), b: _StatusError("overloaded"), c: TimeoutError("no answer")})
+    run = assess_suitability(conn, profile, client, model=MODEL, now=T0 + 100)
+    assert run.api_errors == 3 and run.assessed == 0
+    billed = cost_micro_usd(PRICES[MODEL], input_tokens=1000, output_tokens=0)
+    rows = conn.execute("SELECT cost_micro_usd, input_token_count, assessment_id FROM usage_records").fetchall()
+    assert [tuple(r) for r in rows] == [(billed, 1000, None)]  # only the error that reports usage
+    assert run.spent_micro_usd == billed
+    timeout = next(o for o in run.outcomes if o.item_id == c)
+    planned = assess_suitability(conn, profile, client, model=MODEL, dry_run=True)
+    worst_c = next(o.cost_micro_usd for o in planned.outcomes if o.item_id == c)
+    assert run.reserved_micro_usd == worst_c and timeout.status == "api_error"
+    assert run.summary()["reserved"] != "$0.0000"
+
+
+def test_reserved_worst_cases_count_against_the_budget(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    for n in range(3):
+        seed_x_post(conn, f"190000000000000009{n}", f"Synthetic post {n}.", captured_at=T0 - n, published_at=T0 - 100)
+    profile = load_interest_profile(write_profile(tmp_path))
+    worst = [o.cost_micro_usd for o in assess_suitability(conn, profile, fake_client(), model=MODEL,
+                                                          dry_run=True).outcomes]
+    client = fake_client(default=TimeoutError("no answer"))
+    run = assess_suitability(conn, profile, client, model=MODEL, max_cost_micro_usd=worst[0] + worst[1] + 1,
+                             now=T0)
+    assert client.messages.create.call_count == 2 and run.stopped == "budget"
+
+
+def test_worst_case_bounds_tokens_by_utf8_bytes(fresh_db, tmp_path) -> None:
+    from muninn.enrich.pricing import PRICES, worst_case_micro_usd
+    from muninn.enrich.suitability import MAX_OUTPUT_TOKENS
+
+    conn = fresh_db
+    text = "检索评估的合成说明。" * 200 + "🔍" * 300  # 3 and 4 bytes per character
+    seed_x_post(conn, "1900000000000000099", text, captured_at=T0, published_at=T0 - 100)
+    profile = load_interest_profile(write_profile(tmp_path))
+    run = assess_suitability(conn, profile, fake_client(), model=MODEL, dry_run=True)
+    (planned,) = run.outcomes
+    floor = worst_case_micro_usd(PRICES[MODEL], input_tokens=len(text.encode("utf-8")),
+                                 max_output_tokens=MAX_OUTPUT_TOKENS)
+    assert planned.cost_micro_usd > floor

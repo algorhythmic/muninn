@@ -28,9 +28,27 @@ Rules (contract ``muninn-research-intake`` §4.6, RI-01 §3):
   everything sent to the model (contract §9).
 * **Budget**: before each call the worst-case cost of that call is checked
   against what is left of ``max_cost_micro_usd``; the run stops cleanly
-  when it would not fit. Spend is measured from each response's
-  ``usage`` and written as a ``usage_records`` row (``cost_basis =
-  'estimated'``, from :mod:`muninn.enrich.pricing`).
+  when it would not fit. The worst case bounds input tokens by the UTF-8
+  byte length of the prompt (a token covers at least one byte, so this
+  holds for any script, CJK and emoji included) plus a fixed allowance for
+  message framing. Spend is measured from each response's ``usage`` and
+  written as a ``usage_records`` row (``cost_basis = 'estimated'``, from
+  :mod:`muninn.enrich.pricing`) in the same transaction as the assessment;
+  if that write fails (an identical assessment already stored), the usage
+  row is written on its own, so a paid call is always recorded.
+* **Retries**: the client this module makes has ``max_retries =
+  MAX_RETRIES`` (0): the SDK never re-sends a request behind the budget's
+  back, and one attempt is one call. A failed call is an ``api_error``
+  outcome. When its error carries usage, that usage is recorded and
+  charged. When the API answered with an error status (not billed),
+  nothing is charged. Otherwise (a timeout or connection failure, where
+  the request may have been processed) the call's worst case is reserved
+  against the budget for the rest of the run (``reserved``) without a
+  usage row, since nothing was measured. An injected client keeps its own
+  retry setting.
+* **One call per key**: rows that share an item (a browser bookmark and an
+  X link of the same page) share its revision, so the plan keeps one call
+  per (revision, context) and skips the rest as idempotent.
 * **No candidate without content**: an assessment of a ``blocked``,
   ``deleted`` or ``empty`` revision cannot be ``candidate`` (schema and
   DDL). When neither the item nor any linked item has readable content,
@@ -64,12 +82,12 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Sequence
 
 from muninn.config import (
@@ -115,8 +133,12 @@ SUBJECT_MAX_CHARS = 6_000
 CHILD_MAX_CHARS = 3_000
 CHILDREN_MAX_CHARS = 9_000
 MAX_CHILDREN = 8
-# Conservative chars-per-token for the pre-call worst-case estimate.
-CHARS_PER_TOKEN_BOUND = 3
+# Pre-call worst case: input tokens <= UTF-8 bytes of the prompt (every
+# token covers at least one byte) + this allowance for message framing.
+MESSAGE_OVERHEAD_TOKENS = 64
+# SDK retries on the client this module makes: none, so one attempt is one
+# call and the budget sees every request.
+MAX_RETRIES = 0
 
 # Model-cited evidence limits (part of the policy version; the assessment
 # schema caps excerpts at 300 and notes at 500 characters, 8 entries).
@@ -230,6 +252,7 @@ class SuitabilityRun:
     evidence_cited: int = 0
     evidence_dropped: int = 0
     spent_micro_usd: int = 0
+    reserved_micro_usd: int = 0  # worst cases of failed calls that may have been billed
     estimated_micro_usd: int = 0
     stopped: str | None = None  # budget | api_errors
     outcomes: list[ItemOutcome] = field(default_factory=list)
@@ -255,6 +278,7 @@ class SuitabilityRun:
             "evidence_cited": self.evidence_cited,
             "evidence_dropped": self.evidence_dropped,
             "spent": format_usd(self.spent_micro_usd),
+            "reserved": format_usd(self.reserved_micro_usd),
             "budget": format_usd(self.budget_micro_usd),
             "estimated_upper_bound": format_usd(self.estimated_micro_usd),
             "stopped": self.stopped,
@@ -651,7 +675,38 @@ def _make_client() -> "anthropic.Anthropic":
             "The anthropic package is not installed, so suitability assessment cannot run. "
             "Capture (ingest, scrape) is unaffected."
         ) from exc
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(max_retries=MAX_RETRIES)
+
+
+def _error_usage(exc: BaseException) -> dict[str, int] | None:
+    """Usage reported on a failed call, when the error body carries it."""
+    body = getattr(exc, "body", None)
+    usage = body.get("usage") if isinstance(body, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    return _measured_usage(SimpleNamespace(usage=SimpleNamespace(**{
+        k: usage.get(k, 0) for k in (
+            "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+        )
+    })))
+
+
+def _priced(price: Any, measured: dict[str, int]) -> tuple[int, dict[str, int]]:
+    """Cost and the ``usage_records`` token columns of measured usage."""
+    cost = cost_micro_usd(
+        price,
+        input_tokens=measured["uncached_input_tokens"],
+        cache_write_tokens=measured["cache_write_tokens"],
+        cache_read_tokens=measured["cache_read_tokens"],
+        output_tokens=measured["output_tokens"],
+    )
+    # usage_records has no cache-write column: input_token_count is every
+    # non-cache-read input token; the cost carries the split.
+    return cost, {
+        "input_tokens": measured["uncached_input_tokens"] + measured["cache_write_tokens"],
+        "output_tokens": measured["output_tokens"],
+        "cache_read_tokens": measured["cache_read_tokens"],
+    }
 
 
 def _measured_usage(response: Any) -> dict[str, int] | None:
@@ -722,10 +777,11 @@ def assess_suitability(
         dry_run=dry_run,
     )
     system = build_system_blocks(prompt_text, profile)
-    system_chars = sum(len(b["text"]) for b in system)
+    system_bytes = sum(len(b["text"].encode("utf-8")) for b in system)
 
     # ── plan (read-only) ──
     plan: list[PlannedCall] = []
+    planned_keys: set[tuple[int, str]] = set()
     for row in _select_rows(conn, sources, since, until):
         if len(plan) >= limit:
             break
@@ -745,10 +801,12 @@ def assess_suitability(
             conn, ContextItem(row, item_id, revision), _children(conn, row)
         )
         context = context_entries(subject, children)
-        if _assessment_exists(
-            conn, revision["scrape_history_id"], context_digest(context), profile.digest,
-            policy_version, model, prompt_version,
-        ):
+        key = (revision["scrape_history_id"], context_digest(context))
+        if key in planned_keys:  # another row of the same item, same context
+            run.skipped_idempotent += 1
+            run.outcomes.append(ItemOutcome(item_id, "skipped_idempotent", detail="same key planned in this run"))
+            continue
+        if _assessment_exists(conn, *key, profile.digest, policy_version, model, prompt_version):
             run.skipped_idempotent += 1
             run.outcomes.append(ItemOutcome(item_id, "skipped_idempotent"))
             continue
@@ -757,8 +815,9 @@ def assess_suitability(
             run.outcomes.append(ItemOutcome(item_id, "skipped_no_content", detail=revision["coverage"]))
             continue
         message = build_user_message(subject, children)
-        tokens = math.ceil((system_chars + len(message)) / CHARS_PER_TOKEN_BOUND)
+        tokens = system_bytes + len(message.encode("utf-8")) + MESSAGE_OVERHEAD_TOKENS
         worst = worst_case_micro_usd(price, input_tokens=tokens, max_output_tokens=MAX_OUTPUT_TOKENS)
+        planned_keys.add(key)
         plan.append(PlannedCall(subject, children, message, tokens, worst, context))
     run.planned = len(plan)
     run.estimated_micro_usd = sum(p.worst_case_micro_usd for p in plan)
@@ -779,7 +838,7 @@ def assess_suitability(
     consecutive_errors = 0
     for index, call in enumerate(plan):
         item_id = call.subject.item_id
-        if run.spent_micro_usd + call.worst_case_micro_usd > max_cost_micro_usd:
+        if run.spent_micro_usd + run.reserved_micro_usd + call.worst_case_micro_usd > max_cost_micro_usd:
             run.stopped = "budget"
             for rest in plan[index:]:
                 run.outcomes.append(ItemOutcome(rest.subject.item_id, "not_attempted", detail="budget"))
@@ -797,7 +856,22 @@ def assess_suitability(
             consecutive_errors += 1
             run.api_errors += 1
             logger.error("Suitability call failed for %s: %s", item_id, type(exc).__name__)
-            run.outcomes.append(ItemOutcome(item_id, "api_error", detail=type(exc).__name__))
+            failed_cost = 0
+            reported = _error_usage(exc)
+            if reported is not None:  # the error reports what was billed
+                failed_cost, failed_usage = _priced(price, reported)
+                run.spent_micro_usd += failed_cost
+                ts = clock()
+                with transaction(conn):
+                    _insert_usage(conn, model=model, usage=failed_usage, cost=failed_cost,
+                                  assessment_row_id=None, now=ts)
+            elif not isinstance(getattr(exc, "status_code", None), int):
+                # No answer from the API: the request may still have been
+                # processed and billed. Reserve its worst case.
+                run.reserved_micro_usd += call.worst_case_micro_usd
+            run.outcomes.append(
+                ItemOutcome(item_id, "api_error", cost_micro_usd=failed_cost, detail=type(exc).__name__)
+            )
             if consecutive_errors >= MAX_CONSECUTIVE_API_ERRORS:
                 run.stopped = "api_errors"
                 for rest in plan[index + 1:]:
@@ -809,26 +883,14 @@ def assess_suitability(
         ts = clock()
 
         measured = _measured_usage(response)
+        stored_usage: dict[str, int] | None
         if measured is None:
             cost = call.worst_case_micro_usd  # unmeasurable: charge the bound
-            stored_usage: dict[str, int] | None = None
+            stored_usage = None
         else:
-            cost = cost_micro_usd(
-                price,
-                input_tokens=measured["uncached_input_tokens"],
-                cache_write_tokens=measured["cache_write_tokens"],
-                cache_read_tokens=measured["cache_read_tokens"],
-                output_tokens=measured["output_tokens"],
-            )
+            cost, stored_usage = _priced(price, measured)
             if measured["cache_read_tokens"] > 0:
                 run.cache_hits += 1
-            # usage_records has no cache-write column: input_token_count is
-            # every non-cache-read input token; the cost carries the split.
-            stored_usage = {
-                "input_tokens": measured["uncached_input_tokens"] + measured["cache_write_tokens"],
-                "output_tokens": measured["output_tokens"],
-                "cache_read_tokens": measured["cache_read_tokens"],
-            }
         run.spent_micro_usd += cost
 
         errors: list[str]
@@ -855,15 +917,31 @@ def assess_suitability(
                     dropped=dropped,
                 )
 
-        with transaction(conn):
-            row_id = None
-            if record is not None:
-                row_id = _insert_assessment(
-                    conn, record, call.subject, stored_usage or {}, context=call.context, assessed_at=ts
-                )
-            _insert_usage(conn, model=model, usage=stored_usage, cost=cost, assessment_row_id=row_id, now=ts)
+        duplicate = False
+        try:
+            with transaction(conn):
+                row_id = None
+                if record is not None:
+                    row_id = _insert_assessment(
+                        conn, record, call.subject, stored_usage or {}, context=call.context, assessed_at=ts
+                    )
+                _insert_usage(conn, model=model, usage=stored_usage, cost=cost, assessment_row_id=row_id, now=ts)
+        except sqlite3.Error as exc:
+            # The paid call is recorded whatever happens to its assessment.
+            with transaction(conn):
+                _insert_usage(conn, model=model, usage=stored_usage, cost=cost, assessment_row_id=None, now=ts)
+            if not isinstance(exc, sqlite3.IntegrityError) or record is None:
+                raise
+            duplicate = True  # an identical assessment is already stored
 
-        if record is None:
+        if duplicate:
+            run.skipped_idempotent += 1
+            logger.warning("Suitability assessment for %s already stored; usage recorded", item_id)
+            run.outcomes.append(
+                ItemOutcome(item_id, "skipped_idempotent", cost_micro_usd=cost,
+                            detail="identical assessment already stored; usage recorded")
+            )
+        elif record is None:
             run.invalid_output += 1
             logger.warning("Suitability output for %s rejected: %s", item_id, "; ".join(errors[:3]))
             run.outcomes.append(
@@ -878,7 +956,7 @@ def assess_suitability(
             run.outcomes.append(
                 ItemOutcome(item_id, "assessed", record["assessment_id"], record["disposition"], cost)
             )
-        if run.spent_micro_usd >= max_cost_micro_usd and index + 1 < len(plan):
+        if run.spent_micro_usd + run.reserved_micro_usd >= max_cost_micro_usd and index + 1 < len(plan):
             run.stopped = "budget"
             for rest in plan[index + 1:]:
                 run.outcomes.append(ItemOutcome(rest.subject.item_id, "not_attempted", detail="budget"))

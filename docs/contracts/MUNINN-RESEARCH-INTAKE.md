@@ -356,6 +356,16 @@ The record also carries `request_count`, an optional `resource_count`
 table) or `reported` (from the provider). A usage record can be linked to
 its sync run or its assessment.
 
+Every model call that returned a response has a usage record, including
+one whose output was rejected or whose assessment was already stored;
+such a record has no `assessment_id`. A call that failed gets a record
+only when its error reports usage. The record has no field for an error
+note. A call the API refused with an error status is not billed and gets
+no record. A call that got no answer (a timeout or a lost connection)
+gets none either, because nothing was measured, but its worst-case cost
+counts against the run's budget. Muninn's own client makes no automatic
+retries, so one call is one request.
+
 ## 5. Revision and append-only rules
 
 - `scrape_history` (content revisions), `assessments`, `interest_profiles`
