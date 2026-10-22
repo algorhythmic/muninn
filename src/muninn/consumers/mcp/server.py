@@ -1,4 +1,4 @@
-"""FastMCP server (stdio) exposing the Muninn corpus.
+"""FastMCP server (stdio) exposing the Muninn corpus and vault (contract: docs/mcp-api.md).
 
 Tools are thin wrappers around `tools.py` callables. Run via:
 
@@ -68,6 +68,34 @@ def get_era(era_label: str) -> str:
 def list_eras() -> str:
     """List all eras with live bookmark counts."""
     return _tools.list_eras()
+
+
+@mcp.tool()
+def search(query: str, namespace: str | None = None, top_k: int = 10) -> str:
+    """Hybrid (keyword + semantic) recall over the vault, best first.
+
+    namespace: omit for all; "bookmarks" for saved material (X posts,
+    articles, repos, browser bookmarks); "concepts", "infra", "people" or
+    "projects" for curated notes. Project notes are reference only: Odin
+    owns project state. Each result has a vault "path" for get_page when
+    a page exists, and bookmark results a "bookmark_id" for get_bookmark.
+    """
+    return _tools.search(query, namespace, top_k, backend=_search_backend)
+
+
+@mcp.tool()
+def get_page(path: str) -> str:
+    """Fetch one vault page by its vault-relative path, e.g.
+    "wiki/concepts/example.md" (as returned by search or list_namespace)."""
+    return _tools.get_page(path)
+
+
+@mcp.tool()
+def list_namespace(namespace: str, limit: int = 50, cursor: str | None = None) -> str:
+    """List pages in a vault namespace ("bookmarks", "concepts", "infra",
+    "people", "projects") with a one-line summary each. Pass the returned
+    next_cursor back for the next page; it is null at the end."""
+    return _tools.list_namespace(namespace, limit, cursor)
 
 
 def main() -> None:
