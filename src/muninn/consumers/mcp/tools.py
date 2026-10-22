@@ -38,29 +38,45 @@ def _item_kind(row: sqlite3.Row) -> str | None:
     return x_pages.item_kind_for(row)
 
 
-def _title(conn: sqlite3.Connection, row: sqlite3.Row) -> str | None:
+def _hidden_urls(conn: sqlite3.Connection, row: sqlite3.Row) -> set[str]:
+    """Locators of hidden items an X-lane row links to (masked in its
+    title and summary, as in the vault)."""
+    if row["source"] not in x_pages.X_SOURCES:
+        return set()
+    return x_pages.hidden_child_urls(conn, row["bookmark_id"])
+
+
+def _title(row: sqlite3.Row, hidden: set[str]) -> str | None:
     """``bookmarks.title``. An X post's title is the start of its text, so
-    a locator of a link hidden since the last sync is masked as in the
-    vault; a post without a title (known only from an ``errors[]`` entry or
-    a bare reference) falls back to ``@handle``."""
+    a locator of a link hidden since the last sync is masked; a post
+    without a title (known only from an ``errors[]`` entry or a bare
+    reference) falls back to ``@handle``."""
     if row["source"] != "x":
         return row["title"]
     if not row["title"]:
         return x_pages.display_name(row)
-    return x_pages.mask_hidden_title(row["title"], x_pages.hidden_child_urls(conn, row["bookmark_id"]))
+    return x_pages.mask_hidden_title(row["title"], hidden)
+
+
+def _summary(row: sqlite3.Row, hidden: set[str]) -> str | None:
+    """``enriched.summary``; one written before a policy change hid a
+    linked item can quote its locator, so that is masked."""
+    summary = row["summary"] if "summary" in row.keys() else None
+    return x_pages.mask_hidden_links(summary, hidden) if summary and hidden else summary
 
 
 def _bookmark_summary(
     conn: sqlite3.Connection, row: sqlite3.Row, score: float | None = None
 ) -> dict:
     """Compact bookmark view for search results."""
+    hidden = _hidden_urls(conn, row)
     out = {
         "bookmark_id": row["bookmark_id"],
-        "title": _title(conn, row),
+        "title": _title(row, hidden),
         "url": row["url"],
         "era_label": row["era_label"],
         "domain": row["domain"],
-        "summary": row["summary"] if "summary" in row.keys() else None,
+        "summary": _summary(row, hidden),
         "source": row["source"],
         "item_kind": _item_kind(row),
     }
@@ -183,7 +199,11 @@ def get_bookmark(bookmark_id: int, db_path: str | Path | None = None) -> str:
         ).fetchall()
 
         out = _row_to_dict(row)
-        out["title"] = _title(conn, row)
+        hidden = _hidden_urls(conn, row)
+        out["title"] = _title(row, hidden)
+        for key in ("summary", "key_quotes", "entities", "tags"):  # JSON text or prose
+            if hidden and isinstance(out.get(key), str):
+                out[key] = x_pages.mask_hidden_links(out[key], hidden)
         out["item_kind"] = _item_kind(row)
         out["scrape_results"] = [_row_to_dict(s) for s in scrape]
         return json.dumps(out, indent=2, default=str)
