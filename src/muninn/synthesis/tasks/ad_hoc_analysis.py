@@ -1,6 +1,6 @@
 """ad_hoc_analysis task: cross-corpus query, append to `analyses`.
 
-Materials passed to the container:
+Materials in the task file:
   - prompt
   - filter_query (the SQL/JSON filter that selected the corpus subset)
   - bookmarks: [{bookmark_id, title, url, summary?, tags?}, ...]

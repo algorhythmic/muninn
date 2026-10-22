@@ -1,10 +1,11 @@
 """Single-retry self-correction loop.
 
 If the first synthesis attempt fails validation (schema, verbatim quote, or
-cross-reference target check), we re-run the container ONCE with
-`correction_instructions` populated. If the retry also fails, the run is
-marked `validation_failed` and no rows are written to the canonical tables —
-only the audit row in `synthesis_runs` is recorded.
+cross-reference target check), the task is run ONCE more as attempt 2 with
+`correction_instructions` populated: by the API runner directly, or as a
+retry task file from `synthesize ingest-result --retry-dir`. If the retry
+also fails, the run is marked `validation_failed` and no rows are written
+to the canonical tables — only the audit row in `synthesis_runs`.
 """
 
 from __future__ import annotations
@@ -15,8 +16,8 @@ from typing import Iterable
 def build_correction_instructions(errors: Iterable[str]) -> str:
     """Render validation errors into a prompt-ready correction blurb.
 
-    The container's persona looks for this field in the task-input JSON and
-    injects it into its next message.
+    The synthesis instructions tell the model to fix every error listed in
+    the task file's `correction_instructions`.
     """
     lines = ["Your previous output had validation errors. Please fix them:"]
     for i, error in enumerate(errors, 1):

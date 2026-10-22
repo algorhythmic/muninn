@@ -16,9 +16,10 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn enrich [--dry-run] [--force] [--prompt-version per_bookmark_vN]
     muninn enrich --task suitability [--source x] [--since D] [--until D]
                   [--limit N] [--max-cost-usd 1.00] [--model M] [--profile P] [--dry-run]
-    muninn synthesize era <era_label>
-    muninn synthesize deep-pass <id> | --pending
-    muninn synthesize analyze "<prompt>"
+    muninn synthesize era <era_label> [--emit-task DIR] [--model M] [--max-cost-usd 3.00]
+    muninn synthesize deep-pass <id> | --pending [--emit-task DIR] [--model M] [--max-cost-usd X]
+    muninn synthesize analyze "<prompt>" [--title T] [--bookmark-id N]... [--emit-task DIR] ...
+    muninn synthesize ingest-result FILE [--retry-dir DIR]
     muninn triage [--json]
     muninn status
     muninn deep-pass <id>             # just sets the flag
@@ -491,43 +492,126 @@ def _enrich_suitability(
 @cli.group("synthesize")
 @click.pass_context
 def synthesize_group(ctx: click.Context) -> None:
-    """Opus-driven synthesis: era narratives, deep passes, ad-hoc analyses."""
+    """Synthesis: era narratives, deep passes, ad-hoc analyses.
+
+    By default each task runs with the budgeted direct API runner. With
+    --emit-task DIR the task file is written for another harness and
+    nothing runs; `synthesize ingest-result FILE` takes its result back.
+    See docs/synthesis-contract.md.
+    """
+
+
+def _synthesis_options(f):
+    """Options shared by the three task commands."""
+    f = click.option(
+        "--max-cost-usd", default=None,
+        help="Per-run spend cap for the API runner in USD (default 3.00). The monthly cap "
+             "is MUNINN_SYNTHESIS_MONTHLY_BUDGET_USD.",
+    )(f)
+    f = click.option(
+        "--model", default=None,
+        help="API runner model (default $MUNINN_SYNTHESIS_MODEL, else claude-opus-5-5).",
+    )(f)
+    f = click.option(
+        "--emit-task", "emit_dir", default=None,
+        type=click.Path(file_okay=False, writable=True),
+        help="Write the task file to DIR for another harness; run nothing.",
+    )(f)
+    return f
+
+
+def _synthesis_runner(emit_dir: str | None, model: str | None, max_cost_usd: str | None, conn):
+    """(runner, budget) for a run, or (None, None) when emitting."""
+    if emit_dir is not None:
+        if model is not None or max_cost_usd is not None:
+            raise click.UsageError("--model and --max-cost-usd apply to API runs, not --emit-task")
+        return None, None
+    from muninn.enrich.pricing import usd_to_micro  # lazy
+    from muninn.synthesis.api_runner import ApiRunner  # lazy
+    from muninn.synthesis.budget import DEFAULT_RUN_CAP_MICRO_USD, Budget, SynthesisConfigError  # lazy
+
+    try:
+        cap = usd_to_micro(max_cost_usd) if max_cost_usd is not None else DEFAULT_RUN_CAP_MICRO_USD
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--max-cost-usd") from exc
+    try:
+        runner = ApiRunner(model=model)
+    except SynthesisConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return runner, Budget(conn, run_cap_micro_usd=cap)
+
+
+def _synthesis_errors():
+    """Exceptions a synthesis command turns into a one-line error."""
+    from muninn.synthesis.budget import SynthesisConfigError  # lazy
+    from muninn.synthesis.contract import ContractError  # lazy
+
+    return (SynthesisConfigError, ContractError)
+
+
+def _echo_synthesis(label: str, result) -> None:
+    task_id = getattr(result, "task_id", None)
+    if result.status == "emitted":
+        click.echo(f"{label}: task file {result.task_file} (task_id={task_id})")
+        return
+    click.echo(f"{label}: {result.status}" + (f" (task_id={task_id})" if task_id else ""))
+    for error in getattr(result, "errors", ())[:10]:
+        click.echo(f"  {error}")
 
 
 @synthesize_group.command("era")
 @click.argument("era_label")
+@_synthesis_options
 @click.pass_context
-def synthesize_era_cmd(ctx: click.Context, era_label: str) -> None:
+def synthesize_era_cmd(
+    ctx: click.Context, era_label: str, emit_dir: str | None, model: str | None,
+    max_cost_usd: str | None,
+) -> None:
     """Generate the per-era narrative for `<era_label>`."""
     from muninn.db import connect  # lazy
-    from muninn.synthesis.orchestrator import run_era_narrative  # lazy
+    from muninn.synthesis import orchestrator  # lazy
 
     conn = connect(ctx.obj.get("db"))
     try:
-        result = run_era_narrative(era_label, conn=conn)
+        runner, budget = _synthesis_runner(emit_dir, model, max_cost_usd, conn)
+        if emit_dir is not None:
+            result = orchestrator.emit_era_narrative_task(era_label, emit_dir, conn=conn)
+        else:
+            result = orchestrator.run_era_narrative(era_label, conn=conn, runner=runner, budget=budget)
+    except _synthesis_errors() as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         conn.close()
-    click.echo(f"Synthesize era '{era_label}': {result.status} (task_id={result.task_id})")
+    _echo_synthesis(f"Synthesize era '{era_label}'", result)
 
 
 @synthesize_group.command("deep-pass")
 @click.argument("bookmark_id", required=False, type=int)
 @click.option("--pending", is_flag=True, help="Process all rows with deep_pass_requested=1.")
+@_synthesis_options
 @click.pass_context
 def synthesize_deep_pass_cmd(
-    ctx: click.Context, bookmark_id: int | None, pending: bool
+    ctx: click.Context, bookmark_id: int | None, pending: bool, emit_dir: str | None,
+    model: str | None, max_cost_usd: str | None,
 ) -> None:
-    """Run the Opus deep-pass for one bookmark (or `--pending` for the queue)."""
+    """Run the deep pass for one bookmark (or `--pending` for the queue)."""
     if not pending and bookmark_id is None:
         click.echo("Error: pass a BOOKMARK_ID or use --pending.", err=True)
         sys.exit(2)
 
     from muninn.db import connect  # lazy
-    from muninn.synthesis.orchestrator import run_deep_pass  # lazy
+    from muninn.synthesis import orchestrator  # lazy
 
     conn = connect(ctx.obj.get("db"))
     completed = 0
     try:
+        runner, budget = _synthesis_runner(emit_dir, model, max_cost_usd, conn)
+
+        def one(bid: int):
+            if emit_dir is not None:
+                return orchestrator.emit_deep_pass_task(bid, emit_dir, conn=conn)
+            return orchestrator.run_deep_pass(bid, conn=conn, runner=runner, budget=budget)
+
         if pending:
             ids = [
                 r[0]
@@ -538,39 +622,95 @@ def synthesize_deep_pass_cmd(
             if not ids:
                 click.echo("No pending deep-pass rows.")
                 return
-            for bid in ids:
-                result = run_deep_pass(bid, conn=conn)
+            for index, bid in enumerate(ids):
+                result = one(bid)
                 completed += result.status == "completed"
-                click.echo(f"  bookmark_id={bid}: {result.status}")
+                shown = result.task_file if result.status == "emitted" else result.status
+                click.echo(f"  bookmark_id={bid}: {shown}")
+                if result.status == "cap_hit":
+                    click.echo(f"Budget reached: {len(ids) - index - 1} pending row(s) not attempted.")
+                    break
         else:
-            result = run_deep_pass(bookmark_id, conn=conn)
+            result = one(bookmark_id)
             completed += result.status == "completed"
-            click.echo(f"Synthesize deep-pass {bookmark_id}: {result.status}")
+            _echo_synthesis(f"Synthesize deep-pass {bookmark_id}", result)
+    except _synthesis_errors() as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         conn.close()
     if completed:
-        # The deep pass refreshed FTS in its own transaction; the Qdrant
-        # points are now stale until the (network) reconcile re-embeds them.
-        click.echo(
-            f"Deep pass rewrote {completed} summary(ies): run "
-            "`python scripts/reconcile-vector-index.py` to refresh the vector index."
-        )
+        _deep_pass_reconcile_hint(completed)
+
+
+def _deep_pass_reconcile_hint(completed: int) -> None:
+    # The deep pass refreshed FTS in its own transaction; the Qdrant
+    # points are now stale until the (network) reconcile re-embeds them.
+    click.echo(
+        f"Deep pass rewrote {completed} summary(ies): run "
+        "`python scripts/reconcile-vector-index.py` to refresh the vector index."
+    )
 
 
 @synthesize_group.command("analyze")
 @click.argument("prompt")
+@click.option("--title", default=None, help="Title for the analyses row (default: from the output or prompt).")
+@click.option("--bookmark-id", "bookmark_ids", type=int, multiple=True,
+              help="Analyze exactly these bookmarks (repeatable). Default: the 500 most recent visible.")
+@_synthesis_options
 @click.pass_context
-def synthesize_analyze_cmd(ctx: click.Context, prompt: str) -> None:
+def synthesize_analyze_cmd(
+    ctx: click.Context, prompt: str, title: str | None, bookmark_ids: tuple[int, ...],
+    emit_dir: str | None, model: str | None, max_cost_usd: str | None,
+) -> None:
     """Run an ad-hoc cross-corpus analysis with `prompt`."""
     from muninn.db import connect  # lazy
-    from muninn.synthesis.orchestrator import run_ad_hoc_analysis  # lazy
+    from muninn.synthesis import orchestrator  # lazy
+
+    conn = connect(ctx.obj.get("db"))
+    kwargs = {"title": title, "bookmark_ids": list(bookmark_ids) or None}
+    try:
+        runner, budget = _synthesis_runner(emit_dir, model, max_cost_usd, conn)
+        if emit_dir is not None:
+            result = orchestrator.emit_ad_hoc_analysis_task(prompt, emit_dir, conn=conn, **kwargs)
+        else:
+            result = orchestrator.run_ad_hoc_analysis(prompt, conn=conn, runner=runner, budget=budget, **kwargs)
+    except _synthesis_errors() as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    _echo_synthesis("Synthesize analyze", result)
+
+
+@synthesize_group.command("ingest-result")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--retry-dir", default=None, type=click.Path(file_okay=False, writable=True),
+    help="If an attempt-1 result fails validation, write the attempt-2 task file "
+         "(with the correction instructions) to DIR.",
+)
+@click.pass_context
+def synthesize_ingest_result_cmd(ctx: click.Context, path: str, retry_dir: str | None) -> None:
+    """Validate a result file against its emitted task and write it."""
+    from muninn.db import connect  # lazy
+    from muninn.synthesis import orchestrator  # lazy
 
     conn = connect(ctx.obj.get("db"))
     try:
-        result = run_ad_hoc_analysis(prompt, conn=conn)
+        result = orchestrator.ingest_result(path, conn=conn, retry_dir=retry_dir)
+    except _synthesis_errors() as exc:
+        raise click.ClickException(f"Result rejected, nothing written: {exc}") from exc
     finally:
         conn.close()
-    click.echo(f"Synthesize analyze: {result.status}")
+    click.echo(f"Ingest {path}: {result.status} (task_id={result.task_id})")
+    if result.status == "completed":
+        if result.task_type == "deep_pass":
+            _deep_pass_reconcile_hint(1)
+        return
+    for error in result.errors[:10]:
+        click.echo(f"  {error}")
+    if result.task_file is not None:
+        click.echo(f"Retry task file: {result.task_file}")
+    sys.exit(1)
 
 
 # ── consumer commands (this stream owns these) ─────────────────────

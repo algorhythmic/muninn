@@ -187,7 +187,7 @@ def test_synthesize_deep_pass_hints_at_vector_reconcile(db_path: Path, monkeypat
     conn.close()
     statuses = {}
     monkeypatch.setattr(orchestrator, "run_deep_pass",
-                        lambda bid, conn: SimpleNamespace(status=statuses.get(bid, "cap_hit")))
+                        lambda bid, conn, **_: SimpleNamespace(status=statuses.get(bid, "cap_hit")))
     runner = CliRunner()
     hint = "scripts/reconcile-vector-index.py"
 

@@ -18,28 +18,22 @@ from muninn.enrich.haiku import EnrichmentResult
 from muninn.enrich.idempotency import compute_content_hash
 from muninn.enrich.pipeline import enrich_all
 from muninn.synthesis import run_deep_pass
-from muninn.synthesis.container import ContainerResult
+from muninn.synthesis.api_runner import RunnerResult
 
 SOURCE_TEXT = "Long-form article body. A verbatim quote from source lives here."
 DEEP_SUMMARY = "D" * 120
 
 
 class _OneShotLauncher:
-    """Stand-in ContainerLauncher returning one valid deep-pass output."""
+    """Stand-in synthesis runner returning one valid deep-pass output."""
 
     def __init__(self, output: dict):
         self._output = output
         self.call_count = 0
 
-    def launch(self, envelope):
+    def run(self, task):
         self.call_count += 1
-        return ContainerResult(
-            container_id="mock",
-            output_json=self._output,
-            raw_stdout="",
-            raw_stderr="",
-            exit_code=0,
-        )
+        return RunnerResult(output_json=self._output, runner_ref="mock")
 
 
 def _deep_pass_output() -> dict:
@@ -122,7 +116,7 @@ def test_enrich_after_deep_pass_makes_zero_api_calls(mock_enrich, fresh_db):
     fresh_db.execute("UPDATE enriched SET deep_pass_requested = 1 WHERE bookmark_id = 1")
     fresh_db.commit()
     launcher = _OneShotLauncher(_deep_pass_output())
-    result = run_deep_pass(1, conn=fresh_db, launcher=launcher, candidate_neighbor_ids=[])
+    result = run_deep_pass(1, conn=fresh_db, runner=launcher, candidate_neighbor_ids=[])
     assert result.status == "completed"
 
     # Deep-pass columns written; the enrichment triple and timestamp kept.
@@ -152,7 +146,7 @@ def test_deep_pass_without_prior_enrichment_records_its_own_provenance(fresh_db)
     records the synthesis run — there is no bulk enrichment to preserve."""
     _seed(fresh_db)
     launcher = _OneShotLauncher(_deep_pass_output())
-    result = run_deep_pass(1, conn=fresh_db, launcher=launcher, candidate_neighbor_ids=[])
+    result = run_deep_pass(1, conn=fresh_db, runner=launcher, candidate_neighbor_ids=[])
     assert result.status == "completed"
     model, prompt_version, content_hash, _ = _triple(fresh_db)
     assert model == OPUS_MODEL

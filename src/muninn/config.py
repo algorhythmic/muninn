@@ -155,6 +155,26 @@ def load_x_settings() -> XSettings:
         token_path=_env_path("MUNINN_X_TOKEN_FILE", data_dir / "x-tokens.json"),
     )
 
-# ── Synthesis container ───────────────────────────────────────────
-SAGA_CREDENTIALS_VOLUME = os.environ.get("SAGA_CREDENTIALS_VOLUME", "saga-claude-credentials")
-SYNTHESIS_WORKSPACE = os.environ.get("MUNINN_SYNTHESIS_WORKSPACE", "/tmp/muninn-synthesis")
+
+# ── Synthesis (ADR-013 task/result contract) ──────────────────────
+# Prompt version of the synthesis instructions (synthesis/prompts/).
+SYNTHESIS_PROMPT_VERSION = "synthesis_v1"
+# The default runner is a budgeted direct API call. Model, effort and the
+# monthly cap are read at call time (CLI flag, else env) so a run can be
+# re-pointed without a code change. Opus 5.5 per ADR-013.
+SYNTHESIS_MODEL_ENV = "MUNINN_SYNTHESIS_MODEL"
+SYNTHESIS_DEFAULT_MODEL = "claude-opus-5-5"
+SYNTHESIS_EFFORT_ENV = "MUNINN_SYNTHESIS_EFFORT"
+SYNTHESIS_DEFAULT_EFFORT = "high"
+# Monthly cap on synthesis API spend (USD), summed from usage_records over
+# the current UTC calendar month. Required: the API runner refuses to
+# spend without it (ADR-013: "API spend for synthesis requires a
+# configured budget").
+SYNTHESIS_MONTHLY_BUDGET_ENV = "MUNINN_SYNTHESIS_MONTHLY_BUDGET_USD"
+
+
+def synthesis_task_registry() -> Path:
+    """Where muninn keeps its own copy of every emitted task file
+    ($MUNINN_DATA_DIR/synthesis/tasks). `synthesize ingest-result` checks
+    a result against this copy, never against the copy handed out."""
+    return load_paths().data_dir / "synthesis" / "tasks"

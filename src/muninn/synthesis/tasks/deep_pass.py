@@ -1,6 +1,6 @@
 """deep_pass task: per-bookmark deep analysis.
 
-Materials passed to the container:
+Materials in the task file:
   - bookmark_id, title, url, captured_at
   - source_text       (canonical pass content; key_quotes verified verbatim)
   - source_pass       (which scrape pass supplied source_text)

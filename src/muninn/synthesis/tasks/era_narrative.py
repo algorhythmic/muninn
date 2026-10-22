@@ -1,6 +1,6 @@
 """era_narrative task: build per-era materials, UPSERT result into `eras`.
 
-Materials passed to the container:
+Materials in the task file:
   - era_label
   - bookmarks: [{bookmark_id, title, url, captured_at, summary?, tags?}, ...]
   - neighboring_eras: [{era_label, narrative?}]

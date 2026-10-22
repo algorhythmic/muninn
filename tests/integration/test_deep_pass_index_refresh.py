@@ -64,7 +64,7 @@ def test_deep_pass_refreshes_fts_and_reconcile_refreshes_qdrant(
     assert _fts_ids(conn, "zanzibarite") == []
     assert get_point_payloads(qdrant)[1]["summary"] == "Haiku summary of Deep article"
 
-    result = run_deep_pass(1, conn=conn, launcher=_OneShotLauncher(_deep_output()),
+    result = run_deep_pass(1, conn=conn, runner=_OneShotLauncher(_deep_output()),
                            candidate_neighbor_ids=[])
     assert result.status == "completed"
 
@@ -94,7 +94,7 @@ def test_deep_pass_on_hidden_row_drops_its_fts_row(fresh_db):
     )
     fresh_db.execute("UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = 1")
     fresh_db.commit()
-    result = run_deep_pass(1, conn=fresh_db, launcher=_OneShotLauncher(_deep_output()),
+    result = run_deep_pass(1, conn=fresh_db, runner=_OneShotLauncher(_deep_output()),
                            candidate_neighbor_ids=[])
     assert result.status == "completed"
     assert fresh_db.execute("SELECT COUNT(*) FROM fts_bookmarks").fetchone()[0] == 0
@@ -109,7 +109,7 @@ def test_failed_deep_pass_leaves_fts_untouched(fresh_db):
     fresh_db.commit()
     bad = _deep_output()
     bad["key_quotes"] = ["a quote that is not in the source"]
-    result = run_deep_pass(1, conn=fresh_db, launcher=_OneShotLauncher(bad),
+    result = run_deep_pass(1, conn=fresh_db, runner=_OneShotLauncher(bad),
                            candidate_neighbor_ids=[])
     assert result.status != "completed"
     assert _fts_ids(fresh_db, "old") == [1]
