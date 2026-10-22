@@ -53,6 +53,20 @@ class EnrichmentResult:
     output_tokens: int
 
 
+def check_prompt_version(task: str, version: str) -> None:
+    """Refuse a prompt version written for another task.
+
+    Prompt files are named ``<task>_v<N>.md``; ``muninn enrich --task
+    per_bookmark --prompt-version suitability_v1`` would otherwise run the
+    per-bookmark task over the whole corpus with the wrong prompt (and the
+    reverse for suitability). Raises ValueError.
+    """
+    if not re.fullmatch(rf"{re.escape(task)}_v[1-9][0-9]*", version or ""):
+        raise ValueError(
+            f"prompt version {version!r} is not a {task} prompt (expected {task}_vN, e.g. {task}_v2)"
+        )
+
+
 def _load_system_prompt(version: str = PER_BOOKMARK_PROMPT_VERSION) -> str:
     """Load the system prompt body for the given ``<task>_v<N>`` version."""
     prompt_file = PROMPT_DIR / f"{version}.md"

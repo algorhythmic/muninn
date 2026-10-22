@@ -73,7 +73,7 @@ from muninn.config import (
 from muninn.consumers.packets.canonical import new_ulid
 from muninn.consumers.packets.schemas import schema_errors
 from muninn.db import transaction
-from muninn.enrich.haiku import _load_system_prompt, _parse_json_response
+from muninn.enrich.haiku import _load_system_prompt, _parse_json_response, check_prompt_version
 from muninn.enrich.interest_profile import InterestProfile, record_profile
 from muninn.enrich.pricing import (
     cost_micro_usd,
@@ -640,6 +640,10 @@ def assess_suitability(
         price = price_for(model)
     except KeyError as exc:
         raise SuitabilityError(str(exc.args[0])) from exc
+    try:
+        check_prompt_version("suitability", prompt_version)
+    except ValueError as exc:
+        raise SuitabilityError(str(exc)) from exc
     try:
         prompt_text = _load_system_prompt(prompt_version)
     except FileNotFoundError as exc:

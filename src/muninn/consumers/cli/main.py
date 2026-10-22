@@ -433,7 +433,7 @@ def _parse_when(ctx: click.Context, param: click.Parameter, value: str | None) -
 )
 @click.option("--dry-run", is_flag=True, help="Plan calls without invoking Anthropic API or Qdrant (suitability: plan + cost upper bound, no writes).")
 @click.option("--force", is_flag=True, help="Re-enrich even when the idempotency triple matches (burns tokens). per_bookmark only.")
-@click.option("--prompt-version", default=None, help="Override the prompt version: a prompt file stem such as per_bookmark_v2 or suitability_v2 (re-runs everything under the new key).")
+@click.option("--prompt-version", default=None, help="Override the prompt version: a prompt file stem for the chosen --task, <task>_vN (per_bookmark_v2 for the default task, suitability_v2 with --task suitability); re-runs everything under the new key.")
 @click.option("--source", "sources", multiple=True, help="[suitability] bookmarks.source to select (repeatable; default: x).")
 @click.option("--since", callback=_parse_when, default=None, help="[suitability] Bookmark observation time >= this (YYYY-MM-DD, ISO-8601 or epoch; UTC).")
 @click.option("--until", callback=_parse_when, default=None, help="[suitability] Bookmark observation time < this.")
@@ -458,6 +458,13 @@ def enrich_cmd(
 ) -> None:
     """Per-bookmark Haiku enrichment with idempotency by content_hash, or
     (--task suitability) bounded, budgeted suitability assessment."""
+    if prompt_version is not None:
+        from muninn.enrich.haiku import check_prompt_version  # lazy
+
+        try:
+            check_prompt_version(task, prompt_version)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--prompt-version") from exc
     if task == "suitability":
         if force:
             raise click.UsageError("--force is not available for --task suitability: assessments are append-only")
