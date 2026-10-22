@@ -33,6 +33,22 @@ except ImportError as exc:  # pragma: no cover - exercised via test with a stub
     ) from exc
 
 
+def _selectolax_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return version("selectolax")
+    except Exception:  # pragma: no cover - metadata missing in odd installs
+        return "unknown"
+
+
+# Recorded on every scrape_history revision (contract: extractor name+version).
+# Bump EXTRACTOR_REVISION when extract_text's behaviour changes.
+EXTRACTOR_NAME = "muninn-html-text"
+EXTRACTOR_REVISION = "1"
+EXTRACTOR_VERSION = f"{EXTRACTOR_REVISION}+selectolax-{_selectolax_version()}"
+
+
 # Tags whose text we never want.
 _DROP_TAGS = (
     "script", "style", "nav", "footer", "aside", "form",

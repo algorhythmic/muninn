@@ -113,6 +113,47 @@ LIVE_DOMAIN_RPS = 1.0
 IA_GLOBAL_RPS = 0.5
 AT_CAPTURE_WINDOW_DAYS = 365
 HTTP_TIMEOUT_SECONDS = 30
+# Live-pass HTTP cache entries older than this are refetched (RI-01 D9), so a
+# later `muninn scrape` can capture a new revision; `--refresh` bypasses the
+# cache entirely. Archive (Wayback) entries never expire: snapshots are
+# immutable.
+LIVE_CACHE_TTL_SECONDS = int(os.environ.get("MUNINN_LIVE_CACHE_TTL_SECONDS", str(24 * 3600)))
+
+
+# ── X API (muninn ingest x / muninn x auth) ───────────────────────
+@dataclass(frozen=True, repr=False)
+class XSettings:
+    """OAuth 2.0 app settings for the X connector, from the environment.
+
+    ``client_secret`` is set only for a confidential client. Tokens are never
+    read from the environment: they live in ``token_path`` (mode 0600),
+    written by `muninn x auth`.
+    """
+
+    client_id: str | None
+    client_secret: str | None
+    redirect_uri: str | None
+    token_path: Path
+
+    def __repr__(self) -> str:
+        secret = "<redacted>" if self.client_secret else None
+        return (
+            f"XSettings(client_id={self.client_id!r}, client_secret={secret}, "
+            f"redirect_uri={self.redirect_uri!r}, token_path={str(self.token_path)!r})"
+        )
+
+
+def load_x_settings() -> XSettings:
+    """Read MUNINN_X_CLIENT_ID, MUNINN_X_CLIENT_SECRET (optional),
+    MUNINN_X_REDIRECT_URI and MUNINN_X_TOKEN_FILE (default
+    $MUNINN_DATA_DIR/x-tokens.json) at call time."""
+    data_dir = load_paths().data_dir
+    return XSettings(
+        client_id=os.environ.get("MUNINN_X_CLIENT_ID") or None,
+        client_secret=os.environ.get("MUNINN_X_CLIENT_SECRET") or None,
+        redirect_uri=os.environ.get("MUNINN_X_REDIRECT_URI") or None,
+        token_path=_env_path("MUNINN_X_TOKEN_FILE", data_dir / "x-tokens.json"),
+    )
 
 # ── Synthesis container ───────────────────────────────────────────
 SAGA_CREDENTIALS_VOLUME = os.environ.get("SAGA_CREDENTIALS_VOLUME", "saga-claude-credentials")

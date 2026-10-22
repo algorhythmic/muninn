@@ -29,6 +29,7 @@ import httpx
 from muninn.config import (
     HTTP_TIMEOUT_SECONDS,
     IA_GLOBAL_RPS,
+    LIVE_CACHE_TTL_SECONDS,
     LIVE_DOMAIN_RPS,
     load_paths,
 )
@@ -64,10 +65,19 @@ class ScrapeClient:
         scrape_cache_dir: Optional[Path] = None,
         client: Optional[httpx.AsyncClient] = None,
         rate_limiter: Optional[RateLimiter] = None,
+        live_cache_ttl: Optional[float] = LIVE_CACHE_TTL_SECONDS,
+        refresh: bool = False,
+        clock=time.time,
     ) -> None:
+        """``live_cache_ttl``: seconds a cached live response stays usable
+        (None = forever). ``refresh``: never read the live cache (responses
+        are still written to it). Neither affects archive or CDX entries:
+        Wayback snapshots are immutable."""
         paths = load_paths()
-        self.http_cache = HttpCache(http_cache_dir or paths.http_cache_dir)
-        self.scrape_cache = HttpCache(scrape_cache_dir or paths.scrape_cache_dir)
+        self.http_cache = HttpCache(http_cache_dir or paths.http_cache_dir, clock=clock)
+        self.scrape_cache = HttpCache(scrape_cache_dir or paths.scrape_cache_dir, clock=clock)
+        self.live_cache_ttl = live_cache_ttl
+        self.refresh = refresh
         self.rate = rate_limiter or RateLimiter()
         self._client = client
         self._owns_client = client is None
@@ -117,7 +127,9 @@ class ScrapeClient:
           ``error_kind`` is one of ``"timeout" | "network_error"``.
         """
         cache_key = f"live:{url}"
-        cached = self.http_cache.get(cache_key)
+        cached = (
+            None if self.refresh else self.http_cache.get(cache_key, max_age=self.live_cache_ttl)
+        )
         if cached is not None:
             cached["from_cache"] = True
             cached["body_bytes"] = (cached.get("body") or "").encode(

@@ -10,6 +10,10 @@ Two cache instances are used in practice:
 The cache key is an arbitrary string (callers prefix it with the pass —
 ``live:``, ``ia:``, ``cdx:``, etc. — to avoid collisions). The on-disk
 filename is ``sha256(key).json``; for raw HTML, it's ``sha256(key).html.gz``.
+
+Entries never expire unless the caller passes ``max_age`` to :meth:`get`:
+the live pass does (RI-01 D9), Wayback and CDX entries don't. Age is the
+entry file's mtime against the injected ``clock``.
 """
 
 from __future__ import annotations
@@ -17,16 +21,18 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 class HttpCache:
     """File-backed HTTP cache. JSON for response payloads, gzip for raw HTML."""
 
-    def __init__(self, cache_dir: Path) -> None:
+    def __init__(self, cache_dir: Path, *, clock: Callable[[], float] = time.time) -> None:
         self._dir = cache_dir
         self._dir.mkdir(parents=True, exist_ok=True)
+        self._clock = clock
 
     def _hash(self, key: str) -> str:
         return hashlib.sha256(key.encode()).hexdigest()
@@ -37,11 +43,16 @@ class HttpCache:
     def _raw_path(self, key: str) -> Path:
         return self._dir / f"{self._hash(key)}.html.gz"
 
-    def get(self, key: str) -> Optional[dict]:
-        """Return the cached JSON payload for ``key``, or None if absent."""
+    def get(self, key: str, *, max_age: Optional[float] = None) -> Optional[dict]:
+        """Return the cached JSON payload for ``key``, or None if absent.
+
+        With ``max_age`` (seconds), an entry written longer ago than that
+        counts as absent; the next ``put`` replaces it."""
         p = self._key_path(key)
         if p.exists():
             try:
+                if max_age is not None and self._clock() - p.stat().st_mtime > max_age:
+                    return None
                 return json.loads(p.read_text())
             except (OSError, json.JSONDecodeError):
                 return None

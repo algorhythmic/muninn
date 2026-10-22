@@ -16,6 +16,20 @@ pass must have ``scrape_status='ok'``).
 All inserts use ``INSERT … ON CONFLICT(bookmark_id, pass) DO UPDATE`` so
 re-runs are idempotent (SC7) — row count stays constant across re-runs.
 
+Alongside each upsert, every fetch that observed a content state appends a
+``scrape_history`` revision (contract muninn-research-intake §4.4): digest
+over the normalized extracted text, extractor name and version,
+``retrieval_method`` ``live`` or ``archive`` (archive revisions are
+historical), and coverage. Unchanged content adds nothing (002 unique key).
+Transport failures and missing archives are operational states, not
+content, and add no revision.
+
+X rows (``source`` ``x`` / ``x_article``) are never scraped: their content
+comes from the X API, and a live fetch would overwrite it. Linked items
+(``x_link``) are scraped like any bookmark, but their ``enrichment_source``
+prefers the live pass, because research selection uses current captures
+(RI-01 §5); the browser lane keeps at_capture-first.
+
 ``scrape_all`` may interleave many bookmarks concurrently with a bounded
 semaphore; politeness is enforced by the shared :class:`RateLimiter` (one
 RPS per live origin, 0.5 RPS global to IA), not by the concurrency limit.
@@ -29,9 +43,13 @@ import sqlite3
 from typing import Iterable, Optional
 
 from muninn.db import connect, transaction
+from muninn.intake_records import API_CONTENT_SOURCES, SOURCE_X_LINK, item_ref_for, row_metadata
 from muninn.models import ScrapeResult
+from muninn.revisions import record_revision
+from muninn.sanitize import sanitize_url
 from muninn.scrape.at_capture import fetch_at_capture
 from muninn.scrape.client import ScrapeClient
+from muninn.scrape.extract import EXTRACTOR_NAME, EXTRACTOR_VERSION
 from muninn.scrape.live import fetch_live
 from muninn.scrape.recent_archive import fetch_recent_archive
 
@@ -82,10 +100,17 @@ async def scrape_one(
     results.append(live_result)
 
     # Persist + route enrichment_source atomically per bookmark.
-    enrichment_source = _pick_enrichment_source(results)
+    identity = _identity(conn, bookmark_row)
+    enrichment_source = _pick_enrichment_source(
+        results, prefer_live=identity["source"] == SOURCE_X_LINK
+    )
     with transaction(conn):
         for r in results:
             _upsert_scrape_result(conn, r)
+        # Live first: when a live and an archive capture have identical text,
+        # the one revision the unique key keeps is the current (live) one.
+        for r in sorted(results, key=lambda r: r.pass_ != "live"):
+            _record_history(conn, r, identity)
         _update_enrichment_source(conn, bookmark_id, enrichment_source)
 
     log.info(
@@ -105,16 +130,19 @@ async def scrape_all(
     client: Optional[ScrapeClient] = None,
     concurrency: int = 4,
     limit: Optional[int] = None,
+    sources: Optional[Iterable[str]] = None,
 ) -> dict:
     """Run dual-pass scrape for every ``content_visible=1`` bookmark.
 
     ``limit``: scrape only the N most recently captured bookmarks
     (newest ``captured_at`` first) — the roadmap's ~100-bookmark
     smoke-test workflow. Default: all visible bookmarks.
+    ``sources``: only rows whose ``bookmarks.source`` is listed. X post and
+    article rows are always skipped (their content comes from the X API).
 
     Returns aggregated stats: ``{processed, errors, by_source: {…}}``.
     """
-    bookmarks = _list_visible_bookmarks(conn, limit=limit)
+    bookmarks = _list_visible_bookmarks(conn, limit=limit, sources=sources)
     log.info("scraping %d visible bookmarks", len(bookmarks))
 
     own_client = client is None
@@ -146,10 +174,17 @@ async def scrape_all(
 
 # ── Routing ──────────────────────────────────────────────────────
 
-def _pick_enrichment_source(results: Iterable[ScrapeResult]) -> str:
-    """Apply the priority ladder. Only ``scrape_status='ok'`` rows count."""
+def _pick_enrichment_source(
+    results: Iterable[ScrapeResult], *, prefer_live: bool = False
+) -> str:
+    """Apply the priority ladder. Only ``scrape_status='ok'`` rows count.
+
+    ``prefer_live`` (linked items of X posts) puts the live pass first."""
     by_pass = {r.pass_: r for r in results}
-    for pass_name in ("at_capture", "recent_archive", "live"):
+    order = ("live", "at_capture", "recent_archive") if prefer_live else (
+        "at_capture", "recent_archive", "live"
+    )
+    for pass_name in order:
         r = by_pass.get(pass_name)
         if r is not None and r.scrape_status == "ok":
             return _PASS_TO_SOURCE[pass_name]
@@ -158,19 +193,15 @@ def _pick_enrichment_source(results: Iterable[ScrapeResult]) -> str:
 
 # ── DB helpers (kept here, not in muninn.db, since they're scrape-only) ──
 
-_VISIBLE_BOOKMARKS_SQL = """
-    SELECT bookmark_id, url, captured_at, content_visible
-    FROM bookmarks
-    WHERE content_visible = 1
-    ORDER BY bookmark_id
-"""
+_SKIPPED_SOURCES = ", ".join(f"'{s}'" for s in API_CONTENT_SOURCES)
 
-_VISIBLE_BOOKMARKS_NEWEST_SQL = """
-    SELECT bookmark_id, url, captured_at, content_visible
+_VISIBLE_BOOKMARKS_SQL = f"""
+    SELECT bookmark_id, url, captured_at, content_visible, source, source_id, source_metadata
     FROM bookmarks
     WHERE content_visible = 1
-    ORDER BY captured_at DESC, bookmark_id DESC
-    LIMIT ?
+      AND source NOT IN ({_SKIPPED_SOURCES})
+      {{source_filter}}
+    ORDER BY {{order}}
 """
 
 _UPSERT_SCRAPE_SQL = """
@@ -200,13 +231,97 @@ _UPSERT_SCRAPE_SQL = """
 
 
 def _list_visible_bookmarks(
-    conn: sqlite3.Connection, limit: Optional[int] = None
+    conn: sqlite3.Connection,
+    limit: Optional[int] = None,
+    sources: Optional[Iterable[str]] = None,
 ) -> list[dict]:
+    params: list = []
+    source_filter = ""
+    if sources is not None:
+        wanted = list(dict.fromkeys(sources))
+        source_filter = f"AND source IN ({', '.join('?' for _ in wanted)})" if wanted else "AND 0"
+        params.extend(wanted)
     if limit is not None:
-        cur = conn.execute(_VISIBLE_BOOKMARKS_NEWEST_SQL, (limit,))
+        sql = _VISIBLE_BOOKMARKS_SQL.format(
+            source_filter=source_filter, order="captured_at DESC, bookmark_id DESC"
+        ) + " LIMIT ?"
+        params.append(limit)
     else:
-        cur = conn.execute(_VISIBLE_BOOKMARKS_SQL)
-    return [dict(row) for row in cur.fetchall()]
+        sql = _VISIBLE_BOOKMARKS_SQL.format(source_filter=source_filter, order="bookmark_id")
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+# ── scrape_history (append-only revisions) ───────────────────────
+
+_BLOCKED_STATUSES = frozenset({"auth_required", "robots_disallowed", "paywall", "js_required"})
+_DELETED_HTTP = frozenset({404, 410})
+
+
+def _identity(conn: sqlite3.Connection, bookmark_row: dict) -> dict:
+    """source / item_ref / observation time for a bookmark being scraped."""
+    row = bookmark_row
+    if "source" not in row or "source_id" not in row:
+        found = conn.execute(
+            "SELECT bookmark_id, url, captured_at, source, source_id, source_metadata "
+            "FROM bookmarks WHERE bookmark_id = ?",
+            (int(bookmark_row["bookmark_id"]),),
+        ).fetchone()
+        row = dict(found) if found is not None else {**bookmark_row, "source": "", "source_id": ""}
+    source = row.get("source") or ""
+    url = row.get("url")
+    captured_at = row.get("captured_at")
+    return {
+        "source": source,
+        "url": url,
+        "item_ref": item_ref_for(source, str(row.get("source_id") or ""), url, row_metadata(row)),
+        # Linked items are not bookmarks; a browser bookmark's ADD_DATE is.
+        "observed_at": None if source == SOURCE_X_LINK or not captured_at else int(captured_at),
+    }
+
+
+def _coverage(r: ScrapeResult) -> Optional[str]:
+    """Contract coverage of one fetch, or None when it observed no content
+    state (no URL, no archive, timeout, network error, other HTTP errors)."""
+    status = r.scrape_status
+    if status in ("ok", "partial"):
+        if not (r.content_text or "").strip():
+            return "empty"
+        return "full" if status == "ok" and r.extraction_quality == "ok" else "partial"
+    if status in _BLOCKED_STATUSES:
+        return "blocked"
+    if status == "failed" and r.http_status in _DELETED_HTTP:
+        return "deleted"
+    return None
+
+
+def _record_history(conn: sqlite3.Connection, r: ScrapeResult, identity: dict) -> None:
+    coverage = _coverage(r)
+    if coverage is None:
+        return
+    is_archive = r.pass_ in ("at_capture", "recent_archive")
+    if is_archive and r.actual_snapshot_at is None:
+        return  # an archive revision must name its snapshot time
+    final = r.final_url or (r.archive_url if is_archive else None)
+    final_locator = sanitize_url(final).sanitized_url if final else None
+    if final_locator == identity["url"]:
+        final_locator = None
+    record_revision(
+        conn,
+        bookmark_id=r.bookmark_id,
+        item_ref=identity["item_ref"],
+        text=r.content_text,
+        coverage=coverage,  # type: ignore[arg-type]
+        retrieval_method="archive" if is_archive else "live",
+        scrape_pass=r.pass_,
+        extractor_name=EXTRACTOR_NAME,
+        extractor_version=EXTRACTOR_VERSION,
+        http_status=r.http_status,
+        final_locator=final_locator,
+        archive_snapshot_at=r.actual_snapshot_at if is_archive else None,
+        published_at=None,
+        retrieved_at=r.fetched_at,
+        observed_at=identity["observed_at"],
+    )
 
 
 def _upsert_scrape_result(conn: sqlite3.Connection, r: ScrapeResult) -> None:
@@ -244,11 +359,24 @@ def run_scrape(
     *,
     concurrency: int = 4,
     limit: Optional[int] = None,
+    refresh: bool = False,
+    sources: Optional[Iterable[str]] = None,
 ) -> dict:
     """Synchronous wrapper for ``scrape_all``: opens a connection, runs,
-    closes. For use from ``__main__`` or click commands."""
+    closes. For use from ``__main__`` or click commands. ``refresh``
+    bypasses the live HTTP cache so a changed page is re-captured."""
     conn = connect(db_path)
     try:
-        return asyncio.run(scrape_all(conn, concurrency=concurrency, limit=limit))
+        client = ScrapeClient(refresh=refresh)
+
+        async def _run() -> dict:
+            try:
+                return await scrape_all(
+                    conn, client=client, concurrency=concurrency, limit=limit, sources=sources
+                )
+            finally:
+                await client.close()
+
+        return asyncio.run(_run())
     finally:
         conn.close()
