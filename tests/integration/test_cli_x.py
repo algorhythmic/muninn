@@ -169,6 +169,17 @@ def test_x_auth_accepts_a_bare_code(db_path, x_env, fixed_randomness) -> None:
         result = invoke(db_path, "x", "auth", input="synthetic-auth-code\n")
     assert result.exit_code == 0, result.output
     assert parse_qs(route.calls[0].request.content.decode())["client_id"] == ["synthetic-client-id"]
+    assert "Warning: a bare code skips the state" in result.output
+
+
+def test_x_auth_requires_state_in_a_pasted_redirect_url(db_path, x_env, fixed_randomness) -> None:
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post(TOKEN_URL).mock(return_value=fx("token_exchange"))
+        result = invoke(db_path, "x", "auth",
+                        input="http://127.0.0.1:8765/callback?code=synthetic-auth-code\n")
+    assert result.exit_code == 1 and "has no `state` parameter" in result.output
+    assert not route.called and not x_env.exists()
+    assert "synthetic-auth-code" not in result.output
 
 
 def test_x_auth_rejects_a_state_mismatch_and_a_failed_exchange(db_path, x_env, fixed_randomness) -> None:

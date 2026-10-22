@@ -266,9 +266,11 @@ def x_auth_cmd(token_file: str | None) -> None:
     """Log in to X (OAuth 2.0 PKCE) and save tokens (mode 0600).
 
     Open the printed URL, approve access, then paste the full redirect URL
-    (or just its `code` value). Needs MUNINN_X_CLIENT_ID and
+    (its `state` is checked against this login; a bare `code` value is
+    accepted with a warning, unchecked). Needs MUNINN_X_CLIENT_ID and
     MUNINN_X_REDIRECT_URI (MUNINN_X_CLIENT_SECRET for a confidential app).
     """
+    import secrets
     from pathlib import Path
     from urllib.parse import parse_qs, urlsplit
 
@@ -292,10 +294,20 @@ def x_auth_cmd(token_file: str | None) -> None:
             raise click.ClickException(f"Authorization was not granted: {query['error'][0]}")
         code = (query.get("code") or [""])[0]
         state = (query.get("state") or [None])[0]
-        if state is not None and state != request.state:
+        if state is None:
+            raise click.ClickException(
+                "The pasted redirect URL has no `state` parameter, so it cannot be checked "
+                "against this login; paste the full redirect URL from the browser's address bar."
+            )
+        if not secrets.compare_digest(state, request.state):
             raise click.ClickException("State mismatch: the redirect is not from this login; try again.")
     else:
         code = pasted
+        click.echo(
+            "Warning: a bare code skips the state (CSRF) check; paste the full redirect URL "
+            "to have it verified.",
+            err=True,
+        )
     if not code:
         raise click.ClickException("No authorization code found in the input.")
     try:
