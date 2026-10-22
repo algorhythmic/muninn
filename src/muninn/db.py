@@ -1,40 +1,264 @@
-"""SQLite (canonical) + DuckDB (analytics) connection management."""
+"""SQLite (canonical) + DuckDB (analytics) connection management.
+
+Schema changes ship as numbered migrations `schemas/sql/NNN_*.sql`; the
+applied version lives in `PRAGMA user_version` (RI-01 §4). Migrating is
+explicit — `muninn db migrate`, or `init_db()` for tests and scripts — and
+never happens on `connect()`, because the CLI, MCP and DuckDB readers share
+the file under WAL. `connect()` refuses a DB whose schema is behind the code.
+"""
 
 from __future__ import annotations
 
+import re
 import sqlite3
+import time
+import warnings
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
 from muninn.config import load_paths
 
 
-SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schema.sql"
+MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "schemas" / "sql"
+_MIGRATION_NAME = re.compile(r"^(\d{3})_[\w-]+\.sql$")
 
 
-def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
-    """Open a SQLite connection with operational PRAGMAs applied."""
-    if db_path is None:
-        db_path = load_paths().db_path
-    db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+class SchemaVersionError(RuntimeError):
+    """The DB's schema version is incompatible with this build."""
+
+
+class MigrationError(RuntimeError):
+    """A migration failed (and was rolled back) or the result failed checks."""
+
+
+class SchemaAheadWarning(UserWarning):
+    """The DB was migrated by a newer build; additive changes are ignored."""
+
+
+@dataclass
+class MigrationPlan:
+    db_path: Path
+    current: int  # effective version before migrating (unstamped 001 DB = 1)
+    head: int
+    pending: list[Path] = field(default_factory=list)
+    unstamped: bool = False  # pre-migrator DB at user_version=0: gets stamped 1
+    backup_path: Path | None = None
+
+
+def discover_migrations(migrations_dir: Path | str | None = None) -> list[tuple[int, Path]]:
+    """(version, path) pairs sorted by number. Must be exactly 001..N."""
+    root = Path(migrations_dir or MIGRATIONS_DIR)
+    found = sorted(
+        (int(m[1]), p) for p in root.glob("*.sql") if (m := _MIGRATION_NAME.match(p.name))
+    )
+    if not found or [n for n, _ in found] != list(range(1, len(found) + 1)):
+        raise MigrationError(f"Migrations in {root} must be numbered 001..N without gaps or duplicates")
+    return found
+
+
+def schema_version(conn: sqlite3.Connection) -> int:
+    """Effective schema version. A DB built from 001 before the migrator
+    existed has user_version=0 but already has `bookmarks`: that counts as 1."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version == 0 and _has_table(conn, "bookmarks"):
+        return 1
+    return version
+
+
+def connect(
+    db_path: Path | str | None = None, *, migrations_dir: Path | str | None = None
+) -> sqlite3.Connection:
+    """Open an existing muninn DB with operational PRAGMAs applied.
+
+    Fails fast if the file is missing or its schema is behind this build
+    (run `muninn db migrate`); warns and continues if it is ahead."""
+    path = _resolve(db_path)
+    if not path.exists():
+        raise SchemaVersionError(
+            f"No muninn database at {path}: run `muninn db migrate` to create it."
+        )
+    conn = _open(path)
+    try:
+        _check_schema(conn, len(discover_migrations(migrations_dir)))
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def init_db(
+    db_path: Path | str | None = None, *, migrations_dir: Path | str | None = None
+) -> sqlite3.Connection:
+    """Create the DB if empty, migrate it to head, and return a connection.
+
+    Entry point for tests and scripts/init-db.py; operators upgrading an
+    existing DB use `muninn db migrate`. Safe to call on a DB already at head."""
+    path = _resolve(db_path)
+    conn = _open(path)
+    try:
+        plan = _migrate(conn, path, migrations_dir, dry_run=False)
+        _check_schema(conn, plan.head)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def migrate(
+    db_path: Path | str | None = None,
+    *,
+    migrations_dir: Path | str | None = None,
+    dry_run: bool = False,
+) -> MigrationPlan:
+    """Apply pending migrations (backing the file up first). With dry_run,
+    only report the plan: a missing file is not created, and an existing one
+    is only read (no PRAGMAs, so not even its journal mode changes)."""
+    path = _resolve(db_path)
+    if dry_run and not path.exists():
+        found = discover_migrations(migrations_dir)
+        return MigrationPlan(path, 0, len(found), [p for _, p in found])
+    conn = sqlite3.connect(str(path)) if dry_run else _open(path)
+    try:
+        return _migrate(conn, path, migrations_dir, dry_run=dry_run)
+    finally:
+        conn.close()
+
+
+def _migrate(
+    conn: sqlite3.Connection, path: Path, migrations_dir: Path | str | None, *, dry_run: bool
+) -> MigrationPlan:
+    migrations = discover_migrations(migrations_dir)
+    current = schema_version(conn)
+    plan = MigrationPlan(
+        db_path=path,
+        current=current,
+        head=len(migrations),
+        pending=[p for n, p in migrations if n > current],
+        unstamped=current == 1 and conn.execute("PRAGMA user_version").fetchone()[0] == 0,
+    )
+    if dry_run or not (plan.pending or plan.unstamped):
+        return plan
+    if plan.pending and conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
+        plan.backup_path = _backup(conn, path, current)
+
+    # Manual transaction control. foreign_keys must be OFF (outside any
+    # transaction) so a table-rebuild migration's DROP TABLE cannot cascade;
+    # violations are caught by foreign_key_check before each COMMIT instead.
+    isolation = conn.isolation_level
+    conn.isolation_level = None
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        if plan.unstamped:
+            _apply(conn, 1, "", "bootstrap stamp")
+        for version, mpath in migrations[current:]:
+            _apply(conn, version, mpath.read_text(), mpath.name)
+        _verify(conn, plan.backup_path)
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.isolation_level = isolation
+    return plan
+
+
+def _apply(conn: sqlite3.Connection, version: int, sql: str, name: str) -> None:
+    """One migration plus its user_version bump, atomically. Not
+    executescript: it commits on entry and can't be rolled back as a unit."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in _statements(sql):
+            conn.execute(statement)
+        if conn.execute("PRAGMA foreign_key_check").fetchone():
+            raise MigrationError("leaves foreign-key violations")
+        conn.execute(f"PRAGMA user_version = {int(version)}")
+        conn.execute("COMMIT")
+    except Exception as exc:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise MigrationError(f"Migration {name} failed and was rolled back: {exc}") from exc
+
+
+def _statements(sql: str) -> Iterator[str]:
+    """Split a script into single statements. sqlite3.complete_statement
+    knows about string literals, comments and CREATE TRIGGER … END bodies."""
+    buf = ""
+    for piece in sql.split(";"):
+        buf += piece + ";"
+        if sqlite3.complete_statement(buf):
+            yield buf
+            buf = ""
+    if buf:  # trailing text: drop the ";" added above; SQLite rejects it if truncated
+        yield buf[:-1]
+
+
+def _verify(conn: sqlite3.Connection, backup_path: Path | None) -> None:
+    problems = [r[0] for r in conn.execute("PRAGMA integrity_check")]
+    if problems != ["ok"]:
+        raise MigrationError(
+            f"integrity_check failed after migrating: {problems[:5]}; restore {backup_path}"
+        )
+    if conn.execute("PRAGMA foreign_key_check").fetchone():
+        raise MigrationError(f"foreign_key_check failed after migrating; restore {backup_path}")
+
+
+def _backup(conn: sqlite3.Connection, path: Path, version: int) -> Path:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    dest = path.with_name(f"{path.name}.bak-v{version}-{stamp}")
+    target = sqlite3.connect(str(dest))
+    try:
+        conn.backup(target)
+    finally:
+        target.close()
+    return dest
+
+
+def _check_schema(conn: sqlite3.Connection, head: int) -> None:
+    current = schema_version(conn)
+    minimum = _min_reader_version(conn)
+    if head < minimum:
+        raise SchemaVersionError(
+            f"Database schema v{current} requires muninn with schema v{minimum} or newer "
+            f"(this build: v{head}). Upgrade muninn or restore a backup."
+        )
+    if current < head:
+        raise SchemaVersionError(
+            f"Database schema is v{current} but this muninn needs v{head}: run `muninn db migrate`."
+        )
+    if current > head:
+        warnings.warn(
+            f"Database schema v{current} is newer than this muninn (v{head}); continuing.",
+            SchemaAheadWarning,
+            stacklevel=3,
+        )
+
+
+def _min_reader_version(conn: sqlite3.Connection) -> int:
+    """Oldest schema version a reader may have. Only a non-additive migration
+    sets it, in schema_meta (no migration creates that table yet)."""
+    if not _has_table(conn, "schema_meta"):
+        return 1
+    row = conn.execute("SELECT value FROM schema_meta WHERE key = 'min_reader_version'").fetchone()
+    return int(row[0]) if row else 1
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    query = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?"
+    return conn.execute(query, (name,)).fetchone() is not None
+
+
+def _resolve(db_path: Path | str | None) -> Path:
+    return Path(db_path) if db_path is not None else load_paths().db_path
+
+
+def _open(path: Path) -> sqlite3.Connection:
+    """Open (creating if needed) with operational PRAGMAs; no schema check."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    return conn
-
-
-def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
-    """Apply schema.sql against a fresh DB. Idempotent: schema uses CREATE TABLE
-    (no IF NOT EXISTS) so calling this twice on a populated DB will error —
-    callers should use a fresh path."""
-    conn = connect(db_path)
-    conn.executescript(SCHEMA_PATH.read_text())
-    conn.commit()
     return conn
 
 

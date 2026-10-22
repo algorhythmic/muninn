@@ -22,6 +22,8 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn timeline [--out p.json]
     muninn vault compile
     muninn mcp
+    muninn db migrate [--dry-run]
+    muninn db status
 """
 
 from __future__ import annotations
@@ -280,6 +282,60 @@ def mcp_cmd(ctx: click.Context) -> None:
     from muninn.consumers.mcp.server import main as mcp_main  # lazy
 
     mcp_main()
+
+
+# ── db (schema migrations; explicit, never implicit) ───────────────
+
+
+@cli.group("db")
+@click.pass_context
+def db_group(ctx: click.Context) -> None:
+    """Schema version and migrations for the SQLite store."""
+
+
+def _echo_plan(plan) -> None:
+    unstamped = " (unstamped; migrate records it)" if plan.unstamped else ""
+    click.echo(f"Database: {plan.db_path}")
+    click.echo(f"Schema version: v{plan.current}{unstamped}, head: v{plan.head}")
+    if plan.current > plan.head:
+        click.echo("Database is ahead of this muninn; nothing to apply.")
+    for path in plan.pending:
+        click.echo(f"  pending: {path.name}")
+
+
+@db_group.command("migrate")
+@click.option("--dry-run", is_flag=True, help="Print the plan (current version, head, pending files) and change nothing.")
+@click.pass_context
+def db_migrate_cmd(ctx: click.Context, dry_run: bool) -> None:
+    """Back up the DB, then apply pending migrations up to head."""
+    from muninn.db import MigrationError, migrate  # lazy
+
+    try:
+        plan = migrate(ctx.obj.get("db"), dry_run=dry_run)
+    except MigrationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _echo_plan(plan)
+    if dry_run:
+        click.echo("Dry run: nothing changed.")
+    elif plan.pending or plan.unstamped:
+        if plan.backup_path:
+            click.echo(f"Backup: {plan.backup_path}")
+        click.echo(f"Migrated to v{plan.head}.")
+    else:
+        click.echo("Nothing to migrate.")
+
+
+@db_group.command("status")
+@click.pass_context
+def db_status_cmd(ctx: click.Context) -> None:
+    """Show the schema version, head and pending migrations (read-only)."""
+    from muninn.db import MigrationError, migrate  # lazy
+
+    try:
+        plan = migrate(ctx.obj.get("db"), dry_run=True)
+    except MigrationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _echo_plan(plan)
 
 
 if __name__ == "__main__":
