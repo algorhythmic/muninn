@@ -123,6 +123,49 @@ class TestRule1bTrackingParams:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Rule 1c — Host-scoped tracking params (X share links)
+# ═══════════════════════════════════════════════════════════════════════
+
+X_HOSTS = ["x.com", "www.x.com", "mobile.x.com", "twitter.com", "www.twitter.com",
+           "mobile.twitter.com", "m.twitter.com", "X.COM"]
+
+
+class TestRule1cHostTrackingParams:
+    @pytest.mark.parametrize("host", X_HOSTS)
+    def test_x_share_params_stripped_silently(self, host):
+        url = f"https://{host}/someone/status/1234567890123456789?s=20&t=SyntheticShareTok_0001"
+        result = sanitize_url(url)
+        assert result.sanitized_url == f"https://{host.lower()}/someone/status/1234567890123456789"
+        assert result.redacted_param_names == []
+
+    @pytest.mark.parametrize("param", ["s", "t", "ref_src", "ref_url", "S", "T"])
+    def test_each_x_share_param_stripped_and_others_kept(self, param):
+        result = sanitize_url(f"https://x.com/search?q=keep&{param}=share_value&f=live")
+        assert "share_value" not in result.sanitized_url
+        assert result.sanitized_url == "https://x.com/search?f=live&q=keep"
+
+    def test_x_share_params_in_fragment_stripped(self):
+        result = sanitize_url("https://twitter.com/someone#s=20&t=SyntheticShareTok_0001&a=b")
+        assert result.sanitized_url == "https://twitter.com/someone#a=b"
+
+    @pytest.mark.parametrize("url", [
+        "https://example.com/watch?s=20&t=90",
+        "https://notx.com/a?s=1&t=2",
+        "https://x.com.example.org/a?s=1&t=2",
+        "https://api.x.com/a?s=1&t=2",
+        "https://t.co/abc?s=1&t=2",
+    ])
+    def test_other_hosts_keep_s_and_t(self, url):
+        result = sanitize_url(url)
+        assert "s=" in result.sanitized_url and "t=" in result.sanitized_url
+
+    def test_dangerous_params_on_x_still_redacted(self):
+        result = sanitize_url("https://x.com/i/flow?s=20&token=leak")
+        assert result.sanitized_url == "https://x.com/i/flow"
+        assert result.redacted_param_names == ["token"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Rule 2 — JWT-shape detection
 # ═══════════════════════════════════════════════════════════════════════
 

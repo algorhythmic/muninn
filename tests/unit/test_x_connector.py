@@ -474,6 +474,18 @@ def test_locator_order_then_sanitize(entity, source, locator) -> None:
     assert link.locator_source == source and link.locator == locator
 
 
+def test_x_share_params_never_reach_a_locator() -> None:
+    link = parse_url_entity(
+        {"url": "https://t.co/A",
+         "expanded_url": "https://twitter.com/someone/status/1234567890123456789?s=20&t=SyntheticShareTok_0001"},
+        0,
+    )
+    assert link.locator == "https://twitter.com/someone/status/1234567890123456789"
+    assert link.kind == "x_post" and link.redacted_param_names == ()
+    profile = parse_url_entity({"url": "https://t.co/B", "expanded_url": "https://x.com/someone?s=21&t=Tok"}, 1)
+    assert profile.locator == "https://x.com/someone"
+
+
 def test_entity_without_any_locator() -> None:
     link = parse_url_entity({"url": None, "expanded_url": ""}, 3)
     assert link.locator is None and link.parse_error == "no_locator" and link.position == 3
