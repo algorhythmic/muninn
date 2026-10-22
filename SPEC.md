@@ -150,6 +150,8 @@ v1 implementation decomposes into **5 streams**. Each stream owns specific table
 **Owns (writes):** `eras`, `analyses`, `cross_references`, `synthesis_runs`; updates `enriched` (deep-pass overwrites + `key_quotes` column).
 **Reads:** `bookmarks`, `enriched`, `scrape_results`.
 **Modules:** `src/muninn/synthesis/`, `containers/synthesis/`, `scripts/launch-synthesis.sh`, `schemas/json/`.
+
+> **Superseded (2026-10-21, ADR-013):** `containers/synthesis/` and `scripts/launch-synthesis.sh` are removed. Synthesis runs through the task/result contract in `docs/synthesis-contract.md`, with a budgeted direct API runner as the default.
 **Depends on:** Stream 3. *(Originally also on Saga Phase 1+2 infrastructure, a dependency removed by ADR-010/ADR-013. The synthesis runner is now a task/result contract.)*
 
 **Success criteria:**
@@ -1015,6 +1017,8 @@ ALTER TABLE enriched ADD COLUMN key_quotes TEXT
 ---
 
 ## Monorepo directory layout
+
+> **Partly stale (2026-10-21):** the synthesis container files (`container.py`, `launch-synthesis.sh`, `containers/synthesis/`) are removed (ADR-013); migrations now live in `schemas/sql/NNN_*.sql` and `schema.sql` is only a mirror of 001 (ADR-009); new modules include `ingest/x.py`, `ingest/x_store.py`, `search/`, `consumers/packets/`, `intake_records.py` and `revisions.py`. See `CLAUDE.md`'s code map for the current layout.
 
 Modern `src/`-layout Python package for code, with non-Python artifacts (Docker, JSON Schemas, SQL DDL, scripts) at the repo root in conventional locations. Mirrors Saga's `containers/` and `scripts/` conventions where they apply.
 

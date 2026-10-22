@@ -81,9 +81,9 @@ This phase comes after the X slice. Synthesis (era narratives, deep passes, ad-h
 - Muninn validates the result file and writes it to the database.
 - The default runner is a direct Anthropic API call with an explicit budget. Any operator-chosen harness can run the same task file instead (a local Claude Code session, or an Odin-dispatched session).
 
-- [ ] **Define the contract.** Specify the task and result file layout. Fix `task-input.schema.json`, which rejects the orchestrator's `attempt` field. Specify how a run is triggered: `muninn synthesize … --emit-task` / `--ingest-result`.
-- [ ] **Implement the budgeted API runner.** Add per-run and monthly caps, use the batch API where latency allows, and persist usage.
-- [ ] **Retire the Saga-style container path.** Remove `containers/synthesis/`, `scripts/launch-synthesis.sh` and the credentials-volume config once the contract lands.
+- [x] **Define the contract.** *Done 2026-10-21 on `x-slice`:* `muninn-synthesis/1` in [`synthesis-contract.md`](synthesis-contract.md); `muninn synthesize … --emit-task DIR` and `muninn synthesize ingest-result FILE`; `task-input.schema.json` accepts `attempt`.
+- [x] **Implement the budgeted API runner.** *Done 2026-10-21 on `x-slice`:* per-run `--max-cost-usd` (default $3) and a required monthly cap, pre-call worst-case check, measured usage in `usage_records`. The Batch API and structured outputs remain future work.
+- [x] **Retire the Saga-style container path.** *Done 2026-10-21:* `containers/synthesis/`, `scripts/launch-synthesis.sh`, `synthesis/container.py` and the credentials-volume config are removed.
 - [ ] **Synthesis use cases.**
   - *Era narratives:* "summarize my reading on [topic] over [period]".
   - *Deep pass:* flagged bookmarks get a longer summary plus key quotes.

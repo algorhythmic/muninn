@@ -391,7 +391,7 @@ Scope rules:
 
 ## ADR-013 — Harness-agnostic synthesis contract
 
-**Status:** Accepted (2026-10-21). Partially supersedes ADR-002, for synthesis execution only.
+**Status:** Accepted (2026-10-21). Partially supersedes ADR-002, for synthesis execution only. *Implemented 2026-10-21 on `x-slice`:* the contract is specified in `docs/synthesis-contract.md`, and the container path is removed.
 
 **Context.**
 - Synthesis covers three jobs: era narratives, deep passes and ad-hoc analyses.

@@ -52,10 +52,10 @@ Per-bookmark `ADD_DATE` unix timestamps are the authoritative dates for browser 
 - `vector/`: pluggable embeddings. sentence-transformers/EmbeddingGemma is the default; `hash` is a placeholder for tests/offline, selected via `MUNINN_EMBEDDING_BACKEND`. Also the Qdrant helpers and `reconcile.py` (backfills missing points, refreshes stale ones, drops points for hidden rows; `scripts/reconcile-vector-index.py` wraps it).
 - `search/`: the retrieval interface (ADR-014). MCP search goes through `get_search_backend()` (`MUNINN_SEARCH_BACKEND`, default `fts5-qdrant`). Backends return bookmark ids only; visibility is enforced when hits are hydrated from SQLite.
 - `intake_records.py`, `revisions.py`: row → contract-record mapping and the shared `scrape_history` writer (stdlib-only).
-- `synthesis/`: orchestrator and JSON Schema validation. The container runner is frozen pending ADR-013's task/result contract.
+- `synthesis/`: orchestrator, JSON Schema validation, the task/result file contract (`muninn-synthesis/1`, `docs/synthesis-contract.md`) and the budgeted direct API runner (default model `claude-opus-5-5`; per-run `--max-cost-usd`, and a required monthly cap `MUNINN_SYNTHESIS_MONTHLY_BUDGET_USD`). The Saga-style container path is removed (ADR-013).
 - `consumers/`: Click CLI `muninn …`, FastMCP stdio server, vault compiler with Jinja templates (X items in `vault/x_pages.py`), timeline, Parquet, and `packets/` (evidence-packet export, canonical JSON, tombstones).
 
-CLI: `muninn ingest [html] PATH|ingest x|x auth|scrape|enrich [--task suitability]|synthesize|triage|status|deep-pass|export parquet|export packets|timeline|vault|mcp|db migrate|db status`.
+CLI: `muninn ingest [html] PATH|ingest x|x auth|scrape|enrich [--task suitability]|synthesize {era|deep-pass|analyze} [--emit-task DIR]|synthesize ingest-result FILE|triage|status|deep-pass|export parquet|export packets|timeline|vault|mcp|db migrate|db status`.
 
 DB: numbered migrations in `schemas/sql/NNN_*.sql`, applied only by `muninn db migrate [--dry-run]` (backup first) or by `init_db()` / `scripts/init-db.py` for a fresh file. `PRAGMA user_version` is the applied version; `connect()` refuses a missing, empty or behind database and warns on an ahead one. `schema.sql` is a test-guarded byte mirror of `001_initial.sql` only, not the full schema.
 
@@ -65,7 +65,7 @@ The Research Intake producer contract is `docs/contracts/MUNINN-RESEARCH-INTAKE.
 
 1. Haiku prompt caching never hits (0% on the 58-call smoke run; the shared prefix is likely below the model's minimum cacheable token count). Investigate before any bulk enrichment run. The cost impact is modest at Haiku prices but nonzero.
 2. Vault "Related" links come from era/tag heuristics, not `cross_references` (SPEC wants bidirectional model-produced refs). Revisit once deep passes populate that table.
-3. The synthesis container launches interactive `claude` but never feeds it the task JSON, and `task-input.schema.json` rejects the orchestrator's own `attempt` field. This is superseded by ADR-013's task/result contract (Phase 4), so don't fix the container path.
+3. ~~The synthesis container never received its task, and `task-input.schema.json` rejected `attempt`.~~ Closed on `x-slice`: the container path is removed and the task/result contract accepts `attempt` (ADR-013). No synthesis run has happened against a real model yet.
 4. No robots.txt respect in the live scraper.
 5. Dependency drift and a prompt-version bug, found 2026-10-21 (details in `docs/research-intake/RI-01-extension-spike.md` §6). **Fixed on branch `adr-reset-x-first`:** selectolax/mcp/anthropic pins, `uv.lock`, fatal extraction import, `--prompt-version` passthrough with fail-fast. Live Anthropic SDK 2.x behaviour is untested; every test mocks the client.
 6. Re-enrichment (`enrich --force`, a new prompt version, or changed content) still overwrites a deep pass's summary and tags, and there is no column recording a deep pass's own provenance. Whether deep-pass content should survive is undecided. (The original D6, the deep pass clobbering the idempotency triple, is fixed on `x-slice`.)
