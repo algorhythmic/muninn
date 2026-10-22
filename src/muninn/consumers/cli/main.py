@@ -526,6 +526,7 @@ def synthesize_deep_pass_cmd(
     from muninn.synthesis.orchestrator import run_deep_pass  # lazy
 
     conn = connect(ctx.obj.get("db"))
+    completed = 0
     try:
         if pending:
             ids = [
@@ -539,12 +540,21 @@ def synthesize_deep_pass_cmd(
                 return
             for bid in ids:
                 result = run_deep_pass(bid, conn=conn)
+                completed += result.status == "completed"
                 click.echo(f"  bookmark_id={bid}: {result.status}")
         else:
             result = run_deep_pass(bookmark_id, conn=conn)
+            completed += result.status == "completed"
             click.echo(f"Synthesize deep-pass {bookmark_id}: {result.status}")
     finally:
         conn.close()
+    if completed:
+        # The deep pass refreshed FTS in its own transaction; the Qdrant
+        # points are now stale until the (network) reconcile re-embeds them.
+        click.echo(
+            f"Deep pass rewrote {completed} summary(ies): run "
+            "`python scripts/reconcile-vector-index.py` to refresh the vector index."
+        )
 
 
 @synthesize_group.command("analyze")
