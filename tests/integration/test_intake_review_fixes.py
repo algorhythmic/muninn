@@ -243,3 +243,106 @@ def test_recapturing_a_linked_item_changes_the_context(fresh_db, tmp_path) -> No
     assert run.assessed == 1
     # Same subject revision, two contexts.
     assert tuple(conn.execute("SELECT COUNT(DISTINCT scrape_history_id), COUNT(*) FROM assessments").fetchone()) == (1, 2)
+
+
+# ── Finding 2: a hidden child's locator inside a visible parent ───────
+
+SECRET = "https://secret.example.org/private-doc"
+SECRET_HOST = "secret.example.org"
+
+
+def _packet_texts(out) -> str:
+    return "\n".join(p.read_text() for p in sorted(out.rglob("*.json"))) if out.exists() else ""
+
+
+def _calls(client) -> str:
+    return "\n".join(c.kwargs["messages"][0]["content"] for c in client.messages.create.call_args_list)
+
+
+def _hide(conn, item) -> None:
+    conn.execute("UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = ?", (item.bookmark_id,))
+    conn.commit()
+
+
+def test_hidden_locator_in_the_current_revision_reaches_neither_model_nor_packet(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    post = seed_x_post(conn, "1900000000000000031", f"Great writeup {SECRET.replace('secret', 'Secret')} on retrieval eval",
+                       captured_at=T0, published_at=T0 - 100)
+    conn.execute("UPDATE bookmarks SET title = ? WHERE bookmark_id = ?",
+                 (f"@synth_author_a: Great writeup {SECRET}", post.bookmark_id))
+    child = seed_link(conn, post, position=0, unwound_url=SECRET, text="Retrieval eval method.",
+                      title="Private doc", retrieved_at=T0 + 10)
+    _hide(conn, child)
+    profile = load_interest_profile(write_profile(tmp_path))
+    client = fake_client(default=judgement(evidence=[
+        {"item_id": post.item_id, "stance": "supports", "excerpt": "Great writeup [hidden link] on", "note": "n"},
+    ]))
+    run = assess_suitability(conn, profile, client, model=MODEL, now=T0 + 100)
+    sent = _calls(client).lower()
+    assert run.assessed == 1 and SECRET_HOST not in sent and x_pages.HIDDEN_LINK_TEXT in sent
+    assert run.evidence_dropped == 1  # it quotes the masked text, not the stored revision
+
+    out = tmp_path / "out"
+    export = export_packets(conn, out, now=T0 + 400)
+    assert export.written == [] and not export.invalid
+    assert export.skipped == [(post.item_id, "primary assessment's revision quotes a hidden item's locator; "
+                                             "re-sync and reassess")]
+    assert SECRET_HOST not in _packet_texts(out).lower()
+
+
+def test_revisions_and_assessments_from_before_the_hide_are_left_out(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    post = seed_x_post(conn, "1900000000000000031", f"Great writeup {SECRET} on retrieval eval",
+                       captured_at=T0, published_at=T0 - 100)
+    child = seed_link(conn, post, position=0, unwound_url=SECRET, text="Retrieval eval method and results.",
+                      retrieved_at=T0 + 10)
+    profile = load_interest_profile(write_profile(tmp_path))
+    client = fake_client(default=judgement(rationale=f"The linked doc at {SECRET} reports results."))
+    assess_suitability(conn, profile, client, model=MODEL, now=T0 + 100)
+    # Policy hides the domain; the next sync records the masked post text.
+    _hide(conn, child)
+    add_revision(conn, post, "Great writeup [hidden link] on retrieval eval", retrieval_method="x_api",
+                 retrieved_at=T0 + 200, published_at=T0 - 100, observed_at=T0)
+    second = fake_client(default=judgement())
+    assert assess_suitability(conn, profile, second, model=MODEL, now=T0 + 300).assessed == 1
+    assert SECRET_HOST not in _calls(second).lower()
+
+    out = tmp_path / "out"
+    (written,) = export_packets(conn, out, now=T0 + 400).written
+    packet = json.loads(written.path.read_bytes())
+    assert SECRET_HOST not in _packet_texts(out).lower()
+    assert [r["text"] for r in packet["content_revisions"]] == ["Great writeup [hidden link] on retrieval eval"]
+    assert len(packet["assessments"]) == 1  # the pre-hide assessment saw the hidden doc
+
+
+def test_pre_hide_assessment_is_left_out_even_without_a_locator(fresh_db, tmp_path) -> None:
+    """Its context included the since-hidden item, so its rationale may paraphrase it."""
+    conn = fresh_db
+    post, link = _post_with_link(conn)
+    profile = load_interest_profile(write_profile(tmp_path))
+    assess_suitability(conn, profile, fake_client(default=judgement(rationale="The notes say recall doubled.")),
+                       model=MODEL, now=T0 + 100)
+    _hide(conn, link)
+    from tests.integration.intake_fakes import PROFILE_V2
+
+    v2 = load_interest_profile(write_profile(tmp_path, PROFILE_V2, "v2.yml"))
+    assess_suitability(conn, v2, fake_client(default=judgement(rationale="Post only.")), model=MODEL, now=T0 + 200)
+    (written,) = export_packets(conn, tmp_path / "out", now=T0 + 300).written
+    packet = json.loads(written.path.read_bytes())
+    assert [a["rationale"] for a in packet["assessments"]] == ["Post only."]
+    assert "recall doubled" not in json.dumps(packet)
+
+
+def test_packet_titles_mask_a_hidden_locator(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    post = seed_x_post(conn, "1900000000000000032", "Masked text [hidden link] here.", captured_at=T0,
+                       published_at=T0 - 100)
+    conn.execute("UPDATE bookmarks SET title = ? WHERE bookmark_id = ?",
+                 ("@synth_author_a: Masked text https://secret.example.org/priv…", post.bookmark_id))
+    _hide(conn, seed_link(conn, post, position=0, unwound_url=SECRET, text="x", retrieved_at=T0 + 10))
+    profile = load_interest_profile(write_profile(tmp_path))
+    assess_suitability(conn, profile, fake_client(), model=MODEL, now=T0 + 100)
+    (written,) = export_packets(conn, tmp_path / "out", now=T0 + 200).written
+    packet = json.loads(written.path.read_bytes())
+    assert packet["items"][0]["title"] == "@synth_author_a: Masked text [hidden link]"
+    assert SECRET_HOST not in _packet_texts(tmp_path / "out")

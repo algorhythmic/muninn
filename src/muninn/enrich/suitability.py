@@ -21,7 +21,11 @@ Rules (contract ``muninn-research-intake`` §4.6, RI-01 §3):
 * **Bounded selection**: only rows the command selects (``sources``,
   bookmark observation window, ``limit`` on calls) are assessed. Ingest
   never triggers assessment. Hidden rows (``content_visible = 0``) are
-  never selected and never shown as context.
+  never selected and never shown as context. A visible item can still
+  quote a hidden item's locator (text, title or locator stored before a
+  policy change): every locator of a hidden item linked from the subject
+  or from a shown linked item is masked as ``[hidden link]`` in
+  everything sent to the model (contract §9).
 * **Budget**: before each call the worst-case cost of that call is checked
   against what is left of ``max_cost_micro_usd``; the run stops cleanly
   when it would not fit. Spend is measured from each response's
@@ -88,7 +92,10 @@ from muninn.enrich.pricing import (
 from muninn.intake_records import (
     current_revision_row,
     export_item_id,
+    hidden_child_locators,
     iso,
+    mask_locators,
+    mask_title,
     revision_text,
 )
 
@@ -147,6 +154,8 @@ class ContextItem:
     revision: sqlite3.Row | None
     relation: str | None = None
     position: int | None = None
+    # Locators of hidden items, masked in everything this item shows.
+    hidden: frozenset[str] = frozenset()
 
     @property
     def coverage(self) -> str | None:
@@ -155,6 +164,15 @@ class ContextItem:
     @property
     def has_content(self) -> bool:
         return self.revision is not None and self.revision["coverage"] not in NO_CONTENT
+
+    def shown(self, value: str | None) -> str | None:
+        """``value`` as the model sees it: hidden locators masked."""
+        return mask_locators(value, self.hidden) if value and self.hidden else value
+
+    @property
+    def shown_text(self) -> str | None:
+        """The revision text as shown to the model (None without content)."""
+        return self.shown(revision_text(self.revision)) if self.has_content else None
 
 
 def context_entries(subject: ContextItem, children: Sequence[ContextItem]) -> list[list[Any]]:
@@ -267,6 +285,23 @@ def _select_rows(
     return conn.execute(sql, params).fetchall()
 
 
+def _with_hidden_locators(
+    conn: sqlite3.Connection, subject: ContextItem, children: list[ContextItem]
+) -> tuple[ContextItem, list[ContextItem]]:
+    """Attach the locators of every hidden item linked from the subject or
+    from a shown child, so each item masks them in what it shows."""
+    by_parent = hidden_child_locators(
+        conn, [c.bookmark["bookmark_id"] for c in (subject, *children)]
+    )
+    hidden = frozenset().union(*by_parent.values()) if by_parent else frozenset()
+    if not hidden:
+        return subject, children
+    subject.hidden = hidden
+    for child in children:
+        child.hidden = hidden
+    return subject, children
+
+
 def _children(conn: sqlite3.Connection, parent: sqlite3.Row) -> list[ContextItem]:
     rows = conn.execute(
         f"""
@@ -312,9 +347,10 @@ def _describe(item: ContextItem, text_limit: int) -> list[str]:
     bm = item.bookmark
     lines = [f"item_id: {item.item_id}"]
     if bm["url"]:
-        lines.append(f"locator: {bm['url']}")
+        lines.append(f"locator: {item.shown(bm['url'])}")
     if bm["title"]:
-        lines.append(f"title: {bm['title'][:300]}")
+        title = mask_title(bm["title"], item.hidden) if item.hidden else bm["title"]
+        lines.append(f"title: {title[:300]}")
     rev = item.revision
     published = rev["published_at"] if rev is not None and rev["published_at"] is not None else None
     lines.append(f"published_at: {iso(published) if published is not None else 'unknown'}")
@@ -325,7 +361,7 @@ def _describe(item: ContextItem, text_limit: int) -> list[str]:
     if rev["coverage"] in NO_CONTENT:
         lines.append(f"coverage: {rev['coverage']} (no readable content captured; via {method})")
         return lines
-    text = revision_text(rev) or ""
+    text = item.shown_text or ""
     lines.append(f"coverage: {rev['coverage']} (via {method}; {len(text)} characters)")
     lines.append("text:\n<<<\n" + _clip(text, text_limit) + "\n>>>")
     return lines
@@ -347,7 +383,7 @@ def build_user_message(subject: ContextItem, children: Sequence[ContextItem]) ->
             limit = max(0, min(CHILD_MAX_CHARS, budget))
             parts += _describe(child, limit)
             if child.has_content:
-                budget -= min(limit, len(revision_text(child.revision) or ""))
+                budget -= min(limit, len(child.shown_text or ""))
     else:
         parts.append("")
         parts.append("LINKED ITEMS (0)")
@@ -395,9 +431,10 @@ def validate_evidence(
     ``context`` is every item shown to the model in this call. An entry is
     kept only if it names one of those items with readable text, its stance
     is known, its note is short, and its excerpt occurs in that item's
-    revision text (see :func:`_locate_excerpt`). The revision reference is
-    taken from the context, never from the model. Reasons never quote the
-    rejected excerpt.
+    revision text as shown (hidden locators masked; see
+    :func:`_locate_excerpt`) and, verbatim, in the stored text. The
+    revision reference is taken from the context, never from the model.
+    Reasons never quote the rejected excerpt.
     """
     if raw is None:
         return [], []
@@ -420,7 +457,7 @@ def validate_evidence(
         if item is None:
             dropped.append(f"{where}: cites an item that was not shown")
             continue
-        text = revision_text(item.revision) if item.has_content else None
+        text = item.shown_text
         if not text:
             dropped.append(f"{where}: cites an item with no readable text")
             continue
@@ -436,6 +473,8 @@ def validate_evidence(
         excerpt = entry.get("excerpt")
         excerpt = excerpt.strip() if isinstance(excerpt, str) else ""
         span = _locate_excerpt(excerpt, text) if excerpt else None
+        if span is not None and span not in (revision_text(item.revision) or ""):
+            span = None  # it quotes the masked text, not the stored revision
         if span is None:
             dropped.append(f"{where}: excerpt does not occur in the cited text")
             continue
@@ -702,8 +741,9 @@ def assess_suitability(
             run.skipped_no_revision += 1
             run.outcomes.append(ItemOutcome(item_id, "skipped_no_revision"))
             continue
-        subject = ContextItem(row, item_id, revision)
-        children = _children(conn, row)
+        subject, children = _with_hidden_locators(
+            conn, ContextItem(row, item_id, revision), _children(conn, row)
+        )
         context = context_entries(subject, children)
         if _assessment_exists(
             conn, revision["scrape_history_id"], context_digest(context), profile.digest,

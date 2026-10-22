@@ -287,6 +287,14 @@ def packet_integrity_errors(packet: dict[str, Any]) -> list[str]:
 #   no longer carries the excerpt is left out of the packet. If that is the
 #   primary assessment the subject is skipped until it is reassessed: an
 #   excerpt of hidden content is never exported.
+# * Hidden locators (contract §6.1, §9): the locators of hidden items
+#   linked from any included item. A revision whose text or final locator
+#   quotes one is left out (masking would break its digest); an item title
+#   is masked; an assessment made on or citing such a revision, whose free
+#   text quotes one, or whose model call was shown an item since hidden or
+#   deleted (``context_json``) is left out, and if it is the primary the
+#   subject is skipped until reassessed. A packet whose JSON still quotes
+#   one is refused.
 # * Evidence: each included item's latest included assessment contributes
 #   its stored, model-cited evidence (``assessments.evidence_json``:
 #   ``supports`` entries are supporting, ``contradicts`` entries are
@@ -501,31 +509,55 @@ def build_packet(
         item_rows.setdefault(R.export_item_id(child), child)
     included = set(item_rows)
 
+    # Locators of hidden items linked from any included item. A visible
+    # item can still quote one (text, title or enrichment stored before a
+    # policy change); such content is never exported (contract §9).
+    hidden_by_parent = R.hidden_child_locators(conn, [r["bookmark_id"] for r in item_rows.values()])
+    hidden: set[str] = set().union(*hidden_by_parent.values()) if hidden_by_parent else set()
+
+    def exposes(value: Any) -> bool:
+        if not hidden or value is None:
+            return False
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        return R.mentions_locator(text, hidden)
+
+    def revision_exportable(row: sqlite3.Row) -> bool:
+        return not (exposes(R.revision_text(row)) or exposes(row["final_locator"]))
+
+    statuses = _ItemStatus(conn)
     cache: dict[int, dict[str, Any]] = {}
     revision_rows: dict[int, sqlite3.Row] = {}
     assessments: list[tuple[sqlite3.Row, dict[str, Any]]] = []
     latest_by_item: dict[str, dict[str, Any]] = {}
     for item_id, row in item_rows.items():
         current = R.current_revision_row(conn, item_id, row["bookmark_id"])
-        if current is not None:
+        if current is not None and revision_exportable(current):
             revision_rows.setdefault(current["scrape_history_id"], current)
         for a in _item_assessments(conn, item_id):
             rec = R.assessment_record(conn, a, cache)
+            own = conn.execute(
+                "SELECT * FROM scrape_history WHERE scrape_history_id = ?", (a["scrape_history_id"],)
+            ).fetchone()
             cited = _cited_revisions(conn, rec, included)
             if cited is None:
+                why = "primary assessment cites content the packet cannot include; reassess"
+            elif not all(revision_exportable(r) for r in (own, *cited)):
+                why = "primary assessment's revision quotes a hidden item's locator; re-sync and reassess"
+            elif exposes(rec["rationale"]) or exposes(rec["unresolved_questions"]) or exposes(rec.get("evidence")):
+                why = "primary assessment's text quotes a hidden item's locator; reassess"
+            elif not statuses.context_exportable(a):
+                why = "primary assessment saw an item that is now hidden or deleted; reassess"
+            else:
+                why = None
+            if why is not None:
                 if a["assessment_id"] == primary["assessment_id"]:
-                    raise PacketNotExportable(
-                        "primary assessment cites content the packet cannot include; reassess"
-                    )
+                    raise PacketNotExportable(why)
                 continue
             assessments.append((a, rec))
             latest_by_item[item_id] = rec
             for rev_row in cited:
                 revision_rows.setdefault(rev_row["scrape_history_id"], rev_row)
-            if a["scrape_history_id"] not in revision_rows:
-                revision_rows[a["scrape_history_id"]] = conn.execute(
-                    "SELECT * FROM scrape_history WHERE scrape_history_id = ?", (a["scrape_history_id"],)
-                ).fetchone()
+            revision_rows.setdefault(own["scrape_history_id"], own)
 
     order = {item_id: n for n, item_id in enumerate(item_rows)}
     revisions = sorted(
@@ -571,7 +603,7 @@ def build_packet(
         "revision": revision,
         "created_at": created_at,
         "subject_item_id": subject_id,
-        "items": [R.source_item_record(row) for row in item_rows.values()],
+        "items": [_masked_item(R.source_item_record(row), hidden) for row in item_rows.values()],
         "item_links": [
             R.item_link_record(link) for link in link_rows
             if link["parent_ref"] in included and link["child_ref"] in included
@@ -589,7 +621,56 @@ def build_packet(
         packet["usage"] = [R.usage_record(u) for u in usage_rows]
     if previous is not None:
         packet["previous_revision"] = previous
+    if exposes(canonical_json(packet).decode("utf-8")):  # defence in depth
+        raise PacketNotExportable("packet would quote a hidden item's locator; re-sync and reassess")
     return packet
+
+
+def _masked_item(record: dict[str, Any], hidden: set[str]) -> dict[str, Any]:
+    """A source-item whose title quoted a hidden item's locator, masked
+    (titles carry no digest, so masking is safe)."""
+    from muninn.intake_records import mask_title
+
+    if hidden and record.get("title"):
+        record["title"] = mask_title(record["title"], hidden)
+    return record
+
+
+class _ItemStatus:
+    """Whether what an assessment's model call saw is still exportable.
+
+    ``assessments.context_json`` lists every item shown. An assessment
+    whose context included an item that has since been hidden or deleted
+    may paraphrase that item in its free text (rationale, unresolved
+    questions), so it is never exported (contract §9). A withdrawn
+    revision in the context does not exclude it: withdrawal of a revision
+    the assessment cites (evidence) or was made on already does.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self.conn = conn
+        self._states: dict[str, list[int] | None] = {}
+
+    def _state(self, item_id: str) -> list[int] | None:
+        if item_id not in self._states:
+            self._states[item_id] = _item_states(self.conn, {item_id}).get(item_id)
+        return self._states[item_id]
+
+    def visible(self, item_id: str) -> bool:
+        state = self._state(item_id)
+        return state is not None and 0 not in state
+
+    def context_exportable(self, assessment: sqlite3.Row) -> bool:
+        try:
+            entries = json.loads(assessment["context_json"] or "[]")
+        except (TypeError, ValueError):
+            return False
+        for entry in entries:
+            if not (isinstance(entry, list) and len(entry) == 3 and isinstance(entry[0], str)):
+                return False
+            if not self.visible(entry[0]):
+                return False
+        return True
 
 
 def packet_errors(packet: dict[str, Any]) -> list[str]:

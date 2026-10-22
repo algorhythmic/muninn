@@ -422,12 +422,33 @@ implementation):
 - The subject and every link endpoint are in `items`.
 
 Excluded content: items the operator has hidden (`content_visible = 0`)
-are never exported, and neither is a withdrawn content revision. An
-assessment whose evidence cites an item the packet does not include (it
-was hidden or unlinked after the assessment) or a revision that has been
-withdrawn is left out of the packet. If that assessment is the primary
-one, the subject is not exported until it is reassessed, so an excerpt of
-hidden content never reaches a packet.
+are never exported, and neither is a withdrawn content revision. A visible
+item can still quote a hidden item's locator (text, title or judgement
+stored before a policy change). Matching ignores case and accepts the
+locator with or without its scheme and `www.`. The hidden locators that
+count are those of the hidden items linked from any item in the packet.
+Then:
+
+- A content revision whose text or `final_locator` quotes one is left
+  out. Masking it would break its digest.
+- A `source-item` title that quotes one is masked as `[hidden link]`.
+- An assessment is left out of the packet when:
+  - its evidence cites an item the packet does not include (it was hidden
+    or unlinked after the assessment) or a revision that has been
+    withdrawn;
+  - its own revision or a revision it cites is left out for quoting a
+    hidden locator;
+  - its `rationale`, `unresolved_questions` or evidence quote a hidden
+    locator; or
+  - its model call was shown an item that has since been hidden or
+    deleted, since its free text may paraphrase that item.
+- If that assessment is the primary one, the subject is not exported
+  until it is reassessed on content that quotes no hidden locator (a
+  later sync records the post text with `[hidden link]`, section 10). So
+  neither a hidden locator nor an excerpt of hidden content ever reaches
+  a packet.
+- As a last check, a packet whose canonical JSON still quotes a hidden
+  locator is not exported.
 
 ### 6.2 Revisions
 
@@ -547,10 +568,12 @@ browser-bookmark lane keeps its at-capture-first behaviour unchanged.
 - X OAuth tokens are stored outside the database. The sync-checkpoint
   table stores only the opaque pagination cursor.
 - Hidden items (`content_visible = 0`) are never exported. They are never
-  shown to the model either, so no assessment can quote them. An
-  assessment that quoted an item before it was hidden is left out of
-  every later packet (section 6.1), and the packets that already contain
-  the item are withdrawn (section 7).
+  shown to the model either, so no assessment can quote them, and a
+  hidden item's locator is masked as `[hidden link]` in everything a
+  suitability call shows (the text, title and locator of the subject and
+  of each linked item). An assessment that saw or quoted an item before
+  it was hidden is left out of every later packet (section 6.1), and the
+  packets that already contain the item are withdrawn (section 7).
 - A canary test plants a synthetic secret in raw connector inputs
   (`tests/fixtures/intake/canary/raw-inputs.json`). It asserts that the
   secret appears in no valid fixture, no schema, and not in this file, and
@@ -885,10 +908,11 @@ Design questions for review:
     hits the key and stays withdrawn.
 - **Locators that policy hides later.** Domain policy is applied at write
   time. Hiding a domain later hides the items on it (and the sweep
-  withdraws their packets). But a visible post that links to the domain
-  keeps the locator in its stored title and in its earlier text
-  revisions. Its next capture writes a new revision with `[hidden link]`,
-  and the title is not rewritten. Whether to rewrite or withdraw such
-  titles and revisions is open.
+  withdraws their packets). A visible post that links to the domain keeps
+  the locator in its stored title and its earlier text revisions. These
+  are masked on the way to the model and refused at export (section 6.1),
+  so the post is exported again only once a capture with `[hidden link]`
+  has been reassessed. Whether muninn should also withdraw such revisions
+  in storage is open.
 - Odin's `SNAPSHOT.schema.json` hard-codes the producer `saga`. Odin must
   generalize it before it can pin this contract. That is Odin's task.
