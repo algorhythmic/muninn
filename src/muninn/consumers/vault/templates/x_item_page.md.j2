@@ -1,0 +1,114 @@
+---
+page_type: bookmark
+item_kind: {{ x.kind }}
+bookmark_id: {{ bookmark.bookmark_id }}
+item_id: {{ x.item_id | tojson }}
+title: {{ x.title | tojson }}
+url: {{ (bookmark.url or '') | tojson }}
+source: {{ bookmark.source }}
+source_id: {{ bookmark.source_id | string | tojson }}
+domain: {{ (bookmark.domain or '') | tojson }}
+{% if x.author %}
+author_handle: {{ x.author.handle | tojson }}
+author_name: {{ x.author.display_name | tojson }}
+author_id: {{ x.author.platform_id | tojson }}
+{% endif %}
+language: {{ x.language | tojson }}
+published_at: {{ x.times.published_at or 'null' }}
+{% if x.kind == 'x_post' %}
+observed_at: {{ x.times.observed_at or 'null' }}
+observed_at_basis: {{ x.observed_at_basis or 'null' }}
+last_observed_at: {{ x.times.last_observed_at or 'null' }}
+{% endif %}
+{% if x.times.first_seen_at %}
+first_seen_at: {{ x.times.first_seen_at }}
+{% endif %}
+retrieved_at: {{ x.times.retrieved_at or 'null' }}
+retrieval_status: {{ x.retrieval_status or 'null' }}
+enrichment_source: {{ bookmark.enrichment_source or 'none' }}
+{% if x.assessment %}
+assessment_disposition: {{ x.assessment.disposition }}
+assessed_at: {{ x.assessment.assessed_at }}
+{% endif %}
+tags: {{ tags | tojson }}
+contributors: []
+---
+
+# {{ x.heading }}
+
+{% if x.kind == 'x_post' %}
+{% if x.post_text %}
+{% for line in x.post_text.splitlines() %}
+>{{ (' ' ~ line) if line else '' }}
+{% endfor %}
+{% else %}
+_Post text unavailable (retrieval status: {{ x.retrieval_status or 'not retrieved' }})._
+{% endif %}
+
+{% endif %}
+{% if bookmark.url %}
+**URL (sanitized):** {{ bookmark.url }}
+
+{% endif %}
+- **Published:** {{ x.times.published_at or 'unknown' }}
+{% if x.kind == 'x_post' %}
+- **Bookmark observed:** {{ x.times.observed_at or 'not bookmarked' }}
+{% else %}
+- **First seen:** {{ x.times.first_seen_at or 'unknown' }}
+{% endif %}
+- **Retrieved:** {{ x.times.retrieved_at or 'not retrieved' }}
+{% if summary %}
+
+## Summary
+
+{{ summary }}
+{% endif %}
+{% if x.links %}
+
+## Links
+
+{% for link in x.links %}
+- {{ link.label }}: [[{{ link.slug }}|{{ link.text }}]]
+{% endfor %}
+{% endif %}
+{% if x.linked_from %}
+
+## Linked from
+
+{% for link in x.linked_from %}
+- {{ link.label }}: [[{{ link.slug }}|{{ link.text }}]]
+{% endfor %}
+{% endif %}
+{% if tags %}
+
+## Tags
+
+{% for tag in tags %}
+- {{ tag }}
+{% endfor %}
+{% endif %}
+{% if entities %}
+
+## Entities
+
+{% for entity in entities %}
+- {{ entity.name if entity is mapping and entity.name else entity }}
+{% endfor %}
+{% endif %}
+{% if key_quotes %}
+
+## Key quotes
+
+{% for quote in key_quotes %}
+> {{ quote }}
+
+{% endfor %}
+{% endif %}
+{% if cross_refs %}
+
+## Related
+
+{% for ref in cross_refs %}
+- [[{{ ref }}]]
+{% endfor %}
+{% endif %}

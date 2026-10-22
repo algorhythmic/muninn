@@ -7,6 +7,11 @@ ROOT; this compiler owns — and only writes — `wiki/bookmarks/` beneath it).
 Hidden bookmarks (`content_visible = 0`) are skipped entirely — no page is
 written and no wikilink target is registered.
 
+X-lane rows (`source` in `x`, `x_article`, `x_link`) compile into the same
+namespace through `templates/x_item_page.md.j2`, with bidirectional links
+from `item_links`; see :mod:`muninn.consumers.vault.x_pages`. Browser
+bookmark pages keep their template and slugs unchanged.
+
 CRITICAL: this module enforces SPEC.md Decision 2 (two distinct vaults — the
 COMPILED Muninn output vault must NEVER be the same as the user's PERSONAL
 input vault). The guard runs before any file is written.
@@ -23,11 +28,13 @@ from typing import Iterable
 from jinja2 import Environment, FileSystemLoader
 
 from muninn.config import load_paths
+from muninn.consumers.vault import x_pages
 from muninn.db import connect
 
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 TEMPLATE_NAME = "bookmark_page.md.j2"
+X_TEMPLATE_NAME = "x_item_page.md.j2"
 
 
 class VaultPathConflictError(RuntimeError):
@@ -140,6 +147,41 @@ def _get_template_env() -> Environment:
     return Environment(loader=FileSystemLoader(str(TEMPLATE_DIR)), autoescape=False)
 
 
+def _get_x_template_env() -> Environment:
+    # Separate env: the X template uses block trimming, and the browser
+    # template's output must not change (golden-tested).
+    return Environment(
+        loader=FileSystemLoader(str(TEMPLATE_DIR)),
+        autoescape=False,
+        trim_blocks=True,
+        lstrip_blocks=True,
+        keep_trailing_newline=True,
+    )
+
+
+def _build_slugs(bookmarks: list[sqlite3.Row]) -> dict[int, str]:
+    """Browser slugs exactly as before; X-lane slugs from item identity.
+
+    Browser slugs end in their bookmark_id, so they are unique among
+    themselves. An X-lane slug that would collide with any other page
+    gets ``-b<bookmark_id>`` appended (deterministic for a given DB)."""
+    slug_by_id = {
+        r["bookmark_id"]: _slug_for(r)
+        for r in bookmarks
+        if r["source"] not in x_pages.X_SOURCES
+    }
+    used = set(slug_by_id.values())
+    for r in bookmarks:
+        if r["source"] not in x_pages.X_SOURCES:
+            continue
+        slug = x_pages.x_slug(r)
+        if slug in used:
+            slug = f"{slug}-b{r['bookmark_id']}"
+        used.add(slug)
+        slug_by_id[r["bookmark_id"]] = slug
+    return slug_by_id
+
+
 # ── entry point ────────────────────────────────────────────────────
 
 
@@ -176,22 +218,25 @@ def compile_vault(
     pages_dir.mkdir(parents=True, exist_ok=True)
     env = _get_template_env()
     template = env.get_template(TEMPLATE_NAME)
+    x_template = _get_x_template_env().get_template(X_TEMPLATE_NAME)
 
     conn = connect(db_path) if db_path else connect()
     try:
         bookmarks = conn.execute(
             "SELECT bookmark_id, source, source_id, captured_at, title, url, "
             "       folder_path, era_label, domain, content_visible, "
-            "       enrichment_source "
+            "       enrichment_source, source_metadata "
             "FROM bookmarks WHERE content_visible = 1 ORDER BY bookmark_id"
         ).fetchall()
 
-        slug_by_id = {r["bookmark_id"]: _slug_for(r) for r in bookmarks}
+        slug_by_id = _build_slugs(bookmarks)
+        rows_by_id = {r["bookmark_id"]: r for r in bookmarks}
+        graph = x_pages.load_link_graph(conn, set(rows_by_id))
 
         count = 0
         for bm in bookmarks:
             enr = conn.execute(
-                "SELECT summary, tags, entities, key_quotes "
+                "SELECT summary, tags, entities, key_quotes, language "
                 "FROM enriched WHERE bookmark_id = ?",
                 (bm["bookmark_id"],),
             ).fetchone()
@@ -206,16 +251,35 @@ def compile_vault(
             )
 
             bookmark_view = dict(bm)
+            bookmark_view.pop("source_metadata")
             bookmark_view["folder_path"] = _parse_json_list(bm["folder_path"])
 
-            content = template.render(
-                bookmark=bookmark_view,
-                summary=summary,
-                tags=tags,
-                entities=entities,
-                key_quotes=key_quotes,
-                cross_refs=cross_refs,
-            )
+            if bm["source"] in x_pages.X_SOURCES:
+                view = x_pages.build_view(
+                    conn, bm, rows_by_id=rows_by_id, slug_by_id=slug_by_id, graph=graph
+                )
+                if view["language"] is None and enr is not None:
+                    view["language"] = enr["language"]
+                # Pages already linked explicitly aren't repeated as "Related".
+                linked = {slug_by_id[i] for i in graph.neighbours(bm["bookmark_id"])}
+                content = x_template.render(
+                    bookmark=bookmark_view,
+                    x=view,
+                    summary=summary,
+                    tags=tags,
+                    entities=entities,
+                    key_quotes=key_quotes,
+                    cross_refs=[r for r in cross_refs if r not in linked],
+                )
+            else:
+                content = template.render(
+                    bookmark=bookmark_view,
+                    summary=summary,
+                    tags=tags,
+                    entities=entities,
+                    key_quotes=key_quotes,
+                    cross_refs=cross_refs,
+                )
 
             (pages_dir / f"{slug_by_id[bm['bookmark_id']]}.md").write_text(content)
             count += 1
