@@ -616,7 +616,8 @@ def _synthesis_errors():
     from muninn.synthesis.budget import SynthesisConfigError  # lazy
     from muninn.synthesis.contract import ContractError  # lazy
 
-    return (SynthesisConfigError, ContractError)
+    # LookupError: an unknown or policy-hidden bookmark id.
+    return (SynthesisConfigError, ContractError, LookupError)
 
 
 def _echo_synthesis(label: str, result) -> None:
@@ -686,7 +687,8 @@ def synthesize_deep_pass_cmd(
             ids = [
                 r[0]
                 for r in conn.execute(
-                    "SELECT bookmark_id FROM enriched WHERE deep_pass_requested = 1"
+                    "SELECT e.bookmark_id FROM enriched e JOIN bookmarks b USING (bookmark_id) "
+                    "WHERE e.deep_pass_requested = 1 AND b.content_visible = 1"
                 ).fetchall()
             ]
             if not ids:

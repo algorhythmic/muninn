@@ -55,12 +55,15 @@ def prepare_input(
 
     cur.execute(
         "SELECT bookmark_id, title, url, captured_at, era_label, "
-        "       enrichment_source FROM bookmarks WHERE bookmark_id = ?",
+        "       enrichment_source, content_visible FROM bookmarks WHERE bookmark_id = ?",
         (bookmark_id,),
     )
     bm = cur.fetchone()
     if bm is None:
         raise LookupError(f"bookmark_id {bookmark_id} not found")
+    if not bm["content_visible"]:
+        # Hidden by domain policy: its content must never reach a model.
+        raise LookupError(f"bookmark_id {bookmark_id} is hidden by domain policy")
 
     source_text, source_pass = _canonical_content_text(conn, bookmark_id, bm["enrichment_source"])
 

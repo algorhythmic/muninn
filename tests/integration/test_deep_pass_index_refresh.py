@@ -86,18 +86,16 @@ def test_deep_pass_refreshes_fts_and_reconcile_refreshes_qdrant(
     conn.close()
 
 
-def test_deep_pass_on_hidden_row_drops_its_fts_row(fresh_db):
+def test_deep_pass_on_hidden_row_is_refused_before_any_model_call(fresh_db):
+    # A hidden row's content must never reach a model, so the deep pass is
+    # refused outright (it used to run and then drop the FTS row).
     _seed(fresh_db)
-    fresh_db.execute(
-        "INSERT INTO fts_bookmarks (rowid, title, summary, content_text, tags) "
-        "VALUES (1, 'Deep article', 'old', 'old body', '[]')"
-    )
     fresh_db.execute("UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = 1")
     fresh_db.commit()
-    result = run_deep_pass(1, conn=fresh_db, runner=_OneShotLauncher(_deep_output()),
-                           candidate_neighbor_ids=[])
-    assert result.status == "completed"
-    assert fresh_db.execute("SELECT COUNT(*) FROM fts_bookmarks").fetchone()[0] == 0
+    runner = MagicMock(wraps=_OneShotLauncher(_deep_output()))
+    with pytest.raises(LookupError, match="hidden by domain policy"):
+        run_deep_pass(1, conn=fresh_db, runner=runner, candidate_neighbor_ids=[])
+    runner.run.assert_not_called()
 
 
 def test_failed_deep_pass_leaves_fts_untouched(fresh_db):
