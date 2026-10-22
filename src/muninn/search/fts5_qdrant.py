@@ -7,15 +7,31 @@ building this backend (or a keyword-only query) stays light.
 
 from __future__ import annotations
 
+import re
+import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from muninn.config import QDRANT_COLLECTION, QDRANT_URL
 from muninn.db import connect
 from muninn.search.base import SearchHit, SearchUnavailable
+from muninn.search.hybrid import rrf_hybrid
 
 if TYPE_CHECKING:  # pragma: no cover
     from qdrant_client import QdrantClient
+
+_TERM_RE = re.compile(r"\w+")
+
+
+def fts5_terms_query(query: str) -> str:
+    """``query`` as an FTS5 MATCH of its word tokens, each quoted.
+
+    Quoting makes every token a literal string, so punctuation, operators
+    and column filters in natural-language text (``C++``, ``what's``,
+    ``a-b``, ``NOT``) can't raise a syntax error; tokens are implicitly
+    ANDed. Empty when ``query`` has no word characters.
+    """
+    return " ".join(f'"{term}"' for term in _TERM_RE.findall(query))
 
 
 class Fts5QdrantBackend:
@@ -68,6 +84,24 @@ class Fts5QdrantBackend:
             )
             for r in rows
         ]
+
+    def hybrid(self, query: str, limit: int = 10) -> list[SearchHit]:
+        """Reciprocal rank fusion of :meth:`keyword` + :meth:`semantic`
+        (:func:`~muninn.search.hybrid.rrf_hybrid`); keyword-only when
+        Qdrant or the embedding backend is unavailable.
+
+        Hybrid queries are usually natural language, so a query that is
+        not valid FTS5 syntax is retried as its quoted word tokens
+        (:func:`fts5_terms_query`) instead of raising.
+        """
+        return rrf_hybrid(self, query, limit, keyword=self._keyword_lenient)
+
+    def _keyword_lenient(self, query: str, limit: int) -> list[SearchHit]:
+        try:
+            return self.keyword(query, limit)
+        except sqlite3.OperationalError:
+            terms = fts5_terms_query(query)
+            return self.keyword(terms, limit) if terms else []
 
     def semantic(self, query: str, limit: int = 10) -> list[SearchHit]:
         """Embed ``query`` (asymmetric query prompt) and search Qdrant.

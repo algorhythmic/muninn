@@ -10,6 +10,10 @@ Backends, selected by ``$MUNINN_SEARCH_BACKEND`` (read at call time):
 - ``fts5-qdrant`` (default) — SQLite FTS5 keyword + Qdrant semantic
   (see :mod:`muninn.search.fts5_qdrant`).
 
+Every backend gets a hybrid (keyword + semantic) ranking through
+:func:`hybrid_search`: its own ``hybrid`` operation if it has one, else
+reciprocal rank fusion (:mod:`muninn.search.hybrid`).
+
 Backend modules are imported lazily, so ``import muninn.search`` is light.
 """
 
@@ -22,11 +26,13 @@ from pathlib import Path
 from typing import Any
 
 from muninn.search.base import (
+    HybridSearchBackend,
     SearchBackend,
     SearchBackendError,
     SearchHit,
     SearchUnavailable,
 )
+from muninn.search.hybrid import RRF_K, hybrid_search, rrf_fuse, rrf_hybrid
 
 DEFAULT_BACKEND = "fts5-qdrant"
 
@@ -79,11 +85,16 @@ def get_search_backend(
 
 __all__ = [
     "DEFAULT_BACKEND",
+    "HybridSearchBackend",
+    "RRF_K",
     "SearchBackend",
     "SearchBackendError",
     "SearchHit",
     "SearchUnavailable",
     "available_backends",
     "get_search_backend",
+    "hybrid_search",
     "register_backend",
+    "rrf_fuse",
+    "rrf_hybrid",
 ]

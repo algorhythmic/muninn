@@ -19,6 +19,14 @@ Contract:
   (unreachable, missing embedding backend). It should raise
   :class:`SearchUnavailable` for that; callers fall back to
   :meth:`SearchBackend.keyword`.
+- **Hybrid** (keyword + semantic in one ranking) is the third operation.
+  A backend that fuses natively (e.g. Braid) implements ``hybrid`` and so
+  satisfies :class:`HybridSearchBackend`; every other backend gets the
+  default reciprocal-rank fusion in :mod:`muninn.search.hybrid`. Callers
+  go through :func:`muninn.search.hybrid.hybrid_search`, which picks
+  whichever applies. ``hybrid`` is not a member of
+  :class:`SearchBackend` itself so that a keyword + semantic backend
+  still satisfies the protocol at runtime.
 """
 
 from __future__ import annotations
@@ -59,4 +67,14 @@ class SearchBackend(Protocol):
 
     def semantic(self, query: str, limit: int = 10) -> list[SearchHit]:
         """Embedding-similarity search. May raise :class:`SearchUnavailable`."""
+        ...
+
+
+@runtime_checkable
+class HybridSearchBackend(SearchBackend, Protocol):
+    """A :class:`SearchBackend` that also ranks keyword + semantic together."""
+
+    def hybrid(self, query: str, limit: int = 10) -> list[SearchHit]:
+        """One fused ranking, best first. Falls back to keyword-only when
+        the semantic index raises :class:`SearchUnavailable`."""
         ...
