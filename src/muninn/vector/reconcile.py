@@ -16,6 +16,17 @@ bring the index back in line. One pass:
    in the payload. Search hydration already filters such hits; this
    removes the data itself.
 
+A visible row that links to a hidden item (``item_links``) is indexed
+**masked**, the same way the vault and MCP show it: a locator of the hidden
+item in its title becomes ``[hidden link]``, and when its enrichment
+(summary, key quotes or entities) quotes such a locator the summary is
+withheld from the payload and the embedding text, because it was written
+before the link was hidden and can paraphrase the hidden page. Such a row's
+expected payload differs from an unmasked point's, so a point that still
+carries the locator is stale and is re-upserted with the masked payload.
+Re-upserting (rather than deleting the point until re-enrichment) keeps the
+row findable by its title and tags while carrying nothing hidden.
+
 Points whose bookmark has no ``enriched`` row are reported as
 ``extra_in_qdrant`` and left alone.
 
@@ -33,8 +44,10 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from muninn.consumers.vault.x_pages import enrichment_quotes_hidden
 from muninn.db import connect
 from muninn.enrich.haiku import build_embedding_text
+from muninn.intake_records import hidden_child_locators, mask_title
 from muninn.vector.embed import embed_document
 from muninn.vector.qdrant import (
     delete_points,
@@ -84,7 +97,10 @@ def get_all_enriched_rows(conn: sqlite3.Connection) -> dict[int, dict]:
     """``{bookmark_id: {title, summary, tags, content_type, language, visible}}``.
 
     ``tags`` stays the raw JSON text. ``title`` and ``summary`` are ``""``
-    when NULL (an X post has no title), matching the enrich pipeline.
+    when NULL (an X post has no title), matching the enrich pipeline. For a
+    row that links to hidden items, ``title`` is masked and ``summary`` is
+    ``""`` when its enrichment quotes a hidden locator (see the module
+    docstring).
     """
     rows = conn.execute(
         """
@@ -93,23 +109,32 @@ def get_all_enriched_rows(conn: sqlite3.Connection) -> dict[int, dict]:
                b.content_visible,
                e.summary,
                e.tags,
+               e.entities,
+               e.key_quotes,
                e.content_type,
                e.language
         FROM   enriched e
         JOIN   bookmarks b ON b.bookmark_id = e.bookmark_id
         """
     ).fetchall()
-    return {
-        r["bookmark_id"]: {
-            "title": r["title"] or "",
-            "summary": r["summary"] or "",
+    hidden = hidden_child_locators(conn, [r["bookmark_id"] for r in rows if r["content_visible"]])
+    out: dict[int, dict] = {}
+    for r in rows:
+        title, summary = r["title"] or "", r["summary"] or ""
+        urls = hidden.get(r["bookmark_id"], set())
+        if urls:
+            title = mask_title(title, urls)
+            if enrichment_quotes_hidden(urls, summary, r["key_quotes"], r["entities"]):
+                summary = ""
+        out[r["bookmark_id"]] = {
+            "title": title,
+            "summary": summary,
             "tags": r["tags"],
             "content_type": r["content_type"],
             "language": r["language"],
             "visible": bool(r["content_visible"]),
         }
-        for r in rows
-    }
+    return out
 
 
 def _expected_payload(bookmark_id: int, row: dict) -> dict[str, Any]:

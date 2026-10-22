@@ -7,6 +7,7 @@ client is a MagicMock (tests/integration/intake_fakes.py)."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from unittest.mock import MagicMock, patch
 
@@ -14,7 +15,8 @@ import pytest
 from click.testing import CliRunner
 
 from muninn.consumers.cli.main import cli
-from muninn.intake_records import current_revision_row
+from muninn.consumers.vault import x_pages
+from muninn.intake_records import current_revision_row, mask_title, mentions_locator
 from muninn.revisions import record_revision
 
 T0 = 1_790_000_000
@@ -88,3 +90,97 @@ def test_library_entry_points_refuse_another_tasks_prompt(fresh_db, tmp_path) ->
     with pytest.raises(SuitabilityError, match="not a suitability prompt"):
         assess_suitability(fresh_db, profile, client, model=MODEL, prompt_version="per_bookmark_v1")
     client.messages.create.assert_not_called()
+
+
+# ── Finding 10: masking ignores case and scheme; withheld enrichment ──
+
+REPO_LOCATOR = "https://github.com/mycorp/secret-repo"  # stored lowercase root
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The author shares https://github.com/MyCorp/Secret-Repo, an internal tool.",
+        "The author shares github.com/MyCorp/Secret-Repo, an internal tool.",
+        "The author shares https://www.github.com/mycorp/secret-repo, an internal tool.",
+        "The author shares https://github.com/MyCorp/Secret-Repo.git, an internal tool.",
+        "The author shares HTTP://GITHUB.COM/MYCORP/SECRET-REPO/, an internal tool.",
+    ],
+)
+def test_mask_hidden_links_ignores_case_scheme_and_www(text) -> None:
+    masked = x_pages.mask_hidden_links(text, {REPO_LOCATOR})
+    assert masked == f"The author shares {x_pages.HIDDEN_LINK_TEXT}, an internal tool."
+    assert mentions_locator(text, {REPO_LOCATOR}) and not mentions_locator(masked, {REPO_LOCATOR})
+
+
+def test_mask_does_not_touch_other_links() -> None:
+    for text in ("https://github.com/mycorp/secret-repo-two", "https://notgithub.com/mycorp/secret-repo",
+                 "https://github.com/other/secret-repo"):
+        assert x_pages.mask_hidden_links(text, {REPO_LOCATOR}) == text
+    assert mask_title("@a: see github.com/MyCorp/Sec…", {REPO_LOCATOR}) == "@a: see [hidden link]"
+
+
+def _x_vault_with_stale_enrichment(db_path):
+    from muninn.db import connect
+    from tests import x_corpus as xc
+
+    conn = connect(db_path)
+    corpus = xc.seed_x_corpus(conn, hidden_at_ingest=False)
+    secret = xc.HIDDEN_URL.replace("intranet.example", "Intranet.Example")  # the summary's own case
+    conn.execute(
+        "INSERT INTO enriched (bookmark_id, summary, tags, entities, key_quotes, content_type, language, "
+        "enrichment_model, enrichment_prompt_version, content_hash, enriched_at) "
+        "VALUES (?, ?, '[\"retrieval\"]', ?, ?, 'post', 'en', 'm', 'v', 'h', 1)",
+        (corpus.post, f"Shares a draft plan at {secret}: the private roadmap covers Q3 hiring.",
+         json.dumps(["Private roadmap"]), json.dumps([f"Draft plan: {secret}"])),
+    )
+    conn.commit()
+    conn.close()
+    return corpus, secret
+
+
+def test_vault_withholds_enrichment_that_quotes_a_hidden_link(db_path, tmp_path) -> None:
+    from muninn.consumers.vault.compiler import compile_vault
+
+    _x_vault_with_stale_enrichment(db_path)
+    out = tmp_path / "compiled"
+    compile_vault(db_path=db_path, output_dir=out, personal_dir=None)
+    everything = "\n".join(p.read_text() for p in (out / "wiki" / "bookmarks").glob("*.md"))
+    assert "intranet.example" not in everything.lower()
+    assert "Q3 hiring" not in everything and "Private roadmap" not in everything
+    assert x_pages.ENRICHMENT_WITHHELD in everything
+
+
+def test_withhold_enrichment_keeps_clean_output() -> None:
+    urls = {REPO_LOCATOR}
+    assert x_pages.withhold_enrichment(urls, "A toolkit.", ["q"], '["e"]') == ("A toolkit.", ["q"], '["e"]', False)
+    assert x_pages.withhold_enrichment(urls, "A toolkit.", '["see github.com/MyCorp/secret-repo"]', '["e"]') == (
+        None, "[]", "[]", True)
+
+
+def test_reconcile_reindexes_a_point_that_carries_a_hidden_locator(db_path, tmp_path) -> None:
+    qdrant_client = pytest.importorskip("qdrant_client")
+    from muninn.vector.qdrant import ensure_collection, get_point_payloads, upsert_point
+    from muninn.vector.embed import embed_document
+    from muninn.vector.reconcile import point_payload, reconcile
+
+    corpus, secret = _x_vault_with_stale_enrichment(db_path)
+    from muninn.db import connect
+
+    conn = connect(db_path)
+    title = conn.execute("SELECT title FROM bookmarks WHERE bookmark_id = ?", (corpus.post,)).fetchone()[0]
+    summary = conn.execute("SELECT summary FROM enriched WHERE bookmark_id = ?", (corpus.post,)).fetchone()[0]
+    conn.close()
+    client = qdrant_client.QdrantClient(":memory:")
+    ensure_collection(client)
+    # The point the enrich pipeline wrote before the link was hidden.
+    upsert_point(client, corpus.post, embed_document(f"{title}\n{summary}\nretrieval"),
+                 point_payload(corpus.post, title=title, summary=summary, tags=["retrieval"],
+                               content_type="post", language="en"))
+    stats = reconcile(db_path, client=client)
+    assert stats["stale_in_qdrant"] == 1 and stats["refreshed"] == 1
+    payload = get_point_payloads(client)[corpus.post]
+    assert "intranet.example" not in json.dumps(payload).lower() and "Q3 hiring" not in json.dumps(payload)
+    assert payload["summary"] == "" and payload["tags"] == ["retrieval"]
+    assert reconcile(db_path, client=client)["stale_in_qdrant"] == 0  # converged
+    client.close()

@@ -46,10 +46,9 @@ from muninn.consumers.packets.canonical import (
     x_article_item_id,
     x_post_item_id,
 )
+from muninn.intake_records import HIDDEN_LINK_TEXT, mask_locators, mask_title, mentions_locator
 
 X_SOURCES = frozenset({"x", "x_article", "x_link"})
-
-HIDDEN_LINK_TEXT = "[hidden link]"
 
 # Children listed in this order on a parent page, then by entity position.
 _RELATION_ORDER = {"article": 0, "quotes": 1, "replies_to": 2, "links_to": 3}
@@ -302,14 +301,12 @@ def load_link_graph(conn: sqlite3.Connection, visible_ids: set[int]) -> LinkGrap
 
 
 def mask_hidden_links(text: str, urls: set[str]) -> str:
-    """Replace hidden links' locators in post text (longest first, so a
-    locator that prefixes another can't leave a fragment behind)."""
-    for url in sorted(urls, key=len, reverse=True):
-        text = text.replace(url, HIDDEN_LINK_TEXT)
-    return text
+    """Replace hidden links' locators in text with ``[hidden link]``.
 
-
-_MIN_TRUNCATED_LOCATOR = 9  # "https://" alone says nothing; one host character does
+    Case-insensitive, with or without scheme and ``www.``: a repository's
+    stored locator is lowercase while the post text keeps the author's
+    case. See :func:`muninn.intake_records.mask_locators`."""
+    return mask_locators(text, urls)
 
 
 def mask_hidden_title(title: str, urls: set[str]) -> str:
@@ -317,14 +314,47 @@ def mask_hidden_title(title: str, urls: set[str]) -> str:
     the first ~80 characters of the text, so it can also end in a
     truncated locator (``… https://intra…``); a final token that is a
     prefix of a hidden locator is masked too."""
-    title = mask_hidden_links(title, urls)
-    if not urls or not title.endswith(("…", "...")):
-        return title
-    head, _, last = title.rpartition(" ")
-    stem = last.rstrip(".…")
-    if len(stem) >= _MIN_TRUNCATED_LOCATOR and any(u.startswith(stem) for u in urls):
-        return f"{head} {HIDDEN_LINK_TEXT}" if head else HIDDEN_LINK_TEXT
-    return title
+    return mask_title(title, urls)
+
+
+def enrichment_quotes_hidden(urls: set[str], *texts: Any) -> bool:
+    """True when enrichment output (summary, key quotes, entities: strings
+    or JSON-able lists) quotes one of these hidden locators.
+
+    Such output was written before a policy change hid the link, and its
+    prose can paraphrase the hidden page, not just quote its locator, so
+    consumers withhold it whole (:func:`withhold_enrichment`) rather than
+    only masking the locator."""
+    if not urls:
+        return False
+    for value in texts:
+        if value is None:
+            continue
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        if mentions_locator(text, urls):
+            return True
+    return False
+
+
+ENRICHMENT_WITHHELD = (
+    "_Summary withheld: it was written before a linked item was hidden by domain "
+    "policy. It returns when the item is enriched again._"
+)
+
+
+def withhold_enrichment(
+    urls: set[str], summary: Any, key_quotes: Any, entities: Any
+) -> tuple[Any, Any, Any, bool]:
+    """``(summary, key_quotes, entities, withheld)`` for display.
+
+    When any of the three quotes a hidden locator, all three are withheld:
+    the summary becomes None and the lists empty (same type as given: a
+    JSON string stays a JSON string). Otherwise they are returned
+    unchanged: nothing in them quotes a hidden locator."""
+    if enrichment_quotes_hidden(urls, summary, key_quotes, entities):
+        empty = lambda v: "[]" if isinstance(v, str) else []  # noqa: E731
+        return None, empty(key_quotes), empty(entities), True
+    return summary, key_quotes, entities, False
 
 
 def hidden_child_urls(conn: sqlite3.Connection, bookmark_id: int) -> set[str]:
@@ -478,10 +508,12 @@ def build_view(
 
 
 __all__ = [
+    "ENRICHMENT_WITHHELD",
     "HIDDEN_LINK_TEXT",
     "X_SOURCES",
     "LinkGraph",
     "build_view",
+    "enrichment_quotes_hidden",
     "hidden_child_urls",
     "item_id_for",
     "item_kind_for",
@@ -489,5 +521,6 @@ __all__ = [
     "load_link_graph",
     "mask_hidden_links",
     "mask_hidden_title",
+    "withhold_enrichment",
     "x_slug",
 ]

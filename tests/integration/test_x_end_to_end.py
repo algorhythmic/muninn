@@ -35,6 +35,7 @@ from referencing import Registry, Resource
 from muninn.consumers.cli.main import cli
 from muninn.consumers.mcp import tools
 from muninn.consumers.packets import packet_integrity_errors
+from muninn.consumers.vault import x_pages
 from muninn.ingest.x import JsonFileTokenStore, XTokens
 from muninn.scrape.client import IA_CDX_BASE
 from muninn.scrape.domain_policy import DomainPolicy
@@ -395,11 +396,13 @@ def test_policy_change_withdraws_the_docs_page(run) -> None:
     assert docs not in _ids(tools.fts_search("share", db_path=run.db))
     assert docs not in _ids(tools.semantic_search("share", limit=50, db_path=run.db, client=run.qdrant))
     # The re-sync rewrote the post's text with the link masked; its summary,
-    # enriched before the change, is masked on the way out until the next
+    # enriched before the change, quotes the hidden locator, so the vault
+    # withholds it (it may paraphrase the hidden page) until the next
     # `muninn enrich` replaces it.
     (docs_page_post,) = [t for n, t in _vault_pages(run).items() if n.endswith(f"-{DOCS_POST}.md")]
     assert "> A link whose destination carries a credential-shaped param [hidden link]" in docs_page_post
-    assert "Summary: A link whose destination carries a credential-shaped param [hidden link]" in docs_page_post
+    assert "Summary: A link whose destination" not in docs_page_post
+    assert x_pages.ENRICHMENT_WITHHELD in docs_page_post
     assert 'credential-shaped param [hidden link]"\n' in docs_page_post  # the title's truncated locator
     post = _bid(conn, "x", DOCS_POST)
     results = json.loads(tools.fts_search("credential", db_path=run.db))

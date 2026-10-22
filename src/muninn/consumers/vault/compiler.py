@@ -315,15 +315,16 @@ def compile_vault_report(
             bookmark_view["folder_path"] = _parse_json_list(bm["folder_path"])
 
             if bm["source"] in x_pages.X_SOURCES:
-                # A summary enriched before a policy change hid a linked
-                # item can quote its locator; mask it like the post text.
+                # Enrichment written before a policy change hid a linked
+                # item can quote its locator, and its prose can paraphrase
+                # the hidden page: withhold it whole until re-enrichment.
                 hidden_urls = graph.hidden_child_urls.get(bm["bookmark_id"], set())
                 if hidden_urls:
-                    summary = x_pages.mask_hidden_links(summary, hidden_urls) if summary else summary
-                    key_quotes = [
-                        x_pages.mask_hidden_links(q, hidden_urls) if isinstance(q, str) else q
-                        for q in key_quotes
-                    ]
+                    summary, key_quotes, entities, withheld = x_pages.withhold_enrichment(
+                        hidden_urls, summary, key_quotes, entities
+                    )
+                    if withheld:
+                        summary = x_pages.ENRICHMENT_WITHHELD
                 view = x_pages.build_view(
                     conn, bm, rows_by_id=rows_by_id, slug_by_id=slug_by_id, graph=graph
                 )

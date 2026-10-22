@@ -312,6 +312,101 @@ def item_link_record(row: Mapping[str, Any]) -> dict[str, Any]:
     return record
 
 
+# ── Hidden locators ──────────────────────────────────────────────────
+#
+# A visible item can still quote the locator of an item that domain policy
+# hides: a post's stored text, title or enrichment written before the
+# policy change. These helpers find and mask such locators the same way in
+# every consumer (the model context, packets, the vault, MCP, Qdrant).
+# Matching ignores case (a repository locator is stored lowercase, the
+# post text keeps the author's case) and accepts the locator with or
+# without its scheme and ``www.``.
+
+HIDDEN_LINK_TEXT = "[hidden link]"
+_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
+_URL_CHAR_BEFORE = r"(?<![A-Za-z0-9_.\-/])"
+_URL_CHAR_AFTER = r"(?![A-Za-z0-9_\-])"
+
+
+def locator_core(url: str) -> str:
+    """``url`` without scheme, leading ``www.`` and trailing ``/``, lowercased."""
+    core = _SCHEME_RE.sub("", url.strip()).lower()
+    core = core.removeprefix("www.")
+    return core.rstrip("/")
+
+
+def _locator_regex(urls: set[str] | frozenset[str]) -> re.Pattern[str] | None:
+    cores = sorted({c for c in (locator_core(u) for u in urls if u) if c}, key=len, reverse=True)
+    if not cores:
+        return None
+    alternatives = "|".join(
+        re.escape(c) + (r"(?:\.git)?" if c.startswith("github.com/") else "") + "/?"
+        for c in cores
+    )
+    return re.compile(
+        rf"{_URL_CHAR_BEFORE}(?:https?://)?(?:www\.)?(?:{alternatives}){_URL_CHAR_AFTER}", re.I
+    )
+
+
+def mentions_locator(text: str | None, urls: set[str] | frozenset[str]) -> bool:
+    """True if ``text`` quotes any of these locators (see the note above)."""
+    if not text or not urls:
+        return False
+    pattern = _locator_regex(urls)
+    return bool(pattern and pattern.search(text))
+
+
+def mask_locators(text: str, urls: set[str] | frozenset[str]) -> str:
+    """Replace every quoted locator in ``text`` with ``[hidden link]``."""
+    if not text or not urls:
+        return text
+    pattern = _locator_regex(urls)
+    return pattern.sub(HIDDEN_LINK_TEXT, text) if pattern else text
+
+
+def mask_title(title: str, urls: set[str] | frozenset[str]) -> str:
+    """:func:`mask_locators` for a title. A post title is the start of the
+    post text cut to about 80 characters, so it can end in a truncated
+    locator (``… https://intra…``): a final token that is a prefix of a
+    hidden locator is masked too, once it says more than a bare scheme."""
+    title = mask_locators(title, urls)
+    if not urls or not title.endswith(("…", "...")):
+        return title
+    head, _, last = title.rpartition(" ")
+    stem = last.rstrip(".…")
+    has_scheme = bool(_SCHEME_RE.match(stem))
+    stem_core = _SCHEME_RE.sub("", stem).lower().removeprefix("www.")
+    if not stem_core or not (has_scheme or "." in stem_core or "/" in stem_core):
+        return title
+    if any(locator_core(u).startswith(stem_core) for u in urls if u):
+        return f"{head} {HIDDEN_LINK_TEXT}" if head else HIDDEN_LINK_TEXT
+    return title
+
+
+def hidden_child_locators(conn: sqlite3.Connection, bookmark_ids: Any) -> dict[int, set[str]]:
+    """``{parent bookmark_id: locators of its hidden linked items}`` for these
+    parents (only parents with at least one hidden child appear)."""
+    ids = sorted({int(b) for b in bookmark_ids if b is not None})
+    if not ids or conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'item_links'"
+    ).fetchone() is None:
+        return {}
+    out: dict[int, set[str]] = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        for parent, url in conn.execute(
+            f"""
+            SELECT l.parent_bookmark_id, b.url FROM item_links l
+            JOIN   bookmarks b ON b.bookmark_id = l.child_bookmark_id
+            WHERE  l.parent_bookmark_id IN ({','.join('?' * len(chunk))})
+              AND  b.content_visible = 0 AND b.url IS NOT NULL AND b.url != ''
+            """,
+            chunk,
+        ):
+            out.setdefault(parent, set()).add(url)
+    return out
+
+
 # ── Content revisions ────────────────────────────────────────────────
 
 def revision_text(row: Mapping[str, Any]) -> str | None:
@@ -521,6 +616,7 @@ def usage_record(
 
 __all__ = [
     "API_CONTENT_SOURCES",
+    "HIDDEN_LINK_TEXT",
     "ITEM_ID_RE",
     "NO_CONTENT_COVERAGE",
     "SOURCE_X_ARTICLE",
@@ -532,12 +628,17 @@ __all__ = [
     "content_revision_record",
     "current_revision_row",
     "export_item_id",
+    "hidden_child_locators",
     "is_bookmarked",
     "iso",
     "item_kind",
     "item_link_record",
     "item_ref_for",
     "item_ref_for_row",
+    "locator_core",
+    "mask_locators",
+    "mask_title",
+    "mentions_locator",
     "profile_record",
     "revision_text",
     "row_metadata",
