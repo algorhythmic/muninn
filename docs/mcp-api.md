@@ -72,7 +72,7 @@ These rules hold for every tool:
   - replaces with `[hidden link]` the locators of hidden items linked to it (`item_links`, in either direction);
   - replaces with `[hidden link]` every wikilink whose target isn't a currently visible compiled bookmark page.
 
-  Titles and summaries in results come from SQLite and are masked the same way the vault masks them. Recompiling after a policy change is still the fix; the masking is defence in depth.
+  Titles and summaries in results come from SQLite and are masked the same way the vault masks them. An enrichment written before a linked item was hidden can paraphrase around its locator, so when the summary, key quotes or entities quote a hidden locator (case-, scheme- and `www.`-insensitive), all three are withheld: `summary` is `null`, the lists are empty, and `get_bookmark` adds `"enrichment_withheld": true`. Re-running `muninn enrich` clears this. Recompiling after a policy change is still the fix; the masking is defence in depth.
 - **The personal vault is never read.** A vault directory that overlaps it is refused outright. A symlink resolving into it, or anywhere outside `<vault>/wiki/`, is refused.
 - **Refusals carry no host paths.** Vault and path errors never name a filesystem location.
 
