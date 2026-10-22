@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """Reconcile enriched rows with the Qdrant vector index.
 
-Workflow:
+Workflow (implemented in :mod:`muninn.vector.reconcile`):
 
-1. Read every ``enriched.bookmark_id`` from the canonical SQL store.
-2. Scroll every point ID out of the Qdrant collection.
-3. The set difference ``enriched - qdrant`` is the backfill list.
-4. For each missing row, recompute the embedding from
-   ``(title, summary, tags)`` (the canonical schema does not persist
-   embedding text — see :mod:`muninn.vector.embed`) and batch-upsert.
+1. Read every ``enriched`` row, with its bookmark's title and visibility,
+   from the canonical SQL store.
+2. Scroll every point (with payload) out of the Qdrant collection.
+3. Upsert visible rows that are missing from Qdrant, and rows whose
+   point is stale (its payload no longer matches the row, e.g. after a
+   deep pass rewrote the summary). The embedding is recomputed from
+   ``(title, summary, tags)``; the schema persists no embedding text.
+4. Delete points whose bookmark is now hidden (``content_visible = 0``).
+
+Covers every source (browser bookmarks, X posts, X Articles, linked
+items): it reads ``enriched``, which is source-agnostic.
 
 Idempotent: re-running once everything is in sync is a no-op. Safe to
-run on a cron, after a migration, or when the homelab Qdrant comes
-back online after an outage.
+run on a cron, after a migration, after a deep pass, or when the homelab
+Qdrant comes back online after an outage.
 """
 
 from __future__ import annotations
@@ -20,137 +25,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from muninn.config import load_paths  # noqa: E402
-from muninn.db import connect  # noqa: E402
-from muninn.enrich.haiku import build_embedding_text  # noqa: E402
-from muninn.vector.embed import embed_document  # noqa: E402
-from muninn.vector.qdrant import (  # noqa: E402
-    ensure_collection,
-    get_client,
-    get_point_ids,
-    upsert_points_batch,
-)
-
-logger = logging.getLogger(__name__)
-
-
-def get_all_enriched_rows(conn: sqlite3.Connection) -> dict[int, dict]:
-    """Return ``{bookmark_id: {title, summary, tags, content_type, language}}``.
-
-    Joins ``bookmarks`` for the title since the embedding text is
-    derived from ``(title, summary, tags)`` and the schema doesn't
-    persist a precomputed embedding text column.
-    """
-    rows = conn.execute(
-        """
-        SELECT e.bookmark_id,
-               b.title,
-               e.summary,
-               e.tags,
-               e.content_type,
-               e.language
-        FROM   enriched e
-        JOIN   bookmarks b ON b.bookmark_id = e.bookmark_id
-        """
-    ).fetchall()
-    out: dict[int, dict] = {}
-    for r in rows:
-        out[r["bookmark_id"]] = {
-            "title": r["title"] or "",
-            "summary": r["summary"] or "",
-            "tags": r["tags"],
-            "content_type": r["content_type"],
-            "language": r["language"],
-        }
-    return out
-
-
-def reconcile(
-    db_path: str | Path,
-    *,
-    dry_run: bool = False,
-    batch_size: int = 100,
-) -> dict:
-    """Identify enriched rows missing from Qdrant and backfill them."""
-    conn = connect(Path(db_path))
-    try:
-        enriched = get_all_enriched_rows(conn)
-    finally:
-        # Close the connection as soon as we have what we need; Qdrant calls
-        # don't touch SQL.
-        conn.close()
-    enriched_ids = set(enriched.keys())
-
-    client = get_client()
-    if client is None:
-        logger.error("Qdrant unavailable — cannot reconcile")
-        return {"error": "qdrant_unavailable", "enriched_count": len(enriched_ids)}
-
-    ensure_collection(client)
-    qdrant_ids = get_point_ids(client)
-
-    missing_ids = enriched_ids - qdrant_ids
-    extra_ids = qdrant_ids - enriched_ids
-
-    stats = {
-        "enriched_count": len(enriched_ids),
-        "qdrant_count": len(qdrant_ids),
-        "missing_from_qdrant": len(missing_ids),
-        "extra_in_qdrant": len(extra_ids),
-        "backfilled": 0,
-        "errors": 0,
-    }
-
-    logger.info(
-        "Reconciliation: %d enriched, %d in Qdrant, %d missing, %d extra",
-        len(enriched_ids),
-        len(qdrant_ids),
-        len(missing_ids),
-        len(extra_ids),
-    )
-
-    if dry_run:
-        logger.info("DRY RUN — would backfill %d points", len(missing_ids))
-        return stats
-
-    batch: list[tuple[int, list[float], dict]] = []
-    for bid in sorted(missing_ids):
-        row = enriched[bid]
-        try:
-            tags = json.loads(row["tags"]) if row["tags"] else []
-        except json.JSONDecodeError:
-            tags = []
-        embedding_text = build_embedding_text(row["title"], row["summary"], tags)
-        vector = embed_document(embedding_text)
-        payload = {
-            "bookmark_id": bid,
-            "title": row["title"],
-            "summary": row["summary"],
-            "tags": tags,
-            "content_type": row["content_type"],
-            "language": row["language"],
-        }
-        batch.append((bid, vector, payload))
-
-        if len(batch) >= batch_size:
-            written = upsert_points_batch(client, batch)
-            stats["backfilled"] += written
-            stats["errors"] += len(batch) - written
-            batch = []
-
-    if batch:
-        written = upsert_points_batch(client, batch)
-        stats["backfilled"] += written
-        stats["errors"] += len(batch) - written
-
-    logger.info("Reconciliation complete: %s", stats)
-    return stats
+from muninn.vector.reconcile import get_all_enriched_rows, reconcile  # noqa: E402,F401
 
 
 def main() -> int:
