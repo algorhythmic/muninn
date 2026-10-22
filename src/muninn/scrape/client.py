@@ -33,6 +33,7 @@ from muninn.config import (
     LIVE_DOMAIN_RPS,
     load_paths,
 )
+from muninn.sanitize import sanitize_url
 from muninn.scrape.http_cache import HttpCache
 from muninn.scrape.rate_limiter import RateLimiter
 
@@ -258,7 +259,9 @@ class ScrapeClient:
                 "body_bytes": content,
                 "body_length": len(content),
                 "elapsed_ms": elapsed_ms,
-                "final_url": str(resp.url),
+                # Where redirects ended, sanitized before it reaches the
+                # on-disk cache (and, from there, scrape_results).
+                "final_url": sanitize_url(str(resp.url)).sanitized_url,
                 "from_cache": False,
             }
             # Cache the JSON-serializable subset (drop raw bytes).
