@@ -183,7 +183,7 @@ Rules:
 |---|---|---|
 | Content revision | `revision_id` (ULID). Unique on `(item_id, content_sha256, coverage)` | `content_sha256` |
 | Interest-profile revision | `(profile_id, digest)` | sha256 of the profile's canonical JSON |
-| Assessment | `assessment_id` (ULID). Unique on (content revision, profile digest, `policy_version`, `model`, `prompt_version`) | sha256 of its canonical JSON |
+| Assessment | `assessment_id` (ULID). Unique on (content revision, `context_digest`, profile digest, `policy_version`, `model`, `prompt_version`) | sha256 of its canonical JSON |
 | Evidence packet | `packet_id` (ULID) + integer `revision` ≥ 1 | sha256 of its canonical JSON = sha256 of the exported file |
 
 **Current revision.** The revision key leaves out the retrieval method, so
@@ -296,11 +296,20 @@ old assessments and packets stay resolvable.
 
 One append-only suitability judgement.
 
-- **Key.** Content revision + profile digest + `policy_version` + `model`
-  + `prompt_version`. A changed profile, policy, model or prompt creates a
-  new assessment, and earlier assessments stay in place.
-  `prior_assessment` optionally points at the assessment this one
-  re-evaluates.
+- **Key.** Content revision + `context_digest` + profile digest +
+  `policy_version` + `model` + `prompt_version`. A changed context,
+  profile, policy, model or prompt creates a new assessment, and earlier
+  assessments stay in place. `prior_assessment` optionally points at the
+  assessment this one re-evaluates.
+- **Context digest** (required) records what the model was shown. It is
+  the sha256 of the canonical JSON of the array of
+  `[item_id, content_sha256, coverage]` triples of every item in the call:
+  the assessed item first, then its visible linked items in the order
+  shown, with `[item_id, null, null]` for an item shown without a content
+  revision. Hiding, unlinking, adding or recapturing a linked item changes
+  it, so the next suitability run assesses the item again even though its
+  own revision is unchanged. A consumer can recompute it for an item shown
+  alone; muninn keeps the triples internally (`assessments.context_json`).
 - **Disposition** is one of `candidate`, `reference_only`,
   `needs_evidence`, `deferred` or `rejected`. Retrieval failures are
   operational states and are never dispositions.
@@ -511,7 +520,9 @@ checking every active packet revision against muninn's current rows:
 
 A subject whose latest packet revision was withdrawn is exported again
 only after an assessment newer than the withdrawal, and then as revision
-n + 1 whose `previous_revision` points at the tombstoned revision.
+n + 1 whose `previous_revision` points at the tombstoned revision. When the
+withdrawal hid or deleted a linked item, the subject's context changed
+(section 4.6), so the next suitability run produces that assessment.
 `operator_request` and `retention` are applied by the operator
 (`--withdraw`).
 
@@ -567,7 +578,8 @@ passing. `muninn db migrate` applies it at runtime, but it has not yet
 been applied to any real database. That is why it could still be amended
 in place: `assessments.evidence_json` (the assessment record's
 `evidence`, NULL when there is none, with a `json_valid` CHECK) was added
-that way.
+that way, and so were `assessments.context_digest` (part of the UNIQUE
+key) and `assessments.context_json` (its preimage).
 
 The two design points RI-01 left open are settled as follows, without any
 table rebuild:
@@ -749,7 +761,7 @@ with `config_json.stop_reason = "caught_up"`. Each closed run records its
 
 | Version | Date | Status | Manifest | Notes |
 |---|---|---|---|---|
-| 0.1.0-draft | 2026-10-21 | draft, unreleased: schemas validated; capture, revisions, assessment, exporter and withdrawal implemented on synthetic data | `docs/contracts/MUNINN-RESEARCH-INTAKE-0.1.0-draft.sha256` | First draft (RI-03). Amended in place before release: assessment `evidence`, the optional-key convention (null removed from the optional `entity_status`, `http_status` and `final_locator`), automatic withdrawal, and the section 10.1 conventions. Open questions in section 14 |
+| 0.1.0-draft | 2026-10-21 | draft, unreleased: schemas validated; capture, revisions, assessment, exporter and withdrawal implemented on synthetic data | `docs/contracts/MUNINN-RESEARCH-INTAKE-0.1.0-draft.sha256` | First draft (RI-03). Amended in place before release: assessment `evidence`, the required assessment `context_digest` (part of the assessment key), the optional-key convention (null removed from the optional `entity_status`, `http_status` and `final_locator`), automatic withdrawal, and the section 10.1 conventions. Open questions in section 14 |
 
 ## 12. Status by part
 

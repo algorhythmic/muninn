@@ -547,6 +547,7 @@ def assessment_record(
         "item_id": row["item_ref"],
         "content_revision": {"ref": rev["revision_ulid"], "digest": row["content_sha256"]},
         "coverage": row["content_coverage"],
+        "context_digest": row["context_digest"],
         "interest_profile": {"ref": prof["profile_id"], "digest": row["profile_sha256"]},
         "policy_version": row["policy_version"],
         "model": row["model"],

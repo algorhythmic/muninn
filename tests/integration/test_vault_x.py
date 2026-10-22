@@ -268,11 +268,12 @@ def _assess(conn: sqlite3.Connection, bookmark_id: int, disposition: str, assess
     )
     conn.execute(
         "INSERT INTO assessments (assessment_ulid, scrape_history_id, bookmark_id, item_ref, "
-        "  content_sha256, content_coverage, profile_sha256, policy_version, model, "
-        "  prompt_version, disposition, relevance, confidence, rationale, assessed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'model', 'p1', ?, 70, 60, 'synthetic', ?)",
+        "  content_sha256, content_coverage, context_digest, context_json, profile_sha256, "
+        "  policy_version, model, prompt_version, disposition, relevance, confidence, rationale, "
+        "  assessed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, 'model', 'p1', ?, 70, 60, 'synthetic', ?)",
         (new_ulid(), rev["scrape_history_id"], bookmark_id, rev["item_ref"],
-         rev["content_sha256"], rev["coverage"], profile, f"policy-{assessed_at}",
+         rev["content_sha256"], rev["coverage"], "c" * 64, profile, f"policy-{assessed_at}",
          disposition, assessed_at),
     )
 

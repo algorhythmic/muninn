@@ -23,6 +23,7 @@ from pathlib import Path
 from muninn.consumers.packets import (
     canonical_json,
     content_digest,
+    context_digest,
     link_item_id,
     make_tombstone,
     new_ulid,
@@ -299,6 +300,8 @@ def main() -> None:
             "record_type": "assessment", "assessment_id": ulid(label, when), "item_id": revision["item_id"],
             "content_revision": {"ref": revision["revision_id"], "digest": revision["content_sha256"]},
             "coverage": revision["coverage"],
+            # Shown alone: these web items link nothing (contract §4.6).
+            "context_digest": context_digest([[revision["item_id"], revision["content_sha256"], revision["coverage"]]]),
             "interest_profile": {"ref": profile["profile_id"], "digest": profile_digest},
             "policy_version": "intake-policy/1", "model": "synthetic-model-small", "prompt_version": "suitability_v1",
             "disposition": disposition, "relevance": relevance, "confidence": confidence, "rationale": rationale,
@@ -350,6 +353,8 @@ def main() -> None:
     write("assessment", "evidence-unknown-stance", "invalid", bad, ["evidence stance"], "evidence either supports or contradicts", fails_at='evidence/0/stance')
     bad = copy.deepcopy(a1); bad["evidence"] = []
     write("assessment", "evidence-empty", "invalid", bad, ["evidence is omitted, never empty"], "an assessment with no surviving citation omits evidence", fails_at='evidence')
+    bad = copy.deepcopy(a1); del bad["context_digest"]
+    write("assessment", "missing-context-digest", "invalid", bad, ["idempotency key: context digest"], "every assessment states the digest of what the model was shown", fails_at='', fails_with='context_digest')
     bad = copy.deepcopy(a1); bad["relevance"] = 0.82
     write("assessment", "float-relevance", "invalid", bad, ["integers only"], "relevance is an integer 0-100", fails_at='relevance', fails_with='integer')
 

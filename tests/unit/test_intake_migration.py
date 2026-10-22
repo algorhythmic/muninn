@@ -205,10 +205,12 @@ def add_profile(conn, digest: str) -> None:
 def add_assessment(conn, rev_id, profile, coverage="full", disposition="candidate", ref=LINK_REF, bookmark_id=2):
     conn.execute(
         "INSERT INTO assessments (assessment_ulid, scrape_history_id, bookmark_id, item_ref, content_sha256, content_coverage, "
-        "profile_sha256, policy_version, model, prompt_version, disposition, relevance, confidence, rationale, assessed_at) "
-        "SELECT ?, scrape_history_id, ?, item_ref, content_sha256, ?, ?, 'intake-policy/1', 'synthetic-model', 'suitability_v1', ?, 50, 50, 'r', 1760947400 "
+        "context_digest, context_json, profile_sha256, policy_version, model, prompt_version, disposition, relevance, "
+        "confidence, rationale, assessed_at) "
+        "SELECT ?, scrape_history_id, ?, item_ref, content_sha256, ?, ?, '[]', ?, 'intake-policy/1', 'synthetic-model', "
+        "'suitability_v1', ?, 50, 50, 'r', 1760947400 "
         "FROM scrape_history WHERE scrape_history_id = ?",
-        (new_ulid(), bookmark_id, coverage, profile, disposition, rev_id),
+        (new_ulid(), bookmark_id, coverage, "c" * 64, profile, disposition, rev_id),
     )
 
 

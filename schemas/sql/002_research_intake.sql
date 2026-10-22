@@ -126,9 +126,13 @@ CREATE INDEX idx_interest_profiles_id ON interest_profiles (profile_id);
 
 -- ── assessments ─────────────────────────────────────────────────────
 -- Append-only suitability assessments. Idempotency key: content revision
--- + profile revision + policy version + model + prompt version. A
--- changed profile or policy appends a new row and leaves earlier rows in
--- place. Disposition is a judgement, never a retrieval state, and a
+-- + context digest + profile revision + policy version + model + prompt
+-- version. A changed profile or policy appends a new row and leaves
+-- earlier rows in place. context_digest is sha256 over the canonical JSON
+-- of context_json, the [item_id, content_sha256, coverage] triples of
+-- every item the model was shown (the assessed item first, then its
+-- visible linked items in the order shown), so hiding, unlinking or
+-- recapturing a linked item makes the next run assess again. Disposition is a judgement, never a retrieval state, and a
 -- capture with no readable content cannot be a candidate.
 -- evidence_json is the model-cited evidence (the assessment record's
 -- evidence array), NULL when no citation survived validation. Every
@@ -144,6 +148,8 @@ CREATE TABLE assessments (
     item_ref            TEXT    NOT NULL,
     content_sha256      TEXT    NOT NULL,
     content_coverage    TEXT    NOT NULL,
+    context_digest      TEXT    NOT NULL,
+    context_json        TEXT    NOT NULL CHECK (json_valid(context_json)),
     profile_sha256      TEXT    NOT NULL REFERENCES interest_profiles (profile_sha256),
     policy_version      TEXT    NOT NULL,
     model               TEXT    NOT NULL,
@@ -159,8 +165,9 @@ CREATE TABLE assessments (
     input_token_count   INTEGER,
     output_token_count  INTEGER,
     assessed_at         INTEGER NOT NULL,
-    UNIQUE (scrape_history_id, profile_sha256, policy_version, model, prompt_version),
+    UNIQUE (scrape_history_id, context_digest, profile_sha256, policy_version, model, prompt_version),
     CHECK (length(assessment_ulid) = 26 AND assessment_ulid NOT GLOB '*[^0-9A-HJKMNP-TV-Z]*'),
+    CHECK (length(context_digest) = 64 AND context_digest NOT GLOB '*[^0-9a-f]*'),
     CHECK (content_coverage IN ('full', 'partial', 'blocked', 'deleted', 'empty')),
     CHECK (disposition IN
            ('candidate', 'reference_only', 'needs_evidence', 'deferred', 'rejected')),

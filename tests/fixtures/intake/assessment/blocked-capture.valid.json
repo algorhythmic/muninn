@@ -18,6 +18,7 @@
       "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "coverage": "blocked",
+    "context_digest": "24f0aaf17fc934063c61532bf7562e0d50b124e0075edcbdea8957932d6d2d2f",
     "interest_profile": {
       "ref": "operator-research",
       "digest": "b7226c37eef17ca6f70379f695f5a6cf2ed989e5bd727429671aa3d27b8cfdef"

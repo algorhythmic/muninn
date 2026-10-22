@@ -9,11 +9,15 @@ contract's ``assessment`` schema and appended to ``assessments``.
 
 Rules (contract ``muninn-research-intake`` §4.6, RI-01 §3):
 
-* **Idempotency key**: content revision + interest-profile revision +
-  policy version + model + prompt version. An identical key is skipped
-  without a call. A changed profile, policy, model or prompt appends a new
-  row (``prior_assessment`` points at the item's previous assessment);
-  earlier rows are never updated.
+* **Idempotency key**: content revision + context digest +
+  interest-profile revision + policy version + model + prompt version. The
+  context digest (``assessments.context_digest``, contract §4.6) covers
+  every item shown to the model, the subject and its visible linked items,
+  so hiding, unlinking or recapturing a linked item makes the next run
+  assess the subject again. An identical key is skipped without a call. A
+  changed context, profile, policy, model or prompt appends a new row
+  (``prior_assessment`` points at the item's previous assessment); earlier
+  rows are never updated.
 * **Bounded selection**: only rows the command selects (``sources``,
   bookmark observation window, ``limit`` on calls) are assessed. Ingest
   never triggers assessment. Hidden rows (``content_visible = 0``) are
@@ -70,7 +74,7 @@ from muninn.config import (
     SUITABILITY_POLICY_VERSION,
     SUITABILITY_PROMPT_VERSION,
 )
-from muninn.consumers.packets.canonical import new_ulid
+from muninn.consumers.packets.canonical import context_digest, new_ulid
 from muninn.consumers.packets.schemas import schema_errors
 from muninn.db import transaction
 from muninn.enrich.haiku import _load_system_prompt, _parse_json_response, check_prompt_version
@@ -153,6 +157,16 @@ class ContextItem:
         return self.revision is not None and self.revision["coverage"] not in NO_CONTENT
 
 
+def context_entries(subject: ContextItem, children: Sequence[ContextItem]) -> list[list[Any]]:
+    """The ``[item_id, content_sha256, coverage]`` triples the model is shown
+    (``assessments.context_json``; their digest is ``context_digest``)."""
+    return [
+        [c.item_id, c.revision["content_sha256"], c.revision["coverage"]]
+        if c.revision is not None else [c.item_id, None, None]
+        for c in (subject, *children)
+    ]
+
+
 @dataclass
 class PlannedCall:
     subject: ContextItem
@@ -160,6 +174,11 @@ class PlannedCall:
     user_message: str
     estimated_input_tokens: int
     worst_case_micro_usd: int
+    context: list[list[Any]] = field(default_factory=list)
+
+    @property
+    def context_digest(self) -> str:
+        return context_digest(self.context)
 
 
 @dataclass
@@ -267,15 +286,16 @@ def _children(conn: sqlite3.Connection, parent: sqlite3.Row) -> list[ContextItem
 
 
 def _assessment_exists(
-    conn: sqlite3.Connection, revision_id: int, profile: str, policy: str, model: str, prompt: str
+    conn: sqlite3.Connection, revision_id: int, context: str, profile: str, policy: str,
+    model: str, prompt: str,
 ) -> bool:
     return conn.execute(
         """
         SELECT 1 FROM assessments
-        WHERE scrape_history_id = ? AND profile_sha256 = ? AND policy_version = ?
-          AND model = ? AND prompt_version = ?
+        WHERE scrape_history_id = ? AND context_digest = ? AND profile_sha256 = ?
+          AND policy_version = ? AND model = ? AND prompt_version = ?
         """,
-        (revision_id, profile, policy, model, prompt),
+        (revision_id, context, profile, policy, model, prompt),
     ).fetchone() is not None
 
 
@@ -468,6 +488,7 @@ def build_assessment_record(
         "item_id": subject.item_id,
         "content_revision": {"ref": rev["revision_ulid"], "digest": rev["content_sha256"]},
         "coverage": rev["coverage"],
+        "context_digest": context_digest(context_entries(subject, children)),
         "interest_profile": {"ref": profile.profile_id, "digest": profile.digest},
         "policy_version": policy_version,
         "model": model,
@@ -502,6 +523,7 @@ def _insert_assessment(
     subject: ContextItem,
     usage: dict[str, int],
     *,
+    context: list[list[Any]],
     assessed_at: int,
 ) -> int:
     prior = conn.execute(
@@ -513,11 +535,11 @@ def _insert_assessment(
         """
         INSERT INTO assessments (
             assessment_ulid, scrape_history_id, bookmark_id, item_ref, content_sha256,
-            content_coverage, profile_sha256, policy_version, model, prompt_version,
-            disposition, relevance, confidence, rationale, matched_interests,
-            unresolved_questions, evidence_json, prior_assessment_id, input_token_count,
-            output_token_count, assessed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            content_coverage, context_digest, context_json, profile_sha256, policy_version,
+            model, prompt_version, disposition, relevance, confidence, rationale,
+            matched_interests, unresolved_questions, evidence_json, prior_assessment_id,
+            input_token_count, output_token_count, assessed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record["assessment_id"],
@@ -526,6 +548,8 @@ def _insert_assessment(
             subject.item_id,
             record["content_revision"]["digest"],
             record["coverage"],
+            record["context_digest"],
+            json.dumps(context, ensure_ascii=False),
             record["interest_profile"]["digest"],
             record["policy_version"],
             record["model"],
@@ -678,14 +702,16 @@ def assess_suitability(
             run.skipped_no_revision += 1
             run.outcomes.append(ItemOutcome(item_id, "skipped_no_revision"))
             continue
+        subject = ContextItem(row, item_id, revision)
+        children = _children(conn, row)
+        context = context_entries(subject, children)
         if _assessment_exists(
-            conn, revision["scrape_history_id"], profile.digest, policy_version, model, prompt_version
+            conn, revision["scrape_history_id"], context_digest(context), profile.digest,
+            policy_version, model, prompt_version,
         ):
             run.skipped_idempotent += 1
             run.outcomes.append(ItemOutcome(item_id, "skipped_idempotent"))
             continue
-        subject = ContextItem(row, item_id, revision)
-        children = _children(conn, row)
         if not subject.has_content and not any(c.has_content for c in children):
             run.skipped_no_content += 1
             run.outcomes.append(ItemOutcome(item_id, "skipped_no_content", detail=revision["coverage"]))
@@ -693,7 +719,7 @@ def assess_suitability(
         message = build_user_message(subject, children)
         tokens = math.ceil((system_chars + len(message)) / CHARS_PER_TOKEN_BOUND)
         worst = worst_case_micro_usd(price, input_tokens=tokens, max_output_tokens=MAX_OUTPUT_TOKENS)
-        plan.append(PlannedCall(subject, children, message, tokens, worst))
+        plan.append(PlannedCall(subject, children, message, tokens, worst, context))
     run.planned = len(plan)
     run.estimated_micro_usd = sum(p.worst_case_micro_usd for p in plan)
 
@@ -793,7 +819,7 @@ def assess_suitability(
             row_id = None
             if record is not None:
                 row_id = _insert_assessment(
-                    conn, record, call.subject, stored_usage or {}, assessed_at=ts
+                    conn, record, call.subject, stored_usage or {}, context=call.context, assessed_at=ts
                 )
             _insert_usage(conn, model=model, usage=stored_usage, cost=cost, assessment_row_id=row_id, now=ts)
 

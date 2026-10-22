@@ -104,6 +104,23 @@ def record_digest(record: dict[str, Any]) -> str:
     return sha256_hex(canonical_json(record))
 
 
+def context_digest(entries: Any) -> str:
+    """``assessment.context_digest``: what one suitability call showed the model.
+
+    ``entries`` is the list of ``[item_id, content_sha256, coverage]``
+    triples of every item shown, the assessed item first and then its
+    linked items in the order shown; an item shown without a content
+    revision is ``[item_id, None, None]``. The digest is sha256 over the
+    canonical JSON of that list, so it changes when a linked item is
+    hidden, unlinked, added or recaptured, and an identical context hashes
+    identically.
+    """
+    triples = [[e[0], e[1], e[2]] for e in entries]
+    if not triples:
+        raise ValueError("a context includes at least the assessed item")
+    return sha256_hex(canonical_json(triples))
+
+
 def normalize_text(text: str | None) -> str:
     """Normalization rule ``muninn-text/1`` for extracted content.
 

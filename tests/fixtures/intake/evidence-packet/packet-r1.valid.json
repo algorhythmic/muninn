@@ -325,6 +325,7 @@
           "digest": "e7e96498a4fd286181bd4acb29719be9cfc36a1c05fa70857fc035040018fcaf"
         },
         "coverage": "full",
+        "context_digest": "f550d41a3800a24f34344c3c6e3c3940963b4feb8aaf26283362cbe0524d5ef1",
         "interest_profile": {
           "ref": "operator-research",
           "digest": "b7226c37eef17ca6f70379f695f5a6cf2ed989e5bd727429671aa3d27b8cfdef"
@@ -365,6 +366,7 @@
           "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         },
         "coverage": "blocked",
+        "context_digest": "24f0aaf17fc934063c61532bf7562e0d50b124e0075edcbdea8957932d6d2d2f",
         "interest_profile": {
           "ref": "operator-research",
           "digest": "b7226c37eef17ca6f70379f695f5a6cf2ed989e5bd727429671aa3d27b8cfdef"
@@ -391,6 +393,7 @@
           "digest": "497e05804767f2bf720d55025710393a7024e0259285a7bc82f933b4c1bd8ec0"
         },
         "coverage": "partial",
+        "context_digest": "148816f0cd0f04df244bc41ebcd2fcf4764e6c2dc7dc1bc5b7acfc7bc71eea91",
         "interest_profile": {
           "ref": "operator-research",
           "digest": "b7226c37eef17ca6f70379f695f5a6cf2ed989e5bd727429671aa3d27b8cfdef"
@@ -412,7 +415,7 @@
     ],
     "primary_assessment": {
       "ref": "01M5C8KYM0YNFZ2VV6YGSP09KB",
-      "digest": "920be44355a44e855c511b3fc4c46593e7330e4e5e42ba8d77e0c2b26facc7de"
+      "digest": "124a785a1fcc2049d06b35793466aafd99ed1d37038f0eeb8d6269870085e511"
     },
     "evidence": {
       "supporting": [

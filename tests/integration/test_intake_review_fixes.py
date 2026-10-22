@@ -15,9 +15,14 @@ import pytest
 from click.testing import CliRunner
 
 from muninn.consumers.cli.main import cli
+from muninn.consumers.packets import context_digest, export_packets, resolve_packet
 from muninn.consumers.vault import x_pages
+from muninn.enrich.interest_profile import load_interest_profile
+from muninn.enrich.suitability import assess_suitability
 from muninn.intake_records import current_revision_row, mask_title, mentions_locator
 from muninn.revisions import record_revision
+from tests.integration.intake_fakes import fake_client, judgement, write_profile
+from tests.integration.intake_seed import add_revision, seed_link, seed_x_post
 
 T0 = 1_790_000_000
 MODEL = "claude-haiku-4-5-20251001"
@@ -78,10 +83,8 @@ def test_cli_prompt_version_must_match_the_task(db_path, tmp_path, args, version
 
 
 def test_library_entry_points_refuse_another_tasks_prompt(fresh_db, tmp_path) -> None:
-    from muninn.enrich.interest_profile import load_interest_profile
     from muninn.enrich.pipeline import enrich_all
-    from muninn.enrich.suitability import SuitabilityError, assess_suitability
-    from tests.integration.intake_fakes import write_profile
+    from muninn.enrich.suitability import SuitabilityError
 
     client = MagicMock()
     with pytest.raises(ValueError, match="not a per_bookmark prompt"):
@@ -184,3 +187,59 @@ def test_reconcile_reindexes_a_point_that_carries_a_hidden_locator(db_path, tmp_
     assert payload["summary"] == "" and payload["tags"] == ["retrieval"]
     assert reconcile(db_path, client=client)["stale_in_qdrant"] == 0  # converged
     client.close()
+
+
+# ── Finding 9: the context digest re-keys an assessment ──────────────
+
+
+def _post_with_link(conn, post_id="1900000000000000051"):
+    post = seed_x_post(conn, post_id, "Thread on retrieval eval, notes linked.", captured_at=T0, published_at=T0 - 100)
+    link = seed_link(conn, post, position=0, unwound_url="https://example.com/notes",
+                     text="Hybrid retrieval improved recall at ten.", retrieved_at=T0 + 10)
+    return post, link
+
+
+def test_hiding_a_linked_item_leads_to_reassessment_and_reexport(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    post, link = _post_with_link(conn)
+    profile = load_interest_profile(write_profile(tmp_path))
+    ev = [{"item_id": link.item_id, "stance": "supports", "excerpt": "Hybrid retrieval improved recall at ten.",
+           "note": "Measured result."}]
+    assess_suitability(conn, profile, fake_client(default=judgement(evidence=ev)), model=MODEL, now=T0 + 100)
+    out = tmp_path / "out"
+    (r1,) = export_packets(conn, out, now=T0 + 150).written
+
+    conn.execute("UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = ?", (link.bookmark_id,))
+    conn.commit()
+    assert [r for _, r in export_packets(conn, out, now=T0 + 200).withdrawn] == ["policy_hidden"]
+
+    # What the model is shown changed (the link is gone), so this is a new key.
+    run = assess_suitability(conn, profile, fake_client(default=judgement()), model=MODEL, now=T0 + 300)
+    assert run.assessed == 1 and run.skipped_idempotent == 0
+    rows = conn.execute("SELECT context_digest, context_json FROM assessments ORDER BY assessment_id").fetchall()
+    assert len({r["context_digest"] for r in rows}) == 2
+    for r in rows:
+        assert r["context_digest"] == context_digest(json.loads(r["context_json"]))
+    assert [e[0] for e in json.loads(rows[1]["context_json"])] == [post.item_id]
+
+    (r2,) = export_packets(conn, out, now=T0 + 400).written
+    assert (r2.packet_id, r2.revision) == (r1.packet_id, 2)
+    packet = json.loads(r2.path.read_bytes())
+    assert packet["previous_revision"] == {"ref": r1.ref, "digest": r1.digest}
+    assert link.item_id not in json.dumps(packet)
+    assert resolve_packet(out, r1.ref, r1.digest).status == "withdrawn"
+    # An unchanged context is still idempotent.
+    assert assess_suitability(conn, profile, fake_client(), model=MODEL, now=T0 + 500).skipped_idempotent == 1
+
+
+def test_recapturing_a_linked_item_changes_the_context(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    _post, link = _post_with_link(conn)
+    profile = load_interest_profile(write_profile(tmp_path))
+    assess_suitability(conn, profile, fake_client(), model=MODEL, now=T0 + 100)
+    add_revision(conn, link, "Hybrid retrieval improved recall at ten, revised.", retrieval_method="live",
+                 retrieved_at=T0 + 200)
+    run = assess_suitability(conn, profile, fake_client(), model=MODEL, now=T0 + 300)
+    assert run.assessed == 1
+    # Same subject revision, two contexts.
+    assert tuple(conn.execute("SELECT COUNT(DISTINCT scrape_history_id), COUNT(*) FROM assessments").fetchone()) == (1, 2)

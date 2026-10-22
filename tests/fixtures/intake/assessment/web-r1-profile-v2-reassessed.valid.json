@@ -18,6 +18,7 @@
       "digest": "e7e96498a4fd286181bd4acb29719be9cfc36a1c05fa70857fc035040018fcaf"
     },
     "coverage": "full",
+    "context_digest": "f550d41a3800a24f34344c3c6e3c3940963b4feb8aaf26283362cbe0524d5ef1",
     "interest_profile": {
       "ref": "operator-research",
       "digest": "a468c275b1802aea59d6eaf8cb585c32e07bc9aeebd29ab4588066a3e9923b13"
@@ -38,7 +39,7 @@
     "assessed_at": "2026-10-20T12:00:00Z",
     "prior_assessment": {
       "ref": "01M5C8KYM0YNFZ2VV6YGSP09KB",
-      "digest": "920be44355a44e855c511b3fc4c46593e7330e4e5e42ba8d77e0c2b26facc7de"
+      "digest": "124a785a1fcc2049d06b35793466aafd99ed1d37038f0eeb8d6269870085e511"
     }
   }
 }

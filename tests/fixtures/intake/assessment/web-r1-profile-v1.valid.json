@@ -19,6 +19,7 @@
       "digest": "e7e96498a4fd286181bd4acb29719be9cfc36a1c05fa70857fc035040018fcaf"
     },
     "coverage": "full",
+    "context_digest": "f550d41a3800a24f34344c3c6e3c3940963b4feb8aaf26283362cbe0524d5ef1",
     "interest_profile": {
       "ref": "operator-research",
       "digest": "b7226c37eef17ca6f70379f695f5a6cf2ed989e5bd727429671aa3d27b8cfdef"
