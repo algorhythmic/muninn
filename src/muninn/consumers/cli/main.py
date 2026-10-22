@@ -12,6 +12,8 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn ingest <path>
     muninn scrape [--concurrency N]
     muninn enrich [--dry-run] [--force] [--prompt-version per_bookmark_vN]
+    muninn enrich --task suitability [--source x] [--since D] [--until D]
+                  [--limit N] [--max-cost-usd 1.00] [--model M] [--profile P] [--dry-run]
     muninn synthesize era <era_label>
     muninn synthesize deep-pass <id> | --pending
     muninn synthesize analyze "<prompt>"
@@ -97,13 +99,70 @@ def scrape_cmd(ctx: click.Context, concurrency: int, limit: int | None) -> None:
     click.echo(f"Scrape complete: {result}")
 
 
+def _parse_when(ctx: click.Context, param: click.Parameter, value: str | None) -> int | None:
+    """Click callback: epoch seconds from ``YYYY-MM-DD``, ISO-8601 or epoch digits (UTC)."""
+    if value is None:
+        return None
+    from muninn.consumers.packets.records import to_epoch  # lazy (stdlib-only)
+
+    epoch = int(value) if value.strip().isdigit() else to_epoch(value)
+    if epoch is None:
+        raise click.BadParameter("expected YYYY-MM-DD, an ISO-8601 time or epoch seconds")
+    return epoch
+
+
 @cli.command("enrich")
-@click.option("--dry-run", is_flag=True, help="Plan calls without invoking Anthropic API or Qdrant.")
-@click.option("--force", is_flag=True, help="Re-enrich even when the idempotency triple matches (burns tokens).")
-@click.option("--prompt-version", default=None, help="Override the enrichment prompt version: a prompt file stem such as per_bookmark_v2 (re-enriches everything under the new triple).")
+@click.option(
+    "--task",
+    type=click.Choice(["per_bookmark", "suitability"]),
+    default="per_bookmark",
+    show_default=True,
+    help="per_bookmark: summary/tags enrichment. suitability: Research Intake assessment against the interest profile.",
+)
+@click.option("--dry-run", is_flag=True, help="Plan calls without invoking Anthropic API or Qdrant (suitability: plan + cost upper bound, no writes).")
+@click.option("--force", is_flag=True, help="Re-enrich even when the idempotency triple matches (burns tokens). per_bookmark only.")
+@click.option("--prompt-version", default=None, help="Override the prompt version: a prompt file stem such as per_bookmark_v2 or suitability_v2 (re-runs everything under the new key).")
+@click.option("--source", "sources", multiple=True, help="[suitability] bookmarks.source to select (repeatable; default: x).")
+@click.option("--since", callback=_parse_when, default=None, help="[suitability] Bookmark observation time >= this (YYYY-MM-DD, ISO-8601 or epoch; UTC).")
+@click.option("--until", callback=_parse_when, default=None, help="[suitability] Bookmark observation time < this.")
+@click.option("--limit", type=click.IntRange(min=1), default=None, help="[suitability] Max model calls this run (default 20).")
+@click.option("--max-cost-usd", default=None, help="[suitability] Per-run spend cap in USD, from measured usage (default 1.00).")
+@click.option("--model", default=None, help="[suitability] Model id (default: $MUNINN_SUITABILITY_MODEL, else the per-bookmark model).")
+@click.option("--profile", "profile_path", default=None, type=click.Path(dir_okay=False), help="[suitability] Interest profile YAML (default: $MUNINN_INTEREST_PROFILE).")
 @click.pass_context
-def enrich_cmd(ctx: click.Context, dry_run: bool, force: bool, prompt_version: str | None) -> None:
-    """Per-bookmark Haiku enrichment with idempotency by content_hash."""
+def enrich_cmd(
+    ctx: click.Context,
+    task: str,
+    dry_run: bool,
+    force: bool,
+    prompt_version: str | None,
+    sources: tuple[str, ...],
+    since: int | None,
+    until: int | None,
+    limit: int | None,
+    max_cost_usd: str | None,
+    model: str | None,
+    profile_path: str | None,
+) -> None:
+    """Per-bookmark Haiku enrichment with idempotency by content_hash, or
+    (--task suitability) bounded, budgeted suitability assessment."""
+    if task == "suitability":
+        if force:
+            raise click.UsageError("--force is not available for --task suitability: assessments are append-only")
+        _enrich_suitability(
+            ctx, dry_run=dry_run, prompt_version=prompt_version, sources=sources, since=since,
+            until=until, limit=limit, max_cost_usd=max_cost_usd, model=model, profile_path=profile_path,
+        )
+        return
+    suitability_only = {
+        "--source": bool(sources), "--since": since is not None, "--until": until is not None,
+        "--limit": limit is not None, "--max-cost-usd": max_cost_usd is not None,
+        "--model": model is not None, "--profile": profile_path is not None,
+    }
+    given = [name for name, used in suitability_only.items() if used]
+    if given:
+        raise click.UsageError(f"{', '.join(given)} only apply to --task suitability")
+
     from muninn.db import connect  # lazy
     from muninn.enrich.pipeline import enrich_all  # lazy
 
@@ -115,6 +174,67 @@ def enrich_cmd(ctx: click.Context, dry_run: bool, force: bool, prompt_version: s
     finally:
         conn.close()
     click.echo(f"Enrich complete: {stats}")
+
+
+def _enrich_suitability(
+    ctx: click.Context,
+    *,
+    dry_run: bool,
+    prompt_version: str | None,
+    sources: tuple[str, ...],
+    since: int | None,
+    until: int | None,
+    limit: int | None,
+    max_cost_usd: str | None,
+    model: str | None,
+    profile_path: str | None,
+) -> None:
+    import json
+
+    from muninn.config import SUITABILITY_PROMPT_VERSION  # lazy
+    from muninn.db import connect  # lazy
+    from muninn.enrich.interest_profile import InterestProfileError, load_interest_profile  # lazy
+    from muninn.enrich.pricing import usd_to_micro  # lazy
+    from muninn.enrich.suitability import (  # lazy
+        DEFAULT_LIMIT,
+        DEFAULT_MAX_COST_MICRO_USD,
+        DEFAULT_SOURCES,
+        SuitabilityError,
+        assess_suitability,
+    )
+
+    try:
+        budget = usd_to_micro(max_cost_usd) if max_cost_usd is not None else DEFAULT_MAX_COST_MICRO_USD
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--max-cost-usd") from exc
+    try:
+        profile = load_interest_profile(profile_path)
+    except InterestProfileError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    conn = connect(ctx.obj.get("db"))
+    try:
+        run = assess_suitability(
+            conn,
+            profile,
+            sources=sources or DEFAULT_SOURCES,
+            since=since,
+            until=until,
+            limit=limit or DEFAULT_LIMIT,
+            max_cost_micro_usd=budget,
+            model=model,
+            prompt_version=prompt_version or SUITABILITY_PROMPT_VERSION,
+            dry_run=dry_run,
+        )
+    except SuitabilityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    for outcome in run.outcomes:
+        extra = f" {outcome.disposition}" if outcome.disposition else ""
+        detail = f" ({outcome.detail})" if outcome.detail else ""
+        click.echo(f"  {outcome.status:<20} {outcome.item_id}{extra}{detail}")
+    click.echo("Suitability " + ("plan: " if dry_run else "complete: ") + json.dumps(run.summary()))
 
 
 # ── synthesize ─────────────────────────────────────────────────────

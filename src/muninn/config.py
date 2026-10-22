@@ -78,6 +78,20 @@ OPUS_MODEL = "claude-opus-4-6"
 
 # ── Prompt versions ───────────────────────────────────────────────
 PER_BOOKMARK_PROMPT_VERSION = "per_bookmark_v1"
+SUITABILITY_PROMPT_VERSION = "suitability_v1"
+
+# ── Suitability assessment (Research Intake, ADR-009) ─────────────
+# Version of the deterministic rules around the model call (context
+# selection, truncation, the no-candidate-without-content rule, output
+# validation). Part of the assessment idempotency key: bump it when those
+# rules change. See muninn.enrich.suitability.
+SUITABILITY_POLICY_VERSION = "intake-policy/1"
+# The model is read at call time (CLI/env) so RI-05 can calibrate it;
+# the default is the per-bookmark enrichment model.
+SUITABILITY_MODEL_ENV = "MUNINN_SUITABILITY_MODEL"
+# The operator's interest profile is personal: its path comes from the
+# environment. The repo ships only interest_profile.example.yml.
+INTEREST_PROFILE_ENV = "MUNINN_INTEREST_PROFILE"
 
 # ── Embeddings ────────────────────────────────────────────────────
 # Backend is read at call time (muninn.vector.embed) so tests can switch it;
