@@ -29,7 +29,15 @@ HEAVY = (
 
 @pytest.mark.parametrize(
     "module",
-    ["muninn.consumers.cli.main", "muninn.ingest", "muninn.sanitize", "muninn.enrich"],
+    [
+        "muninn.consumers.cli.main",
+        "muninn.ingest",
+        "muninn.sanitize",
+        "muninn.enrich",
+        "muninn.search",
+        "muninn.search.fts5_qdrant",
+        "muninn.consumers.mcp.tools",
+    ],
 )
 def test_module_does_not_import_heavy_deps(module: str) -> None:
     code = (

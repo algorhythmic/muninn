@@ -14,8 +14,8 @@ import json
 import sqlite3
 from pathlib import Path
 
-from muninn.config import QDRANT_COLLECTION, QDRANT_URL
 from muninn.db import connect
+from muninn.search import DEFAULT_BACKEND, SearchBackend, SearchHit, get_search_backend
 
 
 # ── helpers ────────────────────────────────────────────────────────
@@ -44,6 +44,52 @@ def _bookmark_summary(row: sqlite3.Row, score: float | None = None) -> dict:
     return out
 
 
+def _backend(
+    backend: SearchBackend | None,
+    db_path: str | Path | None,
+    client=None,
+) -> SearchBackend:
+    """Resolve the search backend: explicit > legacy Qdrant client > config."""
+    if backend is not None:
+        return backend
+    if client is not None:
+        # Legacy hook: a bare Qdrant client means the default backend.
+        return get_search_backend(DEFAULT_BACKEND, db_path=db_path, qdrant_client=client)
+    return get_search_backend(db_path=db_path)
+
+
+def _hydrate(
+    db_path: str | Path | None,
+    hits: list[SearchHit],
+    *,
+    with_score: bool,
+) -> list[dict]:
+    """Hydrate hits from SQLite, in hit order, dropping hidden/missing rows.
+
+    This is the visibility gate for every backend: an index that doesn't
+    know about ``content_visible`` can never leak a hidden bookmark.
+    """
+    conn = _open(db_path)
+    try:
+        output = []
+        for hit in hits:
+            row = conn.execute(
+                "SELECT b.bookmark_id, b.title, b.url, b.era_label, b.domain, "
+                "       e.summary "
+                "FROM bookmarks b LEFT JOIN enriched e "
+                "  ON e.bookmark_id = b.bookmark_id "
+                "WHERE b.bookmark_id = ? AND b.content_visible = 1",
+                (hit.bookmark_id,),
+            ).fetchone()
+            if row is not None:
+                output.append(
+                    _bookmark_summary(row, score=hit.score if with_score else None)
+                )
+        return output
+    finally:
+        conn.close()
+
+
 # ── tools ──────────────────────────────────────────────────────────
 
 
@@ -52,80 +98,35 @@ def semantic_search(
     limit: int = 10,
     db_path: str | Path | None = None,
     client=None,
+    backend: SearchBackend | None = None,
 ) -> str:
-    """Search bookmarks by semantic similarity using Qdrant.
+    """Search bookmarks by semantic similarity via the search backend.
 
-    The query is embedded locally with the same model (and asymmetric
-    query prompt) used to index documents. Falls back to FTS if the
-    embedding backend or Qdrant is unavailable or returns nothing.
-    Result rows are hydrated from SQLite so the schema is canonical.
+    The default backend embeds the query locally with the same model (and
+    asymmetric query prompt) used to index documents, then queries Qdrant.
+    Falls back to keyword search if the semantic index is unavailable or
+    returns nothing. Result rows are hydrated from SQLite so the schema is
+    canonical. ``client`` injects a Qdrant client into the default backend.
     """
+    search = _backend(backend, db_path, client)
     try:
-        from muninn.vector.embed import embed_query
-
-        vector = embed_query(query)
-        if client is None:
-            from qdrant_client import QdrantClient
-
-            client = QdrantClient(url=QDRANT_URL)
-        results = client.query_points(
-            collection_name=QDRANT_COLLECTION,
-            query=vector,
-            limit=limit,
-        )
-        ids_with_scores: list[tuple[int, float]] = []
-        for point in getattr(results, "points", []):
-            payload = point.payload or {}
-            bid = payload.get("bookmark_id")
-            if bid is not None:
-                ids_with_scores.append((int(bid), float(point.score)))
-
-        if not ids_with_scores:
-            return fts_search(query, limit, db_path=db_path)
-
-        conn = _open(db_path)
-        try:
-            output = []
-            for bid, score in ids_with_scores:
-                row = conn.execute(
-                    "SELECT b.bookmark_id, b.title, b.url, b.era_label, b.domain, "
-                    "       e.summary "
-                    "FROM bookmarks b LEFT JOIN enriched e "
-                    "  ON e.bookmark_id = b.bookmark_id "
-                    "WHERE b.bookmark_id = ? AND b.content_visible = 1",
-                    (bid,),
-                ).fetchone()
-                if row is not None:
-                    output.append(_bookmark_summary(row, score=score))
-            return json.dumps(output, indent=2)
-        finally:
-            conn.close()
+        hits = search.semantic(query, limit)
+        if not hits:
+            return fts_search(query, limit, db_path=db_path, backend=search)
+        return json.dumps(_hydrate(db_path, hits, with_score=True), indent=2)
     except Exception:
-        return fts_search(query, limit, db_path=db_path)
+        return fts_search(query, limit, db_path=db_path, backend=search)
 
 
 def fts_search(
     query: str,
     limit: int = 10,
     db_path: str | Path | None = None,
+    backend: SearchBackend | None = None,
 ) -> str:
-    """Full-text search via the contentless `fts_bookmarks` virtual table."""
-    conn = _open(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT b.bookmark_id, b.title, b.url, b.era_label, b.domain, "
-            "       e.summary "
-            "FROM fts_bookmarks fts "
-            "JOIN bookmarks b ON b.bookmark_id = fts.rowid "
-            "LEFT JOIN enriched e ON e.bookmark_id = b.bookmark_id "
-            "WHERE fts_bookmarks MATCH ? AND b.content_visible = 1 "
-            "ORDER BY rank "
-            "LIMIT ?",
-            (query, limit),
-        ).fetchall()
-        return json.dumps([_bookmark_summary(r) for r in rows], indent=2)
-    finally:
-        conn.close()
+    """Keyword search via the search backend (FTS5 ``fts_bookmarks`` by default)."""
+    hits = _backend(backend, db_path).keyword(query, limit)
+    return json.dumps(_hydrate(db_path, hits, with_score=False), indent=2)
 
 
 def get_bookmark(bookmark_id: int, db_path: str | Path | None = None) -> str:

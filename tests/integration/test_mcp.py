@@ -208,3 +208,142 @@ def test_list_eras_counts_are_live(db_path: Path):
     labels = {e["era_label"]: e["bookmark_count"] for e in out}
     assert labels["early-web"] == 1
     assert labels["ai-era"] == 1
+
+
+# ── search interface swap point (ADR-014) ──────────────────────────
+
+
+class _FakeBackend:
+    """A non-default SearchBackend: canned hits, records every call."""
+
+    name = "fake"
+
+    def __init__(self, *, semantic_hits=(), keyword_hits=(), semantic_error=None):
+        from muninn.search import SearchHit
+
+        self._semantic = [SearchHit(b, s, "fake-vec") for b, s in semantic_hits]
+        self._keyword = [SearchHit(b, s, "fake-kw") for b, s in keyword_hits]
+        self._semantic_error = semantic_error
+        self.calls: list[tuple[str, str, int]] = []
+
+    def keyword(self, query, limit=10):
+        self.calls.append(("keyword", query, limit))
+        return list(self._keyword)
+
+    def semantic(self, query, limit=10):
+        self.calls.append(("semantic", query, limit))
+        if self._semantic_error is not None:
+            raise self._semantic_error
+        return list(self._semantic)
+
+
+def _add_hidden(db_path: Path) -> int:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cur = conn.execute(
+            "INSERT INTO bookmarks (source, source_id, captured_at, title, url, "
+            "  era_label, domain, content_visible, enrichment_source) "
+            "VALUES ('netscape', 'hidden-2', ?, 'Secret', 'https://intra.example/y', "
+            "  'ai-era', 'intra.example', 0, 'none')",
+            (int(time.time()),),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def test_fake_backend_satisfies_protocol():
+    from muninn.search import SearchBackend
+
+    assert isinstance(_FakeBackend(), SearchBackend)
+
+
+def test_fake_backend_semantic_hydrates_in_backend_order(db_path: Path):
+    _seed(db_path)
+    fake = _FakeBackend(semantic_hits=[(2, 0.8), (1, 0.5)])
+    out = json.loads(tools.semantic_search("anything", limit=3, db_path=db_path, backend=fake))
+    assert fake.calls == [("semantic", "anything", 3)]
+    assert [(r["bookmark_id"], r["score"]) for r in out] == [(2, 0.8), (1, 0.5)]
+    assert out[0]["summary"] == "Attention is all you need"
+
+
+def test_fake_backend_hidden_and_unknown_hits_never_leak(db_path: Path):
+    """Visibility is enforced at hydration, whatever the backend returns."""
+    _seed(db_path)
+    hidden_id = _add_hidden(db_path)
+    fake = _FakeBackend(
+        semantic_hits=[(hidden_id, 0.99), (424242, 0.9), (1, 0.4)],
+        keyword_hits=[(hidden_id, 5.0), (2, 1.0)],
+    )
+    sem = json.loads(tools.semantic_search("q", db_path=db_path, backend=fake))
+    kw = json.loads(tools.fts_search("q", db_path=db_path, backend=fake))
+    assert [r["bookmark_id"] for r in sem] == [1]
+    assert [r["bookmark_id"] for r in kw] == [2]
+    assert "Secret" not in json.dumps(sem) + json.dumps(kw)
+
+
+def test_fake_backend_keyword_output_has_no_score(db_path: Path):
+    _seed(db_path)
+    fake = _FakeBackend(keyword_hits=[(1, 3.2)])
+    out = json.loads(tools.fts_search("quokka", db_path=db_path, backend=fake))
+    assert out == [
+        {
+            "bookmark_id": 1,
+            "title": "Quokka rescue",
+            "url": "https://example.com/quokka",
+            "era_label": "early-web",
+            "domain": "example.com",
+            "summary": "A short summary about quokkas",
+        }
+    ]
+
+
+def test_fake_backend_semantic_unavailable_falls_back_to_its_keyword(db_path: Path):
+    from muninn.search import SearchUnavailable
+
+    _seed(db_path)
+    fake = _FakeBackend(semantic_error=SearchUnavailable("down"), keyword_hits=[(1, 1.0)])
+    out = json.loads(tools.semantic_search("quokka", db_path=db_path, backend=fake))
+    assert [c[0] for c in fake.calls] == ["semantic", "keyword"]
+    assert [r["bookmark_id"] for r in out] == [1]
+    assert "score" not in out[0]
+
+
+def test_mcp_server_uses_injected_backend(db_path: Path, monkeypatch):
+    from muninn.consumers.mcp import server
+
+    _seed(db_path)
+    monkeypatch.setenv("MUNINN_DB_PATH", str(db_path))
+    fake = _FakeBackend(semantic_hits=[(1, 0.7)], keyword_hits=[(2, 1.0)])
+    server.set_search_backend(fake)
+    try:
+        sem = json.loads(server.semantic_search("anything", 4))
+        kw = json.loads(server.fts_search("anything"))
+    finally:
+        server.set_search_backend(None)
+    assert fake.calls == [("semantic", "anything", 4), ("keyword", "anything", 10)]
+    assert sem[0]["bookmark_id"] == 1 and sem[0]["score"] == 0.7
+    assert kw[0]["bookmark_id"] == 2
+
+
+def test_mcp_server_selects_backend_from_env(db_path: Path, monkeypatch):
+    """The config path: register a backend, select it by name, no code edits."""
+    from muninn import search
+    from muninn.consumers.mcp import server
+
+    _seed(db_path)
+    fake = _FakeBackend(keyword_hits=[(1, 1.0)])
+    seen = {}
+
+    def _factory(*, db_path=None, **_options):
+        seen["db_path"] = db_path
+        return fake
+
+    monkeypatch.setitem(search._REGISTRY, "fake", _factory)
+    monkeypatch.setenv("MUNINN_SEARCH_BACKEND", "fake")
+    monkeypatch.setenv("MUNINN_DB_PATH", str(db_path))
+    out = json.loads(server.fts_search("quokka"))
+    assert fake.calls == [("keyword", "quokka", 10)]
+    assert [r["bookmark_id"] for r in out] == [1]
+    assert seen == {"db_path": None}  # the server passes none; the DB comes from env

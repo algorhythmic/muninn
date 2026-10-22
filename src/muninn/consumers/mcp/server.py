@@ -7,16 +7,32 @@ Tools are thin wrappers around `tools.py` callables. Run via:
 …or directly:
 
     python -m muninn.consumers.mcp.server
+
+Search goes through the retrieval interface (:mod:`muninn.search`,
+ADR-014): the backend comes from ``$MUNINN_SEARCH_BACKEND`` unless one is
+injected with :func:`set_search_backend`.
 """
 
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from muninn.search import SearchBackend
+
 from . import tools as _tools
 
 
 mcp = FastMCP("muninn")
+
+# Injected backend (tests, embedding callers); None ⇒ resolve from config
+# on every call, as the tools do.
+_search_backend: SearchBackend | None = None
+
+
+def set_search_backend(backend: SearchBackend | None) -> None:
+    """Pin the search backend for this server; ``None`` restores config."""
+    global _search_backend
+    _search_backend = backend
 
 
 @mcp.tool()
@@ -25,14 +41,14 @@ def semantic_search(query: str, limit: int = 10) -> str:
 
     Falls back to FTS when Qdrant is unreachable or the collection is empty.
     """
-    return _tools.semantic_search(query, limit)
+    return _tools.semantic_search(query, limit, backend=_search_backend)
 
 
 @mcp.tool()
 def fts_search(query: str, limit: int = 10) -> str:
     """Full-text search against the FTS5 index of titles, summaries,
     scraped content_text, and tags."""
-    return _tools.fts_search(query, limit)
+    return _tools.fts_search(query, limit, backend=_search_backend)
 
 
 @mcp.tool()
