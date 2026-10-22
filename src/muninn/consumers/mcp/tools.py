@@ -75,9 +75,13 @@ def _title(row: sqlite3.Row, hidden: set[str]) -> str | None:
 
 def _summary(row: sqlite3.Row, hidden: set[str]) -> str | None:
     """``enriched.summary``; one written before a policy change hid a
-    linked item can quote its locator, so that is masked."""
+    linked item can quote (or paraphrase around) its locator, so a summary
+    that quotes one is withheld until re-enrichment, as in the vault."""
     summary = row["summary"] if "summary" in row.keys() else None
-    return x_pages.mask_hidden_links(summary, hidden) if summary and hidden else summary
+    if not (summary and hidden):
+        return summary
+    summary, _, _, _ = x_pages.withhold_enrichment(hidden, summary, None, None)
+    return summary
 
 
 def _bookmark_summary(
@@ -363,6 +367,14 @@ def get_bookmark(bookmark_id: int, db_path: str | Path | None = None) -> str:
         out = _row_to_dict(row)
         hidden = _hidden_urls(conn, row)
         out["title"] = _title(row, hidden)
+        if hidden:
+            out["summary"], out["key_quotes"], out["entities"], withheld = (
+                x_pages.withhold_enrichment(
+                    hidden, out.get("summary"), out.get("key_quotes"), out.get("entities")
+                )
+            )
+            if withheld:
+                out["enrichment_withheld"] = True
         for key in ("summary", "key_quotes", "entities", "tags"):  # JSON text or prose
             if hidden and isinstance(out.get(key), str):
                 out[key] = x_pages.mask_hidden_links(out[key], hidden)
@@ -603,8 +615,8 @@ def list_namespace(
                 title = _title(row, hidden) or title
                 if row["summary"]:
                     summary = _summary(row, hidden)
-                elif summary:
-                    summary = x_pages.mask_hidden_links(summary, hidden)
+                elif summary and hidden:
+                    summary, _, _, _ = x_pages.withhold_enrichment(hidden, summary, None, None)
             pages.append(
                 {
                     "path": info.path,

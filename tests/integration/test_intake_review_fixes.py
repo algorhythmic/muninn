@@ -161,6 +161,18 @@ def test_vault_withholds_enrichment_that_quotes_a_hidden_link(db_path, tmp_path)
     assert x_pages.ENRICHMENT_WITHHELD in everything
 
 
+def test_mcp_withholds_enrichment_that_quotes_a_hidden_link(db_path) -> None:
+    from muninn.consumers.mcp import tools
+
+    corpus, _ = _x_vault_with_stale_enrichment(db_path)
+    out = json.loads(tools.get_bookmark(corpus.post, db_path=db_path))
+    dumped = json.dumps(out).lower()
+    assert "intranet.example" not in dumped
+    assert "q3 hiring" not in dumped and "private roadmap" not in dumped
+    assert out["summary"] is None and out["enrichment_withheld"] is True
+    assert json.loads(out["key_quotes"]) == [] and json.loads(out["entities"]) == []
+
+
 def test_withhold_enrichment_keeps_clean_output() -> None:
     urls = {REPO_LOCATOR}
     assert x_pages.withhold_enrichment(urls, "A toolkit.", ["q"], '["e"]') == ("A toolkit.", ["q"], '["e"]', False)
