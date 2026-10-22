@@ -1,8 +1,10 @@
 """Research Intake evidence-packet consumer (contract ``muninn-research-intake``).
 
 Stdlib-only: importing this package must not pull in Qdrant, embeddings,
-DuckDB, Parquet, MCP or Jinja (ADR-009). See ``canonical`` for the digest
-and identity rules and ``export`` for the exporter interface.
+DuckDB, Parquet, MCP or Jinja (ADR-009); ``jsonschema`` is imported only
+when a record is validated. See ``canonical`` for the digest and identity
+rules, ``records`` for the database-row to record mappings, ``schemas``
+for validation and ``export`` for the exporter.
 """
 
 from muninn.consumers.packets.canonical import (
@@ -26,13 +28,17 @@ from muninn.consumers.packets.export import (
     CONTRACT_VERSION,
     WITHDRAWAL_REASONS,
     ExportedPacket,
+    ExportRun,
     PacketResolution,
+    build_packet,
     export_packets,
     make_tombstone,
+    packet_errors,
     packet_integrity_errors,
     packet_path,
     parse_packet_ref,
     resolve_packet,
+    withdraw_exported_packet,
     withdraw_packet,
     write_packet,
 )
@@ -43,8 +49,10 @@ __all__ = [
     "TEXT_NORMALIZATION",
     "WITHDRAWAL_REASONS",
     "CanonicalizationError",
+    "ExportRun",
     "ExportedPacket",
     "PacketResolution",
+    "build_packet",
     "canonical_json",
     "content_digest",
     "export_packets",
@@ -54,6 +62,7 @@ __all__ = [
     "make_tombstone",
     "new_ulid",
     "normalize_text",
+    "packet_errors",
     "packet_integrity_errors",
     "packet_path",
     "packet_ref",
@@ -61,6 +70,7 @@ __all__ = [
     "record_digest",
     "resolve_packet",
     "sha256_hex",
+    "withdraw_exported_packet",
     "withdraw_packet",
     "write_packet",
     "x_article_item_id",

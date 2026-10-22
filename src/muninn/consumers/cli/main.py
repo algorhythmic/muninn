@@ -21,6 +21,8 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn status
     muninn deep-pass <id>             # just sets the flag
     muninn export parquet --out p.parquet
+    muninn export packets [--out DIR] [--item ID]... [--since D] [--disposition D]... [--dry-run]
+    muninn export packets --withdraw PACKET_ID@REV --reason REASON
     muninn timeline [--out p.json]
     muninn vault compile
     muninn mcp
@@ -338,6 +340,68 @@ def export_parquet_cmd(ctx: click.Context, out: str) -> None:
 
     count = export_parquet(out_path=out, db_path=ctx.obj.get("db"))
     click.echo(f"Exported {count} row(s) to {out}.")
+
+
+@export_group.command("packets")
+@click.option("--out", "out_dir", default=None, type=click.Path(file_okay=False), help="Output directory (default: $MUNINN_PACKETS_DIR, else <data dir>/packets).")
+@click.option("--item", "item_ids", multiple=True, help="Only this subject item_id (repeatable), e.g. x:post:123.")
+@click.option("--since", callback=_parse_when, default=None, help="Only subjects whose primary assessment is at or after this time.")
+@click.option("--disposition", "dispositions", multiple=True, type=click.Choice(["candidate", "reference_only", "needs_evidence", "deferred", "rejected"]), help="Primary-assessment dispositions to export (repeatable; default: candidate).")
+@click.option("--limit", type=click.IntRange(min=1), default=None, help="Max subjects considered.")
+@click.option("--dry-run", is_flag=True, help="Build and validate packets; write nothing.")
+@click.option("--withdraw", "withdraw_ref", default=None, metavar="PACKET_ID@REVISION", help="Withdraw one exported packet revision (replaced by its tombstone).")
+@click.option("--reason", type=click.Choice(["retention", "operator_request", "source_deleted", "policy_hidden"]), default=None, help="Withdrawal reason (required with --withdraw).")
+@click.pass_context
+def export_packets_cmd(
+    ctx: click.Context,
+    out_dir: str | None,
+    item_ids: tuple[str, ...],
+    since: int | None,
+    dispositions: tuple[str, ...],
+    limit: int | None,
+    dry_run: bool,
+    withdraw_ref: str | None,
+    reason: str | None,
+) -> None:
+    """Export Research Intake evidence packets (contract muninn-research-intake)."""
+    import json
+    import os
+
+    from muninn.config import load_paths  # lazy
+    from muninn.consumers.packets.export import export_packets, withdraw_exported_packet  # lazy
+    from muninn.db import connect  # lazy
+
+    out = out_dir or os.environ.get("MUNINN_PACKETS_DIR") or str(load_paths().data_dir / "packets")
+    if withdraw_ref is not None:
+        if reason is None:
+            raise click.UsageError("--withdraw needs --reason")
+        if item_ids or since is not None or dispositions or limit is not None or dry_run:
+            raise click.UsageError("--withdraw takes only --reason and --out")
+    elif reason is not None:
+        raise click.UsageError("--reason is only used with --withdraw")
+
+    conn = connect(ctx.obj.get("db"))
+    try:
+        if withdraw_ref is not None:
+            try:
+                result = withdraw_exported_packet(conn, out, withdraw_ref, reason=reason)
+            except (LookupError, ValueError) as exc:
+                raise click.ClickException(str(exc)) from exc
+            click.echo(f"Withdrawn {result.ref} ({reason}); tombstone: {result.path}")
+            return
+        run = export_packets(
+            conn, out, item_ids=item_ids or None, since=since,
+            dispositions=dispositions or ("candidate",), limit=limit, dry_run=dry_run,
+        )
+    finally:
+        conn.close()
+    for exported in run.written:
+        click.echo(f"  wrote {exported.ref} {exported.digest} {exported.path}")
+    for subject, errors in run.invalid:
+        click.echo(f"  refused {subject}: {'; '.join(errors[:3])}", err=True)
+    click.echo(("Packet plan: " if dry_run else "Packets exported: ") + json.dumps(run.summary()))
+    if run.invalid:
+        sys.exit(1)
 
 
 @cli.command("timeline")
