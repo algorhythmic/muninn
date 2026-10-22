@@ -18,6 +18,10 @@ DB writes (in order, single transaction):
      next `muninn enrich` re-enrich every deep-passed row (RI-01 D6). Only
      when no enriched row exists yet does the INSERT record the deep pass's
      own provenance, since the NOT NULL columns need a value.
+     Then the bookmark's fts_bookmarks row is rewritten from the new
+     summary/tags, so keyword search sees the deep pass. The Qdrant point
+     is left for scripts/reconcile-vector-index.py, which re-embeds any
+     point whose payload no longer matches its enriched row.
   2. INSERT INTO cross_references with created_by='deep_pass' (skipped on
      UNIQUE conflict).
 """
@@ -165,6 +169,9 @@ def write_output(
         ),
     )
 
+    # 1b. Keep the keyword index in step with the new summary/tags.
+    _refresh_fts(conn, bookmark_id, source_text)
+
     # 2. Cross references — inject created_by='deep_pass', dedupe via UNIQUE.
     for ref in output.get("cross_references") or []:
         target_id = ref.get("target_bookmark_id")
@@ -184,6 +191,45 @@ def write_output(
                 ref.get("rationale") or _confidence_to_rationale(ref.get("confidence")),
             ),
         )
+
+
+def _refresh_fts(conn: sqlite3.Connection, bookmark_id: int, source_text: str) -> None:
+    """Rewrite the bookmark's ``fts_bookmarks`` row from the enriched row.
+
+    Runs inside the caller's success transaction, so the FTS row and the
+    deep-pass summary commit (or roll back) together. Column values match
+    what :func:`muninn.enrich.pipeline._upsert_enriched_row` writes: the
+    bookmark title, the summary, the content text and the tags JSON. The
+    content text is the text this deep pass read, else the text already
+    indexed. A hidden bookmark (``content_visible = 0``) loses its FTS row
+    instead, as the bulk pipeline never indexes hidden rows.
+
+    The Qdrant point is not touched here (no network inside a SQL
+    transaction): its payload now differs from the row, and
+    ``scripts/reconcile-vector-index.py`` re-embeds every such stale point.
+    """
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT b.title, b.content_visible, e.summary, e.tags "
+        "FROM bookmarks b JOIN enriched e ON e.bookmark_id = b.bookmark_id "
+        "WHERE b.bookmark_id = ?",
+        (bookmark_id,),
+    ).fetchone()
+    previous = cur.execute(
+        "SELECT content_text FROM fts_bookmarks WHERE rowid = ?", (bookmark_id,)
+    ).fetchone()
+    cur.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bookmark_id,))
+    if row is None:
+        return
+    title, visible, summary, tags = tuple(row)  # works with or without sqlite3.Row
+    if not visible:
+        return
+    content_text = source_text or (previous[0] if previous else "") or ""
+    cur.execute(
+        "INSERT INTO fts_bookmarks(rowid, title, summary, content_text, tags) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (bookmark_id, title or "", summary or "", content_text, tags or "[]"),
+    )
 
 
 def _canonical_content_text(
