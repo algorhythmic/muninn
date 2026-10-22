@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**The browser-bookmark pipeline is implemented** (commit `ab874cb`). It runs ingest → sanitize → dual-pass scrape → Haiku enrich → consumers (CLI, MCP, vault compiler, timeline, Parquet), plus synthesis scaffolding and a real test suite (438 tests on branch `adr-reset-x-first`, where `selectolax<1` is pinned; 1001 on `x-slice`).
+**The browser-bookmark pipeline is implemented** (commit `ab874cb`). It runs ingest → sanitize → dual-pass scrape → Haiku enrich → consumers (CLI, MCP, vault compiler, timeline, Parquet), plus synthesis scaffolding and a real test suite (438 tests on branch `adr-reset-x-first`, where `selectolax<1` is pinned; 1056 on `x-slice`).
 
 **v1 is now X bookmarks first** (ADR-012). The code for every "Blocking v1" item is on branch `x-slice` (stacked on `adr-reset-x-first`), tested against synthetic fixtures only: the migrator, the X connector and sync writer, the `muninn-research-intake` 0.1.0-draft contract, suitability assessment, packet export, X vault pages and the search interface. What remains is operator-run: live X qualification (RI-02a, $5 cap), then the first real sync, assessment and recall check. The browser-bookmark bulk run is v1.1.
 
@@ -55,9 +55,9 @@ Per-bookmark `ADD_DATE` unix timestamps are the authoritative dates for browser 
 - `synthesis/`: orchestrator, JSON Schema validation, the task/result file contract (`muninn-synthesis/1`, `docs/synthesis-contract.md`) and the budgeted direct API runner (default model `claude-opus-5-5`; per-run `--max-cost-usd`, and a required monthly cap `MUNINN_SYNTHESIS_MONTHLY_BUDGET_USD`). The Saga-style container path is removed (ADR-013).
 - `consumers/`: Click CLI `muninn …`, FastMCP stdio server, vault compiler with Jinja templates (X items in `vault/x_pages.py`), timeline, Parquet, and `packets/` (evidence-packet export, canonical JSON, tombstones).
 
-CLI: `muninn ingest [html] PATH|ingest x|x auth|scrape|enrich [--task suitability]|synthesize {era|deep-pass|analyze} [--emit-task DIR]|synthesize ingest-result FILE|triage|status|deep-pass|export parquet|export packets|timeline|vault|mcp [--transport stdio|http]|db migrate|db status`. MCP tools and their privacy rules are specified in `docs/mcp-api.md`.
+CLI: `muninn ingest [html] PATH|ingest x|x auth|scrape|enrich [--task suitability]|synthesize {era|deep-pass|analyze} [--emit-task DIR]|synthesize ingest-result FILE|triage|status|deep-pass|export parquet|export packets|timeline|vault|mcp [--transport stdio|http]|db migrate|db status|db rebuild-fts|policy apply [--dry-run]`. `muninn policy apply` re-applies `domain_policy.yml` to every stored row (it also runs at the start of each X sync) and masks newly hidden links in visible X posts. MCP tools and their privacy rules are specified in `docs/mcp-api.md`.
 
-DB: numbered migrations in `schemas/sql/NNN_*.sql`, applied only by `muninn db migrate [--dry-run]` (backup first) or by `init_db()` / `scripts/init-db.py` for a fresh file. `PRAGMA user_version` is the applied version; `connect()` refuses a missing, empty or behind database and warns on an ahead one. `schema.sql` is a test-guarded byte mirror of `001_initial.sql` only, not the full schema.
+DB: numbered migrations in `schemas/sql/NNN_*.sql`, applied only by `muninn db migrate [--dry-run]` (backup first) or by `init_db()` / `scripts/init-db.py` for a fresh file. `PRAGMA user_version` is the applied version; `connect()` refuses a missing, empty or behind database and warns on an ahead one. An unstamped legacy DB whose `fts_bookmarks` differs from 001 (the pre-2026-07-16 contentless FTS) is refused until `muninn db rebuild-fts`. `schema.sql` is a test-guarded byte mirror of `001_initial.sql` only, not the full schema.
 
 The Research Intake producer contract is `docs/contracts/MUNINN-RESEARCH-INTAKE.md` with schemas in `schemas/json/intake/` and a release manifest checked by `scripts/intake-release-manifest.py --check`. Odin copies the contract byte-for-byte, so it has no relative links.
 
