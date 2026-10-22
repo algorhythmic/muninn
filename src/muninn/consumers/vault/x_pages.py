@@ -309,6 +309,40 @@ def mask_hidden_links(text: str, urls: set[str]) -> str:
     return text
 
 
+_MIN_TRUNCATED_LOCATOR = 9  # "https://" alone says nothing; one host character does
+
+
+def mask_hidden_title(title: str, urls: set[str]) -> str:
+    """:func:`mask_hidden_links` for a post title. The writer's title is
+    the first ~80 characters of the text, so it can also end in a
+    truncated locator (``… https://intra…``); a final token that is a
+    prefix of a hidden locator is masked too."""
+    title = mask_hidden_links(title, urls)
+    if not urls or not title.endswith(("…", "...")):
+        return title
+    head, _, last = title.rpartition(" ")
+    stem = last.rstrip(".…")
+    if len(stem) >= _MIN_TRUNCATED_LOCATOR and any(u.startswith(stem) for u in urls):
+        return f"{head} {HIDDEN_LINK_TEXT}" if head else HIDDEN_LINK_TEXT
+    return title
+
+
+def hidden_child_urls(conn: sqlite3.Connection, bookmark_id: int) -> set[str]:
+    """Locators of the hidden items a row links to (for one-off lookups;
+    the compiler gets the same set from :func:`load_link_graph`)."""
+    if not has_table(conn, "item_links"):
+        return set()
+    return {
+        row["url"]
+        for row in conn.execute(
+            "SELECT b.url FROM item_links l JOIN bookmarks b ON b.bookmark_id = l.child_bookmark_id "
+            "WHERE l.parent_bookmark_id = ? AND b.content_visible = 0 "
+            "AND b.url IS NOT NULL AND b.url != ''",
+            (bookmark_id,),
+        )
+    }
+
+
 # ── per-page view ─────────────────────────────────────────────────
 
 
@@ -401,7 +435,7 @@ def build_view(
     if is_post:
         handle = (author or {}).get("handle")
         if bm["title"]:
-            title = bm["title"]
+            title = mask_hidden_title(bm["title"], graph.hidden_child_urls.get(bid, set()))
         elif handle and text:
             title = f"@{handle}: {_one_line(text, _TITLE_TEXT_CHARS)}"
         elif handle:
@@ -448,10 +482,12 @@ __all__ = [
     "X_SOURCES",
     "LinkGraph",
     "build_view",
+    "hidden_child_urls",
     "item_id_for",
     "item_kind_for",
     "iso_utc",
     "load_link_graph",
     "mask_hidden_links",
+    "mask_hidden_title",
     "x_slug",
 ]

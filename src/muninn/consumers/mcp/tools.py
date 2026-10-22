@@ -38,19 +38,25 @@ def _item_kind(row: sqlite3.Row) -> str | None:
     return x_pages.item_kind_for(row)
 
 
-def _title(row: sqlite3.Row) -> str | None:
-    """``bookmarks.title``; an X post without one (known only from an
-    ``errors[]`` entry or a bare reference) falls back to ``@handle``."""
-    if row["title"] or row["source"] != "x":
+def _title(conn: sqlite3.Connection, row: sqlite3.Row) -> str | None:
+    """``bookmarks.title``. An X post's title is the start of its text, so
+    a locator of a link hidden since the last sync is masked as in the
+    vault; a post without a title (known only from an ``errors[]`` entry or
+    a bare reference) falls back to ``@handle``."""
+    if row["source"] != "x":
         return row["title"]
-    return x_pages.display_name(row)
+    if not row["title"]:
+        return x_pages.display_name(row)
+    return x_pages.mask_hidden_title(row["title"], x_pages.hidden_child_urls(conn, row["bookmark_id"]))
 
 
-def _bookmark_summary(row: sqlite3.Row, score: float | None = None) -> dict:
+def _bookmark_summary(
+    conn: sqlite3.Connection, row: sqlite3.Row, score: float | None = None
+) -> dict:
     """Compact bookmark view for search results."""
     out = {
         "bookmark_id": row["bookmark_id"],
-        "title": _title(row),
+        "title": _title(conn, row),
         "url": row["url"],
         "era_label": row["era_label"],
         "domain": row["domain"],
@@ -102,7 +108,7 @@ def _hydrate(
             ).fetchone()
             if row is not None:
                 output.append(
-                    _bookmark_summary(row, score=hit.score if with_score else None)
+                    _bookmark_summary(conn, row, score=hit.score if with_score else None)
                 )
         return output
     finally:
@@ -177,6 +183,7 @@ def get_bookmark(bookmark_id: int, db_path: str | Path | None = None) -> str:
         ).fetchall()
 
         out = _row_to_dict(row)
+        out["title"] = _title(conn, row)
         out["item_kind"] = _item_kind(row)
         out["scrape_results"] = [_row_to_dict(s) for s in scrape]
         return json.dumps(out, indent=2, default=str)

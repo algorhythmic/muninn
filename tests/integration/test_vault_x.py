@@ -25,10 +25,10 @@ ARTICLE_SLUG = f"x-article-{xc.ARTICLE_ID}"
 REPO_SLUG = "github-synthetic-org-synthetic-repo"
 
 
-def _seed(db_path: Path) -> xc.XCorpus:
+def _seed(db_path: Path, **kwargs) -> xc.XCorpus:
     conn = connect(db_path)
     try:
-        return xc.seed_x_corpus(conn)
+        return xc.seed_x_corpus(conn, **kwargs)
     finally:
         conn.close()
 
@@ -65,12 +65,16 @@ def test_one_page_per_visible_x_item_and_none_for_hidden(db_path: Path, tmp_path
     assert xc.HIDDEN_URL not in everything
 
 
-def test_post_text_masks_the_hidden_links_locator(db_path: Path, tmp_path: Path):
-    _seed(db_path)
+@pytest.mark.parametrize("hidden_at_ingest", [True, False])
+def test_post_text_masks_the_hidden_links_locator(db_path: Path, tmp_path: Path, hidden_at_ingest):
+    # False: the stored text still quotes the locator (hidden by a policy
+    # change after the last sync), so the compiler's own mask must catch it.
+    _seed(db_path, hidden_at_ingest=hidden_at_ingest)
     post = _compile(db_path, tmp_path)[POST_SLUG]
     assert "> Thread on evaluating retrieval with the quillwort benchmark." in post
     assert f"> Code: {xc.REPO_URL}" in post
     assert f"> Draft plan: {x_pages.HIDDEN_LINK_TEXT}" in post
+    assert xc.HIDDEN_URL not in post
 
 
 def test_post_frontmatter_keeps_the_three_times_separate(db_path: Path, tmp_path: Path):
@@ -226,6 +230,21 @@ def test_colliding_x_slugs_get_a_bookmark_id_suffix(db_path: Path, tmp_path: Pat
     assert f"{REPO_SLUG}-b{other_repo}" in pages
 
 
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("@a: see https://intranet.example/p/q now", "@a: see [hidden link] now"),
+        ("@a: plan at https://intranet.ex…", "@a: plan at [hidden link]"),
+        ("@a: plan at https://intranet.ex...", "@a: plan at [hidden link]"),
+        ("@a: plan at https://…", "@a: plan at https://…"),  # too short to say
+        ("@a: plan at https://example.org/…", "@a: plan at https://example.org/…"),
+        ("@a: no links here", "@a: no links here"),
+    ],
+)
+def test_mask_hidden_title(title, expected):
+    assert x_pages.mask_hidden_title(title, {"https://intranet.example/p/q"}) == expected
+
+
 def test_post_slug_without_author_falls_back_to_id():
     row = {"source": "x", "source_id": "123", "source_metadata": None, "url": None,
            "title": None, "bookmark_id": 1}
@@ -314,6 +333,8 @@ def test_published_at_falls_back_to_scrape_history(db_path: Path, tmp_path: Path
 def test_deleted_post_renders_without_text(db_path: Path, tmp_path: Path):
     corpus = _seed(db_path)
     conn = connect(db_path)
+    # A post the writer knows only from an errors[] entry has no title.
+    conn.execute("UPDATE bookmarks SET title = NULL WHERE bookmark_id = ?", (corpus.post,))
     conn.execute(
         "UPDATE scrape_results SET scrape_status = 'failed', content_text = NULL "
         "WHERE bookmark_id = ? AND pass = 'live'",

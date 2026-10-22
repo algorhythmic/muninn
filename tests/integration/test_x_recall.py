@@ -188,4 +188,12 @@ def test_link_hidden_after_indexing_disappears_everywhere(
     post = pages[f"x-synth-author-a-{xc.POST_ID}"]
     assert xc.WEB_URL not in post
     assert re.search(r"^> Notes: \[hidden link\]$", post, re.M)
+    # The title (the text's first 80 characters) ended in the now-hidden
+    # locator, truncated: masked in the page and in MCP results alike.
+    assert "https://exa" not in post
+    assert re.search(r'^title: ".*Notes: \[hidden link\]"$', post, re.M)
+    mcp_titles = [r["title"] for r in json.loads(tools.fts_search("quillwort", db_path=db_path))
+                  if r["bookmark_id"] == c.post]
+    mcp_titles.append(json.loads(tools.get_bookmark(c.post, db_path=db_path))["title"])
+    assert all(t.endswith("Notes: [hidden link]") for t in mcp_titles), mcp_titles
     assert "Synthetic notes on retrieval evaluation" not in "\n".join(pages.values())
