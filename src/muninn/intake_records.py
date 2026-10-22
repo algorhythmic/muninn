@@ -374,23 +374,28 @@ def current_revision_row(
 ) -> sqlite3.Row | None:
     """The item's current content revision, or None.
 
-    Current means a non-withdrawn ``x_api`` or ``live`` revision (archive
-    revisions are historical, contract §8). Revisions are a
-    content-addressed set, not a timeline (contract §5), so the revision
-    whose digest matches the item's current ``scrape_results`` live row
-    wins; the most recently retrieved one is the fallback.
+    Revisions are a content-addressed set, not a timeline (contract §5),
+    so the non-withdrawn revision whose digest matches the item's current
+    ``scrape_results`` live row wins. That match may be a revision first
+    recorded from an archive capture: the revision key leaves out the
+    retrieval method, so a live fetch identical to an earlier archive
+    capture adds no row of its own, yet its text is the item's current
+    text (contract §3.2). An archive revision is accepted only through
+    such a match with readable live text. Otherwise the most recently
+    retrieved non-withdrawn ``x_api`` or ``live`` revision is the fallback
+    (archive revisions are historical, contract §8).
     """
     rows = conn.execute(
         """
         SELECT * FROM scrape_history
         WHERE  item_ref = ? AND withdrawn_at IS NULL
-          AND  retrieval_method IN ('x_api', 'live')
         ORDER  BY retrieved_at DESC, scrape_history_id DESC
         """,
         (item_ref,),
     ).fetchall()
     if not rows:
         return None
+    current = [r for r in rows if r["retrieval_method"] in ("x_api", "live")]
     if bookmark_id is not None:
         live = conn.execute(
             "SELECT content_text FROM scrape_results WHERE bookmark_id = ? AND pass = 'live'",
@@ -398,10 +403,14 @@ def current_revision_row(
         ).fetchone()
         if live is not None:
             want = content_digest(live["content_text"])
-            for row in rows:
+            for row in current:
                 if row["content_sha256"] == want:
                     return row
-    return rows[0]
+            if normalize_text(live["content_text"]):
+                for row in rows:  # an archive revision with the same readable text
+                    if row["content_sha256"] == want and row["coverage"] not in NO_CONTENT_COVERAGE:
+                        return row
+    return current[0] if current else None
 
 
 # ── Profiles, assessments, usage ─────────────────────────────────────

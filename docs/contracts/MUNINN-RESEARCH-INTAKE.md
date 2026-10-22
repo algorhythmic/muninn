@@ -186,6 +186,16 @@ Rules:
 | Assessment | `assessment_id` (ULID). Unique on (content revision, profile digest, `policy_version`, `model`, `prompt_version`) | sha256 of its canonical JSON |
 | Evidence packet | `packet_id` (ULID) + integer `revision` ≥ 1 | sha256 of its canonical JSON = sha256 of the exported file |
 
+**Current revision.** The revision key leaves out the retrieval method, so
+a live capture whose text equals an earlier archive capture of the same
+item adds no revision of its own. An item's current revision is therefore
+the non-withdrawn revision whose digest matches the item's current live
+capture, whichever retrieval method first recorded it; an archive-first
+revision qualifies only through such a match with readable live text.
+Its record keeps the method and freshness of that first capture. Without
+a match, the current revision is the most recently retrieved `x_api` or
+`live` revision.
+
 ## 4. Records
 
 Field-level definitions are in the schemas. This section gives each
@@ -855,10 +865,10 @@ Design questions for review:
     revision, and A keeps its first `retrieved_at`.
   - A live capture and an archive capture with identical text share one
     revision, whichever was written first. `muninn scrape` writes the live
-    pass first, so the shared revision is normally `current`. But an
-    archive capture recorded before any live capture of the same text
-    stays `historical`, and the item then has no current revision for
-    that text.
+    pass first, so the shared revision is normally `current`. An archive
+    capture recorded before any live capture of the same text stays
+    labelled `historical`, but it is still selected as the item's current
+    revision once a live capture matches it (section 3.2).
   - A withdrawn revision cannot come back. Re-fetching identical content
     hits the key and stays withdrawn.
 - **Locators that policy hides later.** Domain policy is applied at write
