@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from muninn.ingest.bookmarks_html import ParsedBookmark, parse_bookmarks_html
+from muninn.ingest.policy import policy_hides
 from muninn.sanitize import sanitize_url
 from muninn.scrape.domain_policy import DomainPolicy, load_domain_policy
 
@@ -75,7 +76,8 @@ def ingest_html(
 
         # Domain policy gates content_visible (per Decision 5: never excludes
         # the row from `bookmarks`, only gates downstream stages).
-        hidden = policy.matches(url) if url is not None else False
+        # policy_hides = policy.matches plus X's host aliases / handle case.
+        hidden = policy_hides(policy, url)
         if hidden:
             stats.hidden_by_policy += 1
         content_visible = 0 if hidden else 1

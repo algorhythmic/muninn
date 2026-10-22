@@ -12,7 +12,10 @@ Rows written (see the module-level ``*_METADATA`` notes for the JSON shapes):
   (``source_id`` = article ID); ``source='x_link'`` (``source_id`` = sha256
   of the sanitized canonical locator) for every other linked URL. Every
   locator went through ``sanitize_url``, and ``domain_policy`` sets
-  ``content_visible`` exactly as for browser bookmarks.
+  ``content_visible`` as for browser bookmarks (:mod:`muninn.ingest.policy`:
+  X host aliases and handle case included). A post's ``url`` is always the
+  canonical ``x.com/<handle>/status/<id>``; a hidden post's title is
+  ``@handle`` only and a hidden article has none.
 - The post (and article) text: the item's ``scrape_results`` row with
   ``pass='live'`` plus an append-only ``scrape_history`` revision with
   ``retrieval_method='x_api'``; ``enrichment_source='live_fallback'``.
@@ -38,7 +41,6 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
-from urllib.parse import urlsplit
 
 from muninn.consumers.packets.canonical import (
     link_item_id,
@@ -59,6 +61,22 @@ from muninn.ingest.x import (
     XLink,
     XPost,
 )
+from muninn.ingest.policy import (
+    HIDDEN_LINK,
+    X_ARTICLE_EXTRACTOR,
+    X_TEXT_EXTRACTOR,
+    canonical_post_locator,
+    domain_of,
+    handle_from_locator,
+    hidden_child_patterns,
+    hidden_post_title,
+    mask_text,
+    meta_handle,
+    policy_hides,
+    post_locator,
+    post_title_for,
+    visible_flag,
+)
 from muninn.intake_records import SOURCE_X_ARTICLE, SOURCE_X_LINK, SOURCE_X_POST
 from muninn.revisions import record_revision
 from muninn.sanitize import sanitize_url
@@ -69,10 +87,6 @@ log = logging.getLogger(__name__)
 COLLECTION_BOOKMARKS = "bookmarks"
 OPERATION_BOOKMARKS = "GET /2/users/:id/bookmarks"
 OPERATION_ME = "GET /2/users/me"
-# Extractor recorded on x_api revisions: note_tweet text preferred over
-# text, t.co links replaced by their sanitized locators, then muninn-text/1.
-X_TEXT_EXTRACTOR = ("muninn-x-post-text", "1")
-X_ARTICLE_EXTRACTOR = ("muninn-x-article-text", "1")
 DEFAULT_MAX_PAGES = 10
 
 SyncMode = Literal["incremental", "full"]
@@ -152,51 +166,22 @@ class PageResult:
 
 # ── Row helpers ─────────────────────────────────────────────────────────
 
-def _domain(url: str | None) -> str | None:
-    if not url:
-        return None
-    try:
-        host = urlsplit(url).hostname
-    except ValueError:
-        return None
-    return host.lower() if host else None
+_domain = domain_of
+_visible = visible_flag
+_post_locator = post_locator
 
 
-def _visible(policy: DomainPolicy, url: str | None) -> int:
-    return 0 if url is not None and policy.matches(url) else 1
-
-
-def _title_from_text(text: str | None, limit: int = 80) -> str | None:
-    if not text:
-        return None
-    first = " ".join(text.split())
-    if not first:
-        return None
-    return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
+def _handle(post: XPost | None) -> str | None:
+    return post.author.username if post is not None and post.author else None
 
 
 def post_title(post: XPost, text: str) -> str | None:
     """``@handle: <first ~80 characters>`` so handles are keyword-searchable."""
-    snippet = _title_from_text(text)
-    handle = post.author.username if post.author else None
-    if handle:
-        return f"@{handle}: {snippet}" if snippet else f"@{handle}"
-    return snippet
-
-
-def _post_locator(post_id: str, handle: str | None) -> str | None:
-    raw = (
-        f"https://x.com/{handle}/status/{post_id}" if handle
-        else f"https://x.com/i/web/status/{post_id}"
-    )
-    return sanitize_url(raw).sanitized_url
+    return post_title_for(_handle(post), text)
 
 
 def _valid_x_id(value: str | None) -> bool:
     return bool(value) and value.isdigit() and not value.startswith("0") and len(value) <= 20
-
-
-HIDDEN_LINK = "[hidden link]"
 
 
 def _replace_short_links(
@@ -232,7 +217,7 @@ def post_text(post: XPost, policy: DomainPolicy | None = None) -> str:
     hidden = None
     if policy is not None:
         def hidden(link: XLink) -> bool:
-            return policy.matches(link.locator) or policy.matches(link_locator(link))
+            return policy_hides(policy, link.locator) or policy_hides(policy, link_locator(link))
     return normalize_text(_replace_short_links(post.text or "", post.links, hidden))
 
 
@@ -353,9 +338,14 @@ class XPageWriter:
         observation time, contract §4.3). A post first written as a
         reference (quoted, replied to, linked) is promoted when it is later
         bookmarked; a known bookmark only gets ``last_observed_at``.
+
+        The stored locator is always the canonical one
+        (``x.com/<handle>/status/<id>``), never the URL form a link used:
+        ``url`` only lends its handle while the API has not named one. A
+        hidden post's title is ``@handle`` only.
         """
         row = self._find(SOURCE_X_POST, post_id)
-        handle = post.author.username if post is not None and post.author else None
+        handle = _handle(post)
         if row is None:
             meta = _post_metadata(post) if post is not None else {"kind": "x_post"}
             meta["bookmarked"] = bookmarked
@@ -367,8 +357,11 @@ class XPageWriter:
                 )
                 if list_position is not None:
                     meta["list_position"] = list_position
-            locator = url or _post_locator(post_id, handle)
-            title = post_title(post, post_text(post, self.policy)) if post is not None else None
+            locator = _post_locator(post_id, handle or handle_from_locator(url))
+            if not _visible(self.policy, locator):
+                title = hidden_post_title(handle)
+            else:
+                title = post_title(post, post_text(post, self.policy)) if post is not None else None
             return (
                 self._insert(
                     source=SOURCE_X_POST, source_id=post_id, captured_at=observed_at,
@@ -386,12 +379,18 @@ class XPageWriter:
             # Written earlier as a bare reference; fill in what the API now gives.
             for key, value in _post_metadata(post).items():
                 meta.setdefault(key, value)
-            if handle and (locator is None or "/i/web/status/" in locator):
-                locator = _post_locator(post_id, handle)
-        if post is not None:
+        # The API's handle wins (renames included); else keep the handle the
+        # stored locator already names. Either way only the canonical form.
+        locator = (
+            _post_locator(post_id, handle) if handle
+            else canonical_post_locator(post_id, meta, locator)
+        )
+        if not _visible(self.policy, locator):
+            title = hidden_post_title(handle or meta_handle(meta))
+        elif post is not None:
             # Recompute on every sighting: a policy change may now hide a
             # locator the old title quoted.
-            title = post_title(post, post_text(post, self.policy))
+            title = post_title(post, self._masked_text(bookmark_id, post))
         newly = False
         if bookmarked:
             if meta.get("bookmarked", True) is False:
@@ -407,6 +406,7 @@ class XPageWriter:
         if _dump(meta) != before or (title, locator, captured_at) != (
             row["title"], row["url"], int(row["captured_at"])
         ):
+            # A changed locator changes visibility in the same UPDATE.
             self.conn.execute(
                 "UPDATE bookmarks SET source_metadata = ?, captured_at = ?, title = ?, url = ?, "
                 "domain = ?, content_visible = ? WHERE bookmark_id = ?",
@@ -519,13 +519,27 @@ class XPageWriter:
         ).fetchone()
         return row is not None and row["content_visible"] == 0
 
+    def _masked_text(self, bookmark_id: int, post: XPost) -> str:
+        """:func:`post_text`, then every hidden linked item's locator masked
+        (the same masks ``muninn policy apply`` uses), so a link whose own
+        locator escapes the policy but whose item is hidden (a
+        ``twitter.com/<Handle>/status/<id>`` form, say) is masked too."""
+        return mask_text(post_text(post, self.policy), hidden_child_patterns(self.conn, bookmark_id))
+
     def write_post_content(self, bookmark_id: int, post: XPost, retrieved_at: int) -> bool:
+        """Write the post's text (call after :meth:`write_links`, so its
+        linked items exist) and the title derived from it."""
         if self._hidden(bookmark_id):
             return False  # hidden by domain policy: like `muninn scrape`, store no content
-        text = post_text(post, self.policy)
+        text = self._masked_text(bookmark_id, post)
         row = self.conn.execute(
-            "SELECT url FROM bookmarks WHERE bookmark_id = ?", (bookmark_id,)
+            "SELECT url, title FROM bookmarks WHERE bookmark_id = ?", (bookmark_id,)
         ).fetchone()
+        title = post_title(post, text)
+        if row is not None and title != row["title"]:
+            self.conn.execute(
+                "UPDATE bookmarks SET title = ? WHERE bookmark_id = ?", (title, bookmark_id)
+            )
         return self.write_content(
             bookmark_id,
             x_post_item_id(post.post_id),
@@ -582,12 +596,17 @@ class XPageWriter:
             if article is not None:
                 meta["has_body"] = bool(article.body)
             url = sanitize_url(f"https://x.com/i/article/{article_id}").sanitized_url
+            # A hidden article keeps no title: it is the article's own text.
+            title = article.title if article is not None and _visible(self.policy, url) else None
             return self._insert(
                 source=SOURCE_X_ARTICLE, source_id=article_id, captured_at=seen_at,
-                title=article.title if article is not None else None, url=url, meta=meta,
+                title=title, url=url, meta=meta,
             )
         bookmark_id = int(row["bookmark_id"])
-        if article is not None and article.title and not row["title"]:
+        if not _visible(self.policy, row["url"]):
+            if row["title"] is not None:
+                self.conn.execute("UPDATE bookmarks SET title = NULL WHERE bookmark_id = ?", (bookmark_id,))
+        elif article is not None and article.title and not row["title"]:
             self.conn.execute(
                 "UPDATE bookmarks SET title = ? WHERE bookmark_id = ?", (article.title, bookmark_id)
             )
@@ -678,10 +697,11 @@ class XPageWriter:
                 result.known_posts += 1
             else:  # a new row, or a referenced post seen as a bookmark for the first time
                 result.new_posts += 1
-            result.revisions_new += self.write_post_content(bookmark_id, post, seen)
+            # Links first: the text masks the locators of linked items that are hidden.
             result.links += self.write_links(
                 bookmark_id, ref, post, seen_at=seen, parent_post_id=post.post_id
             )
+            result.revisions_new += self.write_post_content(bookmark_id, post, seen)
 
             quoted = {q.post_id: q for q in post.quoted_posts}
             for kind, pid in post.referenced:
@@ -694,10 +714,10 @@ class XPageWriter:
                 )
                 if pid in quoted:
                     q = quoted[pid]
-                    result.revisions_new += self.write_post_content(child_id, q, seen)
                     result.links += self.write_links(
                         child_id, x_post_item_id(pid), q, seen_at=seen, parent_post_id=pid
                     )
+                    result.revisions_new += self.write_post_content(child_id, q, seen)
                 self.link(
                     parent_id=bookmark_id, parent_ref=ref, child_id=child_id,
                     child_ref=x_post_item_id(pid), relation=relation, position=0,
