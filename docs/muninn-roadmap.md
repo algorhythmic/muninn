@@ -125,7 +125,7 @@ This is Karpathy's "Lint" operation: periodic vault hygiene.
 
 | Item | Notes |
 |---|---|
-| Session pages from Skald's archive feed | A batch summarizer turns Skald's verbatim transcript archive into curated `wiki/sessions/` pages, as a captured-lane source (ADR-011). It replaces the retired `/note` skill |
+| Session pages from Skald's archive feed | A batch summarizer turns Skald's verbatim transcript archive into curated `wiki/sessions/` pages, as a captured-lane source (ADR-011). It replaces the retired `/note` skill. **Depends on:** Skald publishing its archive-feed contract (`ARCHIVE-FEED-V1`, a candidate as of 2026-10-21) so muninn reads pinned feed files rather than Skald's socket; and Skald enrolling every login whose sessions matter (each Claude Code login's `projects/` root is a separate `skald connect --root`). Live progress of a running session is not this item's job; agents read the source transcript directly for that |
 | Other saved-material sources | YouTube, Reddit, Instagram, GitHub stars, Pocket/Pinboard exports. Each is one adapter into the source-agnostic `bookmarks` table |
 
 ## Feature backlog — design complete, not yet scheduled

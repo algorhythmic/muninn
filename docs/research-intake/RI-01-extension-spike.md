@@ -121,12 +121,17 @@ Rules that replace the dropped package boundaries:
   stores them as `{ref, digest}` inputs, and neither side reads the other's
   database.
 
-Open design points carried into RI-03:
+Open design points carried into RI-03 (both **resolved** in the contract,
+`docs/contracts/MUNINN-RESEARCH-INTAKE.md` §10, without a table rebuild):
 
-- **Where the X post's own text lives.** Options are `source_metadata` or a
-  new `scrape_results.pass` value. A new pass value would need a
-  table-rebuild migration, because SQLite cannot alter a CHECK constraint.
-- **The `enrichment_source` value for API-sourced content.**
+- **Where the X post's own text lives.** Options were `source_metadata` or a
+  new `scrape_results.pass` value. *Resolved:* the post's `scrape_results`
+  row with `pass='live'`, plus a `scrape_history` revision with
+  `retrieval_method='x_api'`; `source_metadata` holds metadata only.
+  `muninn scrape` therefore skips `source='x'` rows.
+- **The `enrichment_source` value for API-sourced content.** *Resolved:* the
+  existing `live_fallback`. Provenance is recorded per revision in
+  `scrape_history`; a dedicated `x_api` value is deferred.
 
 ## 4. Migration and rollback plan
 
@@ -174,6 +179,14 @@ small built-in migrator of roughly 60 lines in `db.py`, not Alembic.
      because it breaks DuckDB ATTACH (`schema.sql:162-166`).
    - **Conventions from 001 stay:** epoch ints, `json_valid` CHECKs, and TEXT
      enums with CHECK.
+7. **As implemented (P2, `168dc89`).** Three choices refine the plan above:
+   - Migrations run with `PRAGMA foreign_keys=OFF` (set outside the
+     transaction) so a table rebuild cannot cascade-delete child rows, and
+     `foreign_key_check` runs before each COMMIT.
+   - The minimum reader version lives in an optional `schema_meta(key, value)`
+     table; when it is absent the minimum is 1.
+   - `connect()` refuses a missing or empty database instead of creating one;
+     `muninn db migrate` (or `init_db()`) creates it at head.
 
 ## 5. Freshness policy
 
@@ -201,8 +214,8 @@ deferred as noted.
 | D2 | `mcp>=1.0` resolves to 2.x, where `mcp.server.fastmcp` no longer exists, so `muninn mcp` cannot import | High | Pin `mcp>=1.0,<2`, then port deliberately |
 | D3 | `enrich --prompt-version vN` records `vN` but sends the v1 prompt (`enrich/pipeline.py:309` omits `prompt_version`) | Medium (corrupts the idempotency record) | Pass the version through, and add a test |
 | D4 | No lockfile. `anthropic` resolves to 2.x on a fresh install, which is untested and uses a different httpx stack from the scraper | Medium | Commit `uv.lock`, and bound `anthropic` to the tested major version |
-| D5 | The `init_db()` docstring contradicts itself ("Idempotent", yet a second call errors), and `scripts/init-db.py --force` deletes the DB | Low | Superseded by §4 |
-| D6 | The deep pass overwrites `enriched`'s idempotency triple, so the next `muninn enrich` re-enriches | Low (pre-existing) | Out of scope for Research Intake. Noted in Known gaps |
+| D5 | The `init_db()` docstring contradicts itself ("Idempotent", yet a second call errors), and `scripts/init-db.py --force` deletes the DB | Low | **Resolved by P2** (`168dc89`): `init_db()` is create-if-empty then migrate |
+| D6 | The deep pass overwrites `enriched`'s idempotency triple, so the next `muninn enrich` re-enriches | Low (pre-existing) | **Fixed** (`e009d7a`): the deep pass writes only its own columns |
 | D7 | `aiosqlite` is declared but unused, and `pyarrow` is used only by tests | Low | Drop `aiosqlite`, move `pyarrow` to `dev` |
 | D8 | The DuckDB tests download `sqlite_scanner` once from DuckDB's extension server | Info | Document it for offline runs |
 | D9 | The live HTTP cache never expires and is keyed by URL only, not URL+date as SPEC.md@45296bf:314 states | Low for bookmarks; blocks intake re-capture | Time-bucketed key or explicit bypass. Fix in RI-04 |
