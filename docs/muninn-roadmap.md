@@ -22,30 +22,23 @@ Intake evidence packet.
 The browser-bookmark pipeline is implemented, but its bulk run is
 **v1.1** (below). Work the items in order; independent items may overlap.
 
-- [ ] **P1 dependency fixes.** *In progress 2026-10-21 on branch `adr-reset-x-first`.* These protect every later item, including the v1.1 bulk scrape.
-  - Pin `selectolax<1`, and make an extraction-backend import failure fatal. Without the pin, a fresh install silently returns `""` and degrades every scrape.
-  - Pin `mcp<2`; `muninn mcp` cannot import on 2.x.
-  - Pass `--prompt-version` through to the prompt loader.
-  - Add a lockfile.
-  - Drop the unused `aiosqlite` and move `pyarrow` to `dev`.
-  - Make the `scrape` imports lazy, and add an import-isolation test.
-
-  See [`RI-01-extension-spike.md`](research-intake/RI-01-extension-spike.md) §6.
-- [ ] **P2 schema migrator.** Add numbered `schemas/sql/NNN_*.sql` files and `PRAGMA user_version`, with backup-before-migrate. Add an explicit `muninn db migrate [--dry-run]`. Have `conftest` create test databases via migrate. This replaces "drop DB, re-ingest" (ADR-009).
+- [x] **P1 dependency fixes.** *Done 2026-10-21 (PR #1, branch `adr-reset-x-first`).* Pins for `selectolax<1`, `mcp<2` and `anthropic` 2.x, a fatal extraction-backend import, `--prompt-version` passthrough, `uv.lock`, `aiosqlite` dropped and `pyarrow` moved to `dev`, lazy `scrape` imports with an import-isolation test. See [`RI-01-extension-spike.md`](research-intake/RI-01-extension-spike.md) §6.
+- [x] **P2 schema migrator.** *Done 2026-10-21 on `x-slice`.* Numbered `schemas/sql/NNN_*.sql`, `PRAGMA user_version`, backup-before-migrate, `muninn db migrate [--dry-run]` and `muninn db status`; `conftest` builds test databases through the migrator. Replaces "drop DB, re-ingest" (ADR-009, RI-01 §4).
 - [ ] **RI-02 X access qualification.**
-  - **Live (operator-run):** create the developer app, run the PKCE flow, and fetch a bounded set of pages. Set a **$5 usage-spend cap**. Results go to dotprivate, not this repo.
-  - **Dev side:** synthetic fixtures from the documented response shapes, and a connector stub with recorded-response tests.
-- [ ] **RI-03 records and producer contract.** Write `muninn-research-intake` 0.1.0-draft: JSON Schema 2020-12 records, valid/invalid fixtures, identity and revision rules, tombstones, and a compatibility policy.
-- [ ] **X ingest adapter and linked-content scrape.**
-  - `muninn ingest x` (`ingest/x.py`) writes `bookmarks` rows with `source='x'`. Linked URLs become their own rows, joined by `item_links`.
-  - Every locator goes through `sanitize_url`.
-  - Linked articles and repositories are fetched by the existing `muninn scrape`. The live pass is the current evidence.
-  - Add append-only `scrape_history`.
-- [ ] **Suitability enrichment and packet export.**
-  - `muninn enrich --task suitability` uses the prompt `suitability_v1`. Its idempotency key is the existing triple plus the interest-profile digest. Results go to an append-only `assessments` table.
-  - `muninn export packets` writes content-addressed JSON that validates against the RI-03 schemas.
-- [ ] **Compile, index and search X pages.** The vault compiler writes X bookmarks to `wiki/bookmarks/`. Index them into Qdrant (EmbeddingGemma, already verified), and verify recall through MCP search.
-- [ ] **Retrieval interface (ADR-014).** Put the MCP search tools behind one small search interface, so a later backend swap (Braid) touches one module. Qdrant stays the v1 backend.
+  - [ ] **Live (operator-run):** create the developer app, run `muninn x auth`, and fetch a bounded set of pages (`muninn ingest x --max-pages 2`). Set a **$5 usage-spend cap**. Results go to dotprivate, not this repo. Settles the open questions in the contract (Article body, folder semantics, history depth, how deleted/protected posts surface, expansion billing).
+  - [x] **Dev side.** *Done 2026-10-21 on `x-slice`.* Synthetic fixtures (`tests/fixtures/x/`) from the documented response shapes, and the connector `ingest/x.py` with recorded-response tests.
+- [x] **RI-03 records and producer contract.** *0.1.0-draft, validated, 2026-10-21 on `x-slice`.* `docs/contracts/MUNINN-RESEARCH-INTAKE.md`: JSON Schema 2020-12 records, valid/invalid fixtures, identity and revision rules, tombstones, compatibility policy and a release manifest. Needs operator and Odin review before 0.1.0.
+- [x] **X ingest adapter and linked-content scrape.** *Code done 2026-10-21 on `x-slice`; no live run yet.*
+  - `muninn ingest x` (`ingest/x_store.py`) writes posts as `source='x'`, articles as `x_article` and linked URLs as `x_link` rows joined by `item_links`; incremental by default, resumable from `sync_checkpoints`, with per-page `usage_records`.
+  - Every locator goes through `sanitize_url`; links hidden by domain policy become `[hidden link]` in stored text.
+  - `muninn scrape` skips X rows, takes `--source` and `--refresh`, writes append-only `scrape_history`, and expires live cache entries (D9).
+- [x] **Suitability enrichment and packet export.** *Code done 2026-10-21 on `x-slice`; no live model run yet.*
+  - `muninn enrich --task suitability` (prompt `suitability_v1`) appends to `assessments`, keyed by content revision + profile digest + policy version + model + prompt version, with `--limit` and `--max-cost-usd`.
+  - `muninn export packets` writes content-addressed JSON validated against the RI-03 schemas; `--withdraw` leaves a tombstone.
+- [x] **Compile, index and search X pages.** *Code done 2026-10-21 on `x-slice`, verified end to end on synthetic data.* X posts, articles and linked items compile to `wiki/bookmarks/` with bidirectional links; they reach FTS5 and Qdrant through the normal enrichment path; recall verified through the MCP tools. Remaining: the same check on the first real sync.
+- [x] **Retrieval interface (ADR-014).** *Done 2026-10-21 on `x-slice`.* `muninn.search`, selected by `MUNINN_SEARCH_BACKEND`; Qdrant + FTS5 stay the v1 backend.
+
+**First real run (operator):** after RI-02a, run `muninn db migrate` on the homelab database, then `muninn ingest x`, `muninn scrape --source x_link`, `muninn enrich`, `muninn enrich --task suitability --limit 20`, `muninn export packets`, `muninn vault compile` and `scripts/reconcile-vector-index.py`, and spot-check recall. Before any bulk model run, make one small real `muninn enrich` call to confirm the Anthropic SDK 2.x path, which no test exercises.
 
 ## v1.1 — browser bookmarks (formerly v1)
 

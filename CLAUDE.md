@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **The browser-bookmark pipeline is implemented** (commit `ab874cb`). It runs ingest → sanitize → dual-pass scrape → Haiku enrich → consumers (CLI, MCP, vault compiler, timeline, Parquet), plus synthesis scaffolding and a real test suite (438 tests on branch `adr-reset-x-first`, where `selectolax<1` is pinned).
 
-**v1 is now X bookmarks first** (ADR-012). The order is: dependency fixes, migrator, X access qualification, the producer contract, the X ingest adapter, suitability enrichment with packet export, then compile/index/search. The browser-bookmark bulk run is v1.1.
+**v1 is now X bookmarks first** (ADR-012). The code for every "Blocking v1" item is on branch `x-slice` (stacked on `adr-reset-x-first`), tested against synthetic fixtures only: the migrator, the X connector and sync writer, the `muninn-research-intake` 0.1.0-draft contract, suitability assessment, packet export, X vault pages and the search interface. What remains is operator-run: live X qualification (RI-02a, $5 cap), then the first real sync, assessment and recall check. The browser-bookmark bulk run is v1.1.
 
 ## What Muninn is
 
@@ -34,7 +34,7 @@ A **standalone personal archive and wiki of saved material** (Karpathy llm-wiki 
   - Each source adapter (`ingest/`) writes `bookmarks` rows. The table is source-agnostic, with `source` set to e.g. `bookmarks_html` or `x`.
   - Scrapes go to `scrape_results` (live + at-capture Wayback passes).
   - Enrichment goes to `enriched`: Haiku, idempotent via `enrichment_model` + `enrichment_prompt_version` + `content_hash`.
-  - Planned: suitability `assessments` and append-only history tables.
+  - Research Intake (migration 002): `item_links` (post → article/repo/quoted post), append-only `scrape_history` (one row per distinct content revision) and `assessments` (suitability, keyed by revision + profile + policy + model + prompt), plus `interest_profiles`, `evidence_packets`, `sync_checkpoints` and `usage_records`.
   - Output is compiled to the vault's `wiki/bookmarks/{slug}.md`, to FTS5 and Qdrant, and to packet exports. The vault compiler is the *only* writer of `wiki/bookmarks/`.
 - **Authored lane:** vault-first, and git is canonical. These are pages the operator or an agent writes by hand (`concepts/`, `infra/`, `people/`, reference `projects/`, `log.md`). They are never mirrored into SQLite, and there are no machine-managed regions.
 - **Search indexes are derived data in both lanes.** Qdrant (and Braid, if adopted per ADR-014) can always be rebuilt and is never a source of truth.
@@ -45,17 +45,21 @@ Per-bookmark `ADD_DATE` unix timestamps are the authoritative dates for browser 
 
 `src/muninn/`:
 
-- `ingest/`: Netscape HTML parser and upsert. The X adapter is planned.
+- `ingest/`: Netscape HTML parser and upsert; `x.py` is the X API v2 client (OAuth 2.0 PKCE, pagination, checkpoints, error taxonomy) and `x_store.py` the sync writer (posts `source='x'`, articles `x_article`, linked URLs `x_link`).
 - `sanitize/`: token-shape regex, param denylist, scheme rules.
 - `scrape/`: live, at_capture ±365d and recent_archive passes; IA CDX cache; rate limiter; auth-wall heuristic.
-- `enrich/`: Haiku via the Anthropic API, prompt-cached, with the idempotency triple.
-- `vector/`: pluggable embeddings. sentence-transformers/EmbeddingGemma is the default; `hash` is a placeholder for tests/offline, selected via `MUNINN_EMBEDDING_BACKEND`. Also the Qdrant helpers.
+- `enrich/`: Haiku via the Anthropic API, prompt-cached, with the idempotency triple. `suitability.py` is the `--task suitability` assessment (interest profile in `interest_profile.py`, price table and budget in `pricing.py`).
+- `vector/`: pluggable embeddings. sentence-transformers/EmbeddingGemma is the default; `hash` is a placeholder for tests/offline, selected via `MUNINN_EMBEDDING_BACKEND`. Also the Qdrant helpers and `reconcile.py` (backfills missing points, refreshes stale ones, drops points for hidden rows; `scripts/reconcile-vector-index.py` wraps it).
+- `search/`: the retrieval interface (ADR-014). MCP search goes through `get_search_backend()` (`MUNINN_SEARCH_BACKEND`, default `fts5-qdrant`). Backends return bookmark ids only; visibility is enforced when hits are hydrated from SQLite.
+- `intake_records.py`, `revisions.py`: row → contract-record mapping and the shared `scrape_history` writer (stdlib-only).
 - `synthesis/`: orchestrator and JSON Schema validation. The container runner is frozen pending ADR-013's task/result contract.
-- `consumers/`: Click CLI `muninn …`, FastMCP stdio server, vault compiler with Jinja template, timeline, Parquet.
+- `consumers/`: Click CLI `muninn …`, FastMCP stdio server, vault compiler with Jinja templates (X items in `vault/x_pages.py`), timeline, Parquet, and `packets/` (evidence-packet export, canonical JSON, tombstones).
 
-CLI: `muninn ingest|scrape|enrich|synthesize|triage|status|deep-pass|export|timeline|vault|mcp`.
+CLI: `muninn ingest [html] PATH|ingest x|x auth|scrape|enrich [--task suitability]|synthesize|triage|status|deep-pass|export parquet|export packets|timeline|vault|mcp|db migrate|db status`.
 
-DB init: `scripts/init-db.py`. The schema is in `schema.sql` (= `schemas/sql/001_initial.sql`); numbered migrations and `muninn db migrate` are planned (ADR-009).
+DB: numbered migrations in `schemas/sql/NNN_*.sql`, applied only by `muninn db migrate [--dry-run]` (backup first) or by `init_db()` / `scripts/init-db.py` for a fresh file. `PRAGMA user_version` is the applied version; `connect()` refuses a missing, empty or behind database and warns on an ahead one. `schema.sql` is a test-guarded byte mirror of `001_initial.sql` only, not the full schema.
+
+The Research Intake producer contract is `docs/contracts/MUNINN-RESEARCH-INTAKE.md` with schemas in `schemas/json/intake/` and a release manifest checked by `scripts/intake-release-manifest.py --check`. Odin copies the contract byte-for-byte, so it has no relative links.
 
 ## Known gaps (audited 2026-07-16 and 2026-10-21; verify before trusting, fix opportunistically)
 
@@ -64,10 +68,8 @@ DB init: `scripts/init-db.py`. The schema is in `schema.sql` (= `schemas/sql/001
 3. The synthesis container launches interactive `claude` but never feeds it the task JSON, and `task-input.schema.json` rejects the orchestrator's own `attempt` field. This is superseded by ADR-013's task/result contract (Phase 4), so don't fix the container path.
 4. No robots.txt respect in the live scraper.
 5. Dependency drift and a prompt-version bug, found 2026-10-21 (details in `docs/research-intake/RI-01-extension-spike.md` §6). **Fixed on branch `adr-reset-x-first`:** selectolax/mcp/anthropic pins, `uv.lock`, fatal extraction import, `--prompt-version` passthrough with fail-fast. Live Anthropic SDK 2.x behaviour is untested; every test mocks the client.
-6. The deep pass overwrites `enriched`'s idempotency triple, so the next `muninn enrich` re-enriches those rows (RI-01 D6).
-   - A fresh install resolves `selectolax` 1.x, and `extract_text()` then silently returns `""`.
-   - `mcp` 2.x breaks `muninn mcp`.
-   - `enrich --prompt-version` doesn't pass the version to the prompt loader.
+6. Re-enrichment (`enrich --force`, a new prompt version, or changed content) still overwrites a deep pass's summary and tags, and there is no column recording a deep pass's own provenance. Whether deep-pass content should survive is undecided. (The original D6, the deep pass clobbering the idempotency triple, is fixed on `x-slice`.)
+7. Prompt caching cannot hit on Haiku 4.5 for either enrichment task: its minimum cacheable prefix is 4096 tokens and both shared prefixes are roughly 1k. This probably explains gap 1.
 
 Closed 2026-07-16 (same-day fix pass):
 
