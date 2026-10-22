@@ -408,12 +408,6 @@ def test_policy_change_withdraws_the_docs_page(run) -> None:
     assert "docs.example" not in json.dumps(results)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "muninn.ingest.x_store.XPageWriter.ensure_post never recomputes a known post's title: "
-    "a re-sync under a policy that now hides a linked item rewrites the post text with "
-    "[hidden link] but bookmarks.title keeps the locator (here truncated, 'https://docs.example…'), "
-    "and enrich copies it into the FTS title; outputs mask it, but a keyword search on the "
-    "hidden host still matches the post"))
 def test_resync_retitles_a_post_whose_link_became_hidden(run) -> None:
     conn = _conn(run)
     title = conn.execute("SELECT title FROM bookmarks WHERE source = 'x' AND source_id = ?",

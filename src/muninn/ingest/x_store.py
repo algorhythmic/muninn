@@ -386,9 +386,12 @@ class XPageWriter:
             # Written earlier as a bare reference; fill in what the API now gives.
             for key, value in _post_metadata(post).items():
                 meta.setdefault(key, value)
-            title = title or post_title(post, post_text(post, self.policy))
             if handle and (locator is None or "/i/web/status/" in locator):
                 locator = _post_locator(post_id, handle)
+        if post is not None:
+            # Recompute on every sighting: a policy change may now hide a
+            # locator the old title quoted.
+            title = post_title(post, post_text(post, self.policy))
         newly = False
         if bookmarked:
             if meta.get("bookmarked", True) is False:
