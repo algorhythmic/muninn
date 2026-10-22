@@ -157,6 +157,10 @@ def _migrate(
         pending=[p for n, p in migrations if n > current],
         unstamped=current == 1 and conn.execute("PRAGMA user_version").fetchone()[0] == 0,
     )
+    if plan.unstamped:
+        # Stamping trusts that the file really is 001: check the part an
+        # early build is known to have shaped differently.
+        _check_001_shape(conn, migrations[0][1])
     if dry_run or not (plan.pending or plan.unstamped):
         return plan
     if plan.pending and conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
@@ -178,6 +182,116 @@ def _migrate(
         conn.execute("PRAGMA foreign_keys=ON")
         conn.isolation_level = isolation
     return plan
+
+
+FTS_TABLE = "fts_bookmarks"
+
+# Mirrors what enrich (`_upsert_enriched_row`) and the deep pass write: one
+# row per enriched, *visible* bookmark, rowid = bookmark_id, the content of
+# the scrape pass its enrichment_source names.
+_FTS_REFILL_SQL = """
+    INSERT INTO fts_bookmarks (rowid, title, summary, content_text, tags)
+    SELECT e.bookmark_id, COALESCE(b.title, ''), COALESCE(e.summary, ''),
+           COALESCE(sr.content_text, ''), COALESCE(e.tags, '[]')
+    FROM enriched e
+    JOIN bookmarks b ON b.bookmark_id = e.bookmark_id
+    LEFT JOIN scrape_results sr
+           ON sr.bookmark_id = b.bookmark_id
+          AND sr.pass = CASE b.enrichment_source
+                            WHEN 'live_fallback' THEN 'live'
+                            ELSE b.enrichment_source
+                        END
+    WHERE b.content_visible = 1
+    ORDER BY e.bookmark_id
+"""
+
+
+def _normalized_sql(sql: str | None) -> str:
+    text = re.sub(r"\s+", " ", (sql or "").strip().rstrip(";")).lower()
+    return re.sub(r"\s*([(),=])\s*", r"\1", text)
+
+
+def _initial_create_sql(initial: Path, name: str) -> str:
+    """The `sqlite_master.sql` a DB built from 001 holds for ``name``."""
+    pattern = re.compile(rf"\bCREATE\s+(VIRTUAL\s+)?TABLE\s+{re.escape(name)}\b", re.IGNORECASE)
+    statement = next((s for s in _statements(initial.read_text()) if pattern.search(s)), None)
+    if statement is None:
+        raise MigrationError(f"{initial.name} defines no {name} table")
+    mem = sqlite3.connect(":memory:")
+    try:
+        mem.execute(statement)
+        return mem.execute("SELECT sql FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0]
+    finally:
+        mem.close()
+
+
+def _check_001_shape(conn: sqlite3.Connection, initial: Path) -> None:
+    """Refuse to stamp an unstamped DB whose ``fts_bookmarks`` is not 001's.
+
+    Early builds created it contentless (``content=''``); stamped as v1 it
+    would then fail every FTS DELETE (re-enrichment, deep pass)."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (FTS_TABLE,)
+    ).fetchone()
+    expected = _initial_create_sql(initial, FTS_TABLE)
+    if row is None or _normalized_sql(row[0]) != _normalized_sql(expected):
+        found = "is missing" if row is None else f"is `{' '.join(str(row[0]).split())}`"
+        raise MigrationError(
+            f"This unstamped database predates the migrator and its {FTS_TABLE} {found}, "
+            f"not 001's `{' '.join(expected.split())}` (an early contentless FTS index "
+            "rejects the DELETEs re-enrichment needs). Nothing was changed. Run "
+            "`muninn db rebuild-fts` (backs the file up, recreates the index as 001 "
+            "defines it and refills it from enriched rows), then `muninn db migrate`."
+        )
+
+
+@dataclass
+class FtsRebuild:
+    db_path: Path
+    rows: int
+    backup_path: Path | None
+
+
+def rebuild_fts(
+    db_path: Path | str | None = None, *, migrations_dir: Path | str | None = None
+) -> FtsRebuild:
+    """Drop ``fts_bookmarks`` and recreate it exactly as 001 defines it, then
+    refill it from ``enriched`` (visible rows only, as enrich indexes them).
+
+    Derived data only, so nothing is lost; the file is still backed up
+    first. Works on a DB of any version (it is the fix for an unstamped DB
+    the migrator refuses) and never changes ``user_version``."""
+    path = _resolve(db_path)
+    if not path.exists():
+        raise SchemaVersionError(
+            f"No muninn database at {path}: run `muninn db migrate` to create it."
+        )
+    initial = discover_migrations(migrations_dir)[0][1]
+    create_sql = _initial_create_sql(initial, FTS_TABLE)
+    conn = _open(path)
+    try:
+        for table in ("bookmarks", "enriched", "scrape_results"):
+            if not _has_table(conn, table):
+                raise MigrationError(f"{path} has no {table} table; not a muninn database")
+        backup = _backup(conn, path, schema_version(conn))
+        isolation = conn.isolation_level
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(f"DROP TABLE IF EXISTS {FTS_TABLE}")
+                conn.execute(create_sql)
+                rows = conn.execute(_FTS_REFILL_SQL).rowcount
+                conn.execute("COMMIT")
+            except Exception as exc:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise MigrationError(f"Rebuilding {FTS_TABLE} failed and was rolled back: {exc}") from exc
+        finally:
+            conn.isolation_level = isolation
+    finally:
+        conn.close()
+    return FtsRebuild(db_path=path, rows=rows, backup_path=backup)
 
 
 def _apply(conn: sqlite3.Connection, version: int, sql: str, name: str) -> None:

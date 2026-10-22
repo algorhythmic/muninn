@@ -290,6 +290,105 @@ def test_unstamped_db_with_pending_migrations_backs_up_as_v1(tmp_path: Path) -> 
     assert _user_version(path) == HEAD + 1
 
 
+_CONTENTLESS_FTS = (
+    "CREATE VIRTUAL TABLE fts_bookmarks USING fts5 (\n"
+    "    title, summary, content_text, tags, content=''\n);"
+)
+
+
+def _early_contentless_db(path: Path) -> None:
+    """A pre-migrator DB from an early build: 001 but a contentless FTS index."""
+    sql = (MIGRATIONS_DIR / "001_initial.sql").read_text()
+    start = sql.index("CREATE VIRTUAL TABLE fts_bookmarks")
+    end = sql.index(";", start) + 1
+    conn = sqlite3.connect(str(path))
+    conn.executescript(sql[:start] + _CONTENTLESS_FTS + sql[end:])
+    conn.close()
+
+
+def test_unstamped_db_with_contentless_fts_is_refused_not_stamped(tmp_path: Path) -> None:
+    path = tmp_path / "muninn.db"
+    _early_contentless_db(path)
+    conn = sqlite3.connect(str(path))
+    _seed(conn)  # an FTS insert works on the contentless table; a DELETE would not
+    conn.execute("UPDATE bookmarks SET enrichment_source = 'live_fallback'")
+    conn.commit()
+    conn.close()
+    before = _master(path)
+    for dry_run in (True, False):
+        with pytest.raises(MigrationError, match="muninn db rebuild-fts") as info:
+            migrate(path, dry_run=dry_run)
+        assert "content=''" in str(info.value)
+    assert _user_version(path) == 0 and _master(path) == before
+    assert not list(tmp_path.glob("muninn.db.bak-*"))  # refused before any backup
+    with pytest.raises(MigrationError, match="rebuild-fts"):
+        init_db(path)
+
+    # The documented fix: rebuild, then migrate; FTS DELETE now works.
+    rebuilt = db.rebuild_fts(path)
+    assert rebuilt.rows == 3 and rebuilt.backup_path.name.startswith("muninn.db.bak-v1-")
+    plan = migrate(path)
+    assert plan.unstamped and _user_version(path) == HEAD
+    conn = connect(path)
+    try:
+        assert [tuple(r) for r in conn.execute(
+            "SELECT rowid, title, summary, content_text, tags FROM fts_bookmarks ORDER BY rowid"
+        )] == [(i, f"Title {i}", f"summary {i}", f"body {i}", '["t"]') for i in range(1, 4)]
+        conn.execute("DELETE FROM fts_bookmarks WHERE rowid = 1")
+        conn.commit()
+        sql = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'fts_bookmarks'").fetchone()[0]
+    finally:
+        conn.close()
+    fresh = tmp_path / "fresh.db"
+    init_db(fresh).close()
+    fresh_sql = dict((r[1], r[3]) for r in _master(fresh))["fts_bookmarks"]
+    assert sql == fresh_sql
+
+
+def test_unstamped_db_without_fts_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "muninn.db"
+    _legacy_db(path)
+    conn = sqlite3.connect(str(path))
+    conn.execute("DROP TABLE fts_bookmarks")
+    conn.close()
+    with pytest.raises(MigrationError, match="is missing"):
+        migrate(path)
+
+
+def test_rebuild_fts_skips_hidden_rows_and_keeps_the_version(tmp_path: Path) -> None:
+    path = tmp_path / "muninn.db"
+    conn = init_db(path)
+    _seed(conn)
+    conn.execute("UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = 2")
+    conn.execute("UPDATE bookmarks SET enrichment_source = 'live_fallback'")
+    conn.commit()
+    conn.close()
+    result = db.rebuild_fts(path)
+    assert result.rows == 2 and _user_version(path) == HEAD
+    conn = connect(path)
+    try:
+        assert [r[0] for r in conn.execute("SELECT rowid FROM fts_bookmarks ORDER BY rowid")] == [1, 3]
+        assert conn.execute(
+            "SELECT content_text FROM fts_bookmarks WHERE fts_bookmarks MATCH 'body'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_cli_db_rebuild_fts(tmp_path: Path) -> None:
+    path = tmp_path / "muninn.db"
+    _early_contentless_db(path)
+    runner = CliRunner()
+    refused = runner.invoke(cli, ["--db", str(path), "db", "migrate"])
+    assert refused.exit_code == 1 and "muninn db rebuild-fts" in refused.output
+    result = runner.invoke(cli, ["--db", str(path), "db", "rebuild-fts"])
+    assert result.exit_code == 0, result.output
+    assert "Rebuilt fts_bookmarks: 0 row(s) indexed." in result.output and "Backup:" in result.output
+    assert runner.invoke(cli, ["--db", str(path), "db", "migrate"]).exit_code == 0
+    missing = runner.invoke(cli, ["--db", str(tmp_path / "none.db"), "db", "rebuild-fts"])
+    assert missing.exit_code == 1 and "No muninn database" in missing.output
+
+
 def test_connect_fails_fast_when_behind(tmp_path: Path) -> None:
     path = tmp_path / "muninn.db"
     init_db(path).close()

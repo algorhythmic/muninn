@@ -31,6 +31,7 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn mcp [--transport stdio|http] [--host H] [--port P] [--allowed-host NAME]...
     muninn db migrate [--dry-run]
     muninn db status
+    muninn db rebuild-fts
 """
 
 from __future__ import annotations
@@ -973,6 +974,28 @@ def db_migrate_cmd(ctx: click.Context, dry_run: bool) -> None:
         click.echo(f"Migrated to v{plan.head}.")
     else:
         click.echo("Nothing to migrate.")
+
+
+@db_group.command("rebuild-fts")
+@click.pass_context
+def db_rebuild_fts_cmd(ctx: click.Context) -> None:
+    """Recreate the fts_bookmarks keyword index as migration 001 defines it.
+
+    Backs the DB up, drops the index, recreates it and refills it from the
+    enriched rows (visible bookmarks only). The fix for an early database
+    whose contentless index `db migrate` refuses to stamp; safe on any DB,
+    since the index is derived data.
+    """
+    from muninn.db import MigrationError, rebuild_fts  # lazy
+
+    try:
+        result = rebuild_fts(ctx.obj.get("db"))
+    except MigrationError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Database: {result.db_path}")
+    if result.backup_path:
+        click.echo(f"Backup: {result.backup_path}")
+    click.echo(f"Rebuilt fts_bookmarks: {result.rows} row(s) indexed.")
 
 
 @db_group.command("status")
