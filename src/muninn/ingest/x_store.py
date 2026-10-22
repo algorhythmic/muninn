@@ -65,6 +65,8 @@ from muninn.ingest.policy import (
     HIDDEN_LINK,
     X_ARTICLE_EXTRACTOR,
     X_TEXT_EXTRACTOR,
+    PolicyApplyReport,
+    apply_policy,
     canonical_post_locator,
     domain_of,
     handle_from_locator,
@@ -77,7 +79,7 @@ from muninn.ingest.policy import (
     post_title_for,
     visible_flag,
 )
-from muninn.intake_records import SOURCE_X_ARTICLE, SOURCE_X_LINK, SOURCE_X_POST
+from muninn.intake_records import SOURCE_X_ARTICLE, SOURCE_X_LINK, SOURCE_X_POST, X_SOURCES
 from muninn.revisions import record_revision
 from muninn.sanitize import sanitize_url
 from muninn.scrape.domain_policy import DomainPolicy, load_domain_policy
@@ -147,6 +149,7 @@ class SyncReport:
     error_code: str | None = None
     error_detail: str | None = None
     cap_reached: bool = False
+    policy: PolicyApplyReport | None = None  # the re-apply pass run before the sync
 
 
 class NothingToResume(RuntimeError):
@@ -895,6 +898,11 @@ def sync_bookmarks(
         raise ValueError("max_pages must be at least 1 (or None for no bound)")
 
     now = int(clock())
+    # Contract §10.1: policy is re-applied on every sync, to every X row, not
+    # only to the rows this (possibly early-stopping) run happens to see.
+    policy_report = apply_policy(conn, policy, sources=X_SOURCES, now=now)
+    if policy_report.changed:
+        log.info("domain policy re-applied to stored X rows: %s", policy_report.summary())
     if options.resume:
         # Refuse before the billed /users/me call whenever the DB alone can tell.
         _check_resumable(
@@ -955,7 +963,8 @@ def sync_bookmarks(
             )
             checkpoint_id = int(cur.lastrowid)
             start = XCheckpoint(user_id=account, status="in_progress", started_at=now)
-        report = SyncReport(run_ulid=run_ulid, status="running", resumed=resumed_row is not None)
+        report = SyncReport(run_ulid=run_ulid, status="running", resumed=resumed_row is not None,
+                            policy=policy_report)
         report.cost_micro_usd += _usage(
             conn, checkpoint_id=checkpoint_id, operation=OPERATION_ME, resources=1,
             pricing=pricing, occurred_at=now,

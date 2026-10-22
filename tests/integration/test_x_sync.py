@@ -580,6 +580,43 @@ def test_domain_policy_hides_link_rows_like_browser_bookmarks(fresh_db, x_api) -
     assert report.revisions_new == 2
 
 
+def test_policy_change_reaches_rows_an_incremental_run_never_sees(fresh_db, x_api) -> None:
+    x_api.get(BOOKMARKS).mock(side_effect=serve())
+    run(fresh_db, FakeClock())
+    post = bookmark(fresh_db, "x", BOOKMARKED[7])  # page 3: links docs.example.com
+    assert "https://docs.example.com/share?page=2" in fresh_db.execute(
+        "SELECT content_text FROM scrape_results WHERE bookmark_id = ?", (post["bookmark_id"],)
+    ).fetchone()[0]
+    revisions = count(fresh_db, "scrape_history", f"item_ref = 'x:post:{BOOKMARKED[7]}'")
+
+    # The operator hides docs.example.com and the author of page 2; the next
+    # incremental run is caught up after page 1 and never sees pages 2-3.
+    policy = DomainPolicy(domain_patterns=("docs.example.com",),
+                          path_patterns=("x.com/example_writer/*",))
+    report = run(fresh_db, FakeClock(BASE + 60), policy=policy)
+    assert report.stop_reason == "caught_up" and report.pages == 1
+    assert report.policy.newly_hidden == 3 and report.policy.texts_masked == 1
+
+    link = bookmark(fresh_db, "x_link", locator_source_id("https://docs.example.com/share?page=2"))
+    assert link["content_visible"] == 0
+    live = fresh_db.execute(
+        "SELECT content_text FROM scrape_results WHERE bookmark_id = ?", (post["bookmark_id"],)
+    ).fetchone()[0]
+    assert "docs.example.com" not in live and "[hidden link]" in live
+    post = bookmark(fresh_db, "x", BOOKMARKED[7])
+    assert "docs.example.com" not in post["title"]
+    history = fresh_db.execute(
+        "SELECT content_text, content_sha256 FROM scrape_history WHERE item_ref = ? "
+        "ORDER BY revision_ulid", (f"x:post:{BOOKMARKED[7]}",),
+    ).fetchall()
+    assert len(history) == revisions + 1  # a new masked revision; history is not rewritten
+    assert history[-1]["content_text"] == live
+    assert history[-1]["content_sha256"] == content_digest(live)
+    for pid in BOOKMARKED[4:6]:  # example_writer's posts
+        row = bookmark(fresh_db, "x", pid)
+        assert (row["content_visible"], row["title"]) == (0, "@example_writer")
+
+
 def test_hidden_post_stores_no_text(fresh_db, x_api) -> None:
     x_api.get(BOOKMARKS).mock(side_effect=serve())
     run(fresh_db, FakeClock(), policy=DomainPolicy(path_patterns=("x.com/example_writer/*",)))

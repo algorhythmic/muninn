@@ -15,6 +15,11 @@ stays light.
 - A hidden child's locator is masked as ``[hidden link]`` in its parent's
   stored text, by patterns built from the child row (:func:`mask_text`),
   so masking is the same whichever writer applies it.
+- :func:`apply_policy` (``muninn policy apply``, and the start of every
+  ``muninn ingest x``) recomputes all of that from stored rows, with no
+  API call. Un-hiding a row restores its visibility (and a post's title,
+  from its stored text), but text already masked as ``[hidden link]``
+  comes back only with a re-sync (``muninn ingest x --full``).
 """
 
 from __future__ import annotations
@@ -22,10 +27,14 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
+from dataclasses import dataclass
 from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
+from muninn.consumers.packets.canonical import x_post_item_id
 from muninn.intake_records import SOURCE_X_ARTICLE, SOURCE_X_LINK, SOURCE_X_POST, X_SOURCES
+from muninn.revisions import record_revision
 from muninn.sanitize import sanitize_url
 from muninn.scrape.domain_policy import DomainPolicy
 
@@ -212,12 +221,242 @@ def hidden_child_patterns(conn: sqlite3.Connection, parent_id: int) -> list[re.P
     return pats
 
 
+# ── The re-apply pass ───────────────────────────────────────────────────
+
+@dataclass
+class PolicyApplyReport:
+    dry_run: bool = False
+    checked: int = 0
+    newly_hidden: int = 0
+    newly_visible: int = 0
+    locators_canonicalized: int = 0
+    titles_changed: int = 0
+    texts_masked: int = 0
+    revisions_new: int = 0
+    fts_refreshed: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return any((self.newly_hidden, self.newly_visible, self.locators_canonicalized,
+                    self.titles_changed, self.texts_masked, self.fts_refreshed))
+
+    def summary(self) -> str:
+        return (
+            f"checked={self.checked} newly_hidden={self.newly_hidden} "
+            f"newly_visible={self.newly_visible} locators_canonicalized={self.locators_canonicalized} "
+            f"titles_changed={self.titles_changed} texts_masked={self.texts_masked} "
+            f"new_revisions={self.revisions_new} fts_refreshed={self.fts_refreshed}"
+        )
+
+
+def apply_policy(
+    conn: sqlite3.Connection,
+    policy: DomainPolicy,
+    *,
+    sources: Iterable[str] = ALL_SOURCES,
+    dry_run: bool = False,
+    now: int | None = None,
+) -> PolicyApplyReport:
+    """Re-apply domain policy to stored rows (no API call, no fetch).
+
+    For every row of ``sources``: canonicalize X post locators, recompute
+    ``content_visible`` from the stored ``url`` (as re-ingest does), and set
+    hidden posts' titles to ``@handle`` (hidden articles: no title). Then,
+    for every visible X post that links a hidden item, mask the hidden
+    locator in its current text (the ``scrape_results`` live row, plus a
+    new ``x_api`` revision through the shared revision writer; older
+    revisions are left as they are) and in its title and keyword-index
+    row. A post that became visible again gets its title back from its
+    stored text; text already masked comes back only with a re-sync.
+
+    One transaction, rolled back under ``dry_run`` (the report still says
+    what would change). Must be called outside an open transaction.
+    """
+    if conn.in_transaction:
+        raise RuntimeError("apply_policy must run outside an open transaction")
+    now = int(time.time()) if now is None else int(now)
+    report = PolicyApplyReport(dry_run=dry_run)
+    try:
+        _apply(conn, policy, tuple(sources), now, report)
+    except BaseException:
+        conn.rollback()
+        raise
+    if dry_run:
+        conn.rollback()
+    else:
+        conn.commit()
+    return report
+
+
+def _apply(
+    conn: sqlite3.Connection, policy: DomainPolicy, sources: tuple[str, ...], now: int,
+    report: PolicyApplyReport,
+) -> None:
+    if not sources:
+        return
+    marks = ",".join("?" * len(sources))
+    rows = conn.execute(
+        "SELECT bookmark_id, source, source_id, url, title, content_visible, source_metadata "
+        f"FROM bookmarks WHERE source IN ({marks}) ORDER BY bookmark_id",
+        sources,
+    ).fetchall()
+    touched: set[int] = set()
+    revived_posts: set[int] = set()
+    for row in rows:
+        report.checked += 1
+        bid, source = int(row["bookmark_id"]), row["source"]
+        meta = _load_meta(row["source_metadata"])
+        url, title, was = row["url"], row["title"], int(row["content_visible"])
+        if source == SOURCE_X_POST:
+            canonical = canonical_post_locator(row["source_id"], meta, url)
+            if canonical and canonical != url:
+                url = canonical
+                report.locators_canonicalized += 1
+        visible = visible_flag(policy, url)
+        if visible != was:
+            if visible:
+                report.newly_visible += 1
+            else:
+                report.newly_hidden += 1
+        if source == SOURCE_X_POST:
+            if not visible:
+                title = hidden_post_title(meta_handle(meta))
+            elif not was:
+                revived_posts.add(bid)
+        elif source == SOURCE_X_ARTICLE:
+            if not visible:
+                title = None
+            elif not was and title is None:
+                title = _article_title(conn, meta, row["source_id"])
+        if (url, visible, title) != (row["url"], was, row["title"]):
+            conn.execute(
+                "UPDATE bookmarks SET url = ?, domain = ?, content_visible = ?, title = ? "
+                "WHERE bookmark_id = ?",
+                (url, domain_of(url), visible, title, bid),
+            )
+            if title != row["title"]:
+                report.titles_changed += 1
+                touched.add(bid)
+
+    parents: set[int] = set()
+    if SOURCE_X_POST in sources:
+        parents = {
+            int(r[0]) for r in conn.execute(
+                "SELECT DISTINCT l.parent_bookmark_id FROM item_links l "
+                "JOIN bookmarks c ON c.bookmark_id = l.child_bookmark_id "
+                "JOIN bookmarks p ON p.bookmark_id = l.parent_bookmark_id "
+                "WHERE c.content_visible = 0 AND p.content_visible = 1 AND p.source = ?",
+                (SOURCE_X_POST,),
+            )
+        }
+        for bid in sorted(parents | revived_posts):
+            _remask_post(conn, bid, now, report, touched)
+    for bid in sorted(touched | parents):
+        _refresh_fts(conn, bid, report)
+
+
+def _article_title(conn: sqlite3.Connection, meta: dict[str, Any], article_id: str) -> str | None:
+    """A revived article's title, from the post that carried it."""
+    via = meta.get("via_post_id")
+    if not isinstance(via, str):
+        return None
+    row = conn.execute(
+        "SELECT source_metadata FROM bookmarks WHERE source = ? AND source_id = ?",
+        (SOURCE_X_POST, via),
+    ).fetchone()
+    article = _load_meta(row[0]).get("article") if row else None
+    if isinstance(article, dict) and article.get("id") == article_id:
+        title = article.get("title")
+        return title if isinstance(title, str) and title else None
+    return None
+
+
+def _remask_post(
+    conn: sqlite3.Connection, bid: int, now: int, report: PolicyApplyReport, touched: set[int]
+) -> None:
+    row = conn.execute(
+        "SELECT source_id, title, captured_at, source_metadata FROM bookmarks WHERE bookmark_id = ?",
+        (bid,),
+    ).fetchone()
+    meta = _load_meta(row["source_metadata"])
+    patterns = hidden_child_patterns(conn, bid)
+    live = conn.execute(
+        "SELECT content_text, extraction_quality FROM scrape_results "
+        "WHERE bookmark_id = ? AND pass = 'live'",
+        (bid,),
+    ).fetchone()
+    text = live["content_text"] if live is not None else None
+    if text:
+        masked = mask_text(text, patterns)
+        if masked != text:
+            conn.execute(
+                "UPDATE scrape_results SET content_text = ? WHERE bookmark_id = ? AND pass = 'live'",
+                (masked, bid),
+            )
+            report.texts_masked += 1
+            published = meta.get("published_at")
+            added = record_revision(
+                conn,
+                bookmark_id=bid,
+                item_ref=x_post_item_id(row["source_id"]),
+                text=masked,
+                coverage="full" if live["extraction_quality"] == "ok" else "partial",
+                retrieval_method="x_api",
+                extractor_name=X_TEXT_EXTRACTOR[0],
+                extractor_version=X_TEXT_EXTRACTOR[1],
+                retrieved_at=now,
+                published_at=published if isinstance(published, int) else None,
+                observed_at=(
+                    int(row["captured_at"]) if meta.get("bookmarked", True) is not False else None
+                ),
+            )
+            report.revisions_new += added is not None
+            touched.add(bid)
+        title = post_title_for(meta_handle(meta), masked)
+    else:
+        title = mask_text(row["title"], patterns) if row["title"] else row["title"]
+    if title != row["title"]:
+        conn.execute("UPDATE bookmarks SET title = ? WHERE bookmark_id = ?", (title, bid))
+        report.titles_changed += 1
+        touched.add(bid)
+
+
+def _refresh_fts(conn: sqlite3.Connection, bid: int, report: PolicyApplyReport) -> None:
+    """Rewrite the row's keyword-index entry with its current title and the
+    hidden children's locators masked (summary and indexed text). The
+    ``enriched`` row and the Qdrant point are not touched: the changed text
+    makes the next ``muninn enrich`` redo them."""
+    old = conn.execute(
+        "SELECT title, summary, content_text, tags FROM fts_bookmarks WHERE rowid = ?", (bid,)
+    ).fetchone()
+    if old is None:
+        return
+    title = conn.execute("SELECT title FROM bookmarks WHERE bookmark_id = ?", (bid,)).fetchone()[0]
+    patterns = hidden_child_patterns(conn, bid)
+    new = (
+        title or "",
+        mask_text(old[1] or "", patterns),
+        mask_text(old[2] or "", patterns),
+        old[3],
+    )
+    if new == tuple(old):
+        return
+    conn.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bid,))
+    conn.execute(
+        "INSERT INTO fts_bookmarks (rowid, title, summary, content_text, tags) VALUES (?, ?, ?, ?, ?)",
+        (bid, *new),
+    )
+    report.fts_refreshed += 1
+
+
 __all__ = [
     "ALL_SOURCES",
     "HIDDEN_LINK",
+    "PolicyApplyReport",
     "X_ARTICLE_EXTRACTOR",
     "X_HOSTS",
     "X_TEXT_EXTRACTOR",
+    "apply_policy",
     "canonical_post_locator",
     "child_mask_patterns",
     "domain_of",

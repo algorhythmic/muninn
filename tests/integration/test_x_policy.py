@@ -11,7 +11,7 @@ import sqlite3
 import pytest
 
 from muninn.db import transaction
-from muninn.ingest.policy import child_mask_patterns, mask_text, policy_hides
+from muninn.ingest.policy import apply_policy, child_mask_patterns, mask_text, policy_hides
 from muninn.ingest.x import XCheckpoint, parse_bookmark_page
 from muninn.ingest.x_store import XPageWriter
 from muninn.scrape.domain_policy import DomainPolicy
@@ -177,3 +177,160 @@ def test_child_masks_stop_at_the_locator() -> None:
     web = child_mask_patterns("x_link", "d", "https://a.example/x")
     assert mask_text("https://a.example/x https://a.example/x.html https://a.example/x/y", web) == (
         "[hidden link] https://a.example/x.html https://a.example/x/y")
+
+
+# ── finding 1: the re-apply pass ────────────────────────────────────────
+
+SECRET_SITE = DomainPolicy(domain_patterns=("secret.example.com",))
+OLD = {"id": P2, "author_id": "501", "text": "read https://t.co/AAAAAAAAAA",
+       "entities": {"urls": [{"url": "https://t.co/AAAAAAAAAA",
+                              "unwound_url": "https://secret.example.com/my/case"}]}}
+
+
+def _seed_fts(conn, bookmark_id, summary="", content=""):
+    title = conn.execute("SELECT title FROM bookmarks WHERE bookmark_id = ?", (bookmark_id,)).fetchone()[0]
+    conn.execute("INSERT INTO fts_bookmarks (rowid, title, summary, content_text, tags) "
+                 "VALUES (?, ?, ?, ?, '[]')", (bookmark_id, title, summary, content))
+    conn.commit()
+
+
+def test_apply_policy_hides_and_masks_rows_no_sync_touched(fresh_db) -> None:
+    write(fresh_db, DomainPolicy.empty(), page([OLD]))
+    parent = row(fresh_db, P2)
+    assert live(fresh_db, parent["bookmark_id"]) == "read https://secret.example.com/my/case"
+    _seed_fts(fresh_db, parent["bookmark_id"], summary="About https://secret.example.com/my/case",
+              content="read https://secret.example.com/my/case")
+    # The next run under the new policy only sees a newer post (the r3 repro).
+    write(fresh_db, SECRET_SITE, page([{"id": P9, "author_id": "501", "text": "hello"}]),
+          run="01JA0000000000000000000001")
+    assert live(fresh_db, parent["bookmark_id"]) == "read https://secret.example.com/my/case"
+
+    report = apply_policy(fresh_db, SECRET_SITE, now=BASE + 600)
+    assert (report.newly_hidden, report.texts_masked, report.revisions_new, report.fts_refreshed) == (1, 1, 1, 1)
+    link = fresh_db.execute("SELECT * FROM bookmarks WHERE source = 'x_link'").fetchone()
+    assert link["content_visible"] == 0
+    parent = row(fresh_db, P2)
+    assert live(fresh_db, parent["bookmark_id"]) == "read [hidden link]"
+    assert parent["title"] == "@pub: read [hidden link]"
+    assert history(fresh_db, P2) == ["read https://secret.example.com/my/case", "read [hidden link]"]
+    newest = fresh_db.execute(
+        "SELECT retrieval_method, retrieved_at, observed_at, coverage FROM scrape_history "
+        "WHERE item_ref = ? ORDER BY revision_ulid DESC LIMIT 1", (f"x:post:{P2}",)).fetchone()
+    assert tuple(newest) == ("x_api", BASE + 600, BASE, "full")
+    fts = fresh_db.execute("SELECT title, summary, content_text FROM fts_bookmarks WHERE rowid = ?",
+                           (parent["bookmark_id"],)).fetchone()
+    assert tuple(fts) == ("@pub: read [hidden link]", "About [hidden link]", "read [hidden link]")
+
+    # Idempotent; and the writer derives the same text on the next sighting.
+    again = apply_policy(fresh_db, SECRET_SITE, now=BASE + 700)
+    assert not again.changed and again.revisions_new == 0
+    write(fresh_db, SECRET_SITE, page([OLD], observed_at=BASE + 800), run="01JA0000000000000000000002")
+    assert history(fresh_db, P2) == ["read https://secret.example.com/my/case", "read [hidden link]"]
+
+
+def test_apply_policy_dry_run_writes_nothing(fresh_db) -> None:
+    write(fresh_db, DomainPolicy.empty(), page([OLD]))
+    before = [tuple(r) for r in fresh_db.execute("SELECT * FROM bookmarks")]
+    revisions = len(history(fresh_db, P2))
+    report = apply_policy(fresh_db, SECRET_SITE, dry_run=True)
+    assert report.dry_run and report.newly_hidden == 1 and report.texts_masked == 1
+    assert [tuple(r) for r in fresh_db.execute("SELECT * FROM bookmarks")] == before
+    assert len(history(fresh_db, P2)) == revisions and not fresh_db.in_transaction
+
+
+def test_apply_policy_unhide_restores_visibility_not_masked_text(fresh_db) -> None:
+    data = [{"id": P1, "author_id": "500", "text": "my diary"}, OLD]
+    write(fresh_db, DomainPolicy.empty(), page(data))
+    apply_policy(fresh_db, DomainPolicy(domain_patterns=("secret.example.com",),
+                                        path_patterns=("x.com/secretuser/*",)))
+    assert row(fresh_db, P1)["title"] == "@secretuser"
+    report = apply_policy(fresh_db, DomainPolicy.empty())
+    assert report.newly_visible == 2
+    assert (row(fresh_db, P1)["content_visible"], row(fresh_db, P1)["title"]) == (1, "@secretuser: my diary")
+    # The mask stays until a re-sync re-reads the post (`ingest x --full`) ...
+    assert live(fresh_db, row(fresh_db, P2)["bookmark_id"]) == "read [hidden link]"
+    write(fresh_db, DomainPolicy.empty(), page([OLD], observed_at=BASE + 60), run="01JA0000000000000000000001")
+    assert live(fresh_db, row(fresh_db, P2)["bookmark_id"]) == "read https://secret.example.com/my/case"
+
+
+def test_apply_policy_canonicalizes_legacy_post_locators(fresh_db) -> None:
+    fresh_db.execute(
+        "INSERT INTO bookmarks (source, source_id, captured_at, url, domain, source_metadata, content_visible) "
+        "VALUES ('x', ?, ?, ?, 'twitter.com', ?, 1)",
+        (P1, BASE, f"https://twitter.com/SecretUser/status/{P1}", '{"kind": "x_post", "bookmarked": false}'),
+    )
+    fresh_db.commit()
+    report = apply_policy(fresh_db, SECRET)
+    assert report.locators_canonicalized == 1 and report.newly_hidden == 1
+    r = row(fresh_db, P1)
+    assert (r["url"], r["domain"], r["content_visible"]) == (
+        f"https://x.com/SecretUser/status/{P1}", "x.com", 0)
+
+
+def test_apply_policy_hidden_article_title_and_revival(fresh_db) -> None:
+    post = {"id": P2, "author_id": "501", "text": "an article",
+            "article": {"id": "1000000000000000777", "title": "PRIVATE ARTICLE TITLE"}}
+    write(fresh_db, DomainPolicy.empty(), page([post]))
+    apply_policy(fresh_db, DomainPolicy(path_patterns=("x.com/i/article/*",)))
+    assert row(fresh_db, "1000000000000000777", "x_article")["title"] is None
+    apply_policy(fresh_db, DomainPolicy.empty())
+    assert row(fresh_db, "1000000000000000777", "x_article")["title"] == "PRIVATE ARTICLE TITLE"
+
+
+def test_apply_policy_covers_browser_rows_like_reingest(fresh_db, tmp_path) -> None:
+    from muninn.ingest import ingest_html
+
+    html = tmp_path / "b.html"
+    html.write_text(
+        '<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n<DT><H3 ADD_DATE="1609459200">Era</H3>\n<DL><p>\n'
+        '<DT><A HREF="https://secret.example.com/a" ADD_DATE="1609459201">A</A>\n'
+        '<DT><A HREF="https://example.org/b" ADD_DATE="1609459202">B</A>\n'
+        '<DT><A HREF="https://twitter.com/SecretUser/status/1" ADD_DATE="1609459203">C</A>\n'
+        '</DL><p>\n</DL><p>\n', encoding="utf-8")
+    policy = DomainPolicy(domain_patterns=("secret.example.com",), path_patterns=("x.com/secretuser/*",))
+    ingest_html(html, fresh_db, DomainPolicy.empty())
+    report = apply_policy(fresh_db, policy)
+    applied = [tuple(r) for r in fresh_db.execute("SELECT * FROM bookmarks ORDER BY bookmark_id")]
+    assert report.newly_hidden == 2
+    ingest_html(html, fresh_db, policy)
+    assert [tuple(r) for r in fresh_db.execute("SELECT * FROM bookmarks ORDER BY bookmark_id")] == applied
+    # Only the X sources when `ingest x` runs it.
+    apply_policy(fresh_db, DomainPolicy.empty(), sources=("x", "x_article", "x_link"))
+    assert fresh_db.execute("SELECT COUNT(*) FROM bookmarks WHERE content_visible = 0").fetchone()[0] == 2
+
+
+def test_apply_policy_refuses_an_open_transaction(fresh_db) -> None:
+    fresh_db.execute("UPDATE bookmarks SET title = title")
+    fresh_db.execute("INSERT INTO sync_checkpoints (run_ulid, source, account_ref, collection, status, "
+                     "config_json, started_at, updated_at) VALUES "
+                     "('01JA0000000000000000000009', 'x', '1', 'bookmarks', 'running', '{}', 1, 1)")
+    with pytest.raises(RuntimeError, match="outside an open transaction"):
+        apply_policy(fresh_db, SECRET)
+    fresh_db.rollback()
+
+
+def test_cli_policy_apply(db_path, tmp_path) -> None:
+    from click.testing import CliRunner
+
+    from muninn.consumers.cli.main import cli
+    from muninn.db import connect
+
+    conn = connect(db_path)
+    write(conn, DomainPolicy.empty(), page([OLD]))
+    conn.close()
+    rules = tmp_path / "policy.yml"
+    rules.write_text("domains:\n  - secret.example.com\n", encoding="utf-8")
+    runner = CliRunner()
+    dry = runner.invoke(cli, ["--db", str(db_path), "policy", "apply", "--dry-run", "--policy-file", str(rules)])
+    assert dry.exit_code == 0, dry.output
+    assert "Dry run (nothing written): would change" in dry.output and "newly_hidden=1" in dry.output
+    real = runner.invoke(cli, ["--db", str(db_path), "policy", "apply", "--policy-file", str(rules)])
+    assert real.exit_code == 0 and "Applied domain policy:" in real.output and "texts_masked=1" in real.output
+    empty = tmp_path / "empty.yml"
+    empty.write_text("", encoding="utf-8")
+    back = runner.invoke(cli, ["--db", str(db_path), "policy", "apply", "--policy-file", str(empty)])
+    assert "newly_visible=1" in back.output and "muninn ingest x --full" in back.output
+    missing = runner.invoke(cli, ["--db", str(db_path), "policy", "apply", "--policy-file", str(tmp_path / "no.yml")])
+    assert missing.exit_code == 1 and "not found" in missing.output
+    help_text = " ".join(runner.invoke(cli, ["policy", "apply", "--help"]).output.split())
+    assert "restored only by re-reading it from X: `muninn ingest x --full`" in help_text

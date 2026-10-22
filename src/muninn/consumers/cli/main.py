@@ -32,6 +32,7 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn db migrate [--dry-run]
     muninn db status
     muninn db rebuild-fts
+    muninn policy apply [--dry-run] [--policy-file P]
 """
 
 from __future__ import annotations
@@ -164,6 +165,8 @@ def ingest_x_cmd(
     Incremental by default: starts at the newest bookmark and stops after
     the first page whose posts are all known. Each page costs money
     (pay-per-use), so runs are bounded by --max-pages unless --all.
+    Before syncing, domain policy is re-applied to every stored X row
+    (as `muninn policy apply` does), not only to the rows the run sees.
     """
     from pathlib import Path
 
@@ -234,6 +237,8 @@ def ingest_x_cmd(
     finally:
         conn.close()
 
+    if report.policy is not None and report.policy.changed:
+        click.echo(f"Domain policy re-applied to stored X rows: {report.policy.summary()}")
     click.echo(
         f"Run {report.run_ulid}: {report.status} ({report.stop_reason}); "
         f"pages={report.pages} posts={report.posts_seen} new={report.posts_new} "
@@ -318,6 +323,51 @@ def x_auth_cmd(token_file: str | None) -> None:
     JsonFileTokenStore(token_path).save(tokens)
     refresh = "with" if tokens.refresh_token else "without"
     click.echo(f"Saved X tokens ({refresh} refresh token) to {token_path} (mode 0600).")
+
+
+@cli.group("policy")
+@click.pass_context
+def policy_group(ctx: click.Context) -> None:
+    """Domain policy (domain_policy.yml) over the stored rows."""
+
+
+@policy_group.command("apply")
+@click.option("--dry-run", is_flag=True, help="Report what would change; write nothing.")
+@click.option("--policy-file", type=click.Path(dir_okay=False), default=None,
+              help="Policy file (default: the repo's domain_policy.yml).")
+@click.pass_context
+def policy_apply_cmd(ctx: click.Context, dry_run: bool, policy_file: str | None) -> None:
+    """Re-apply domain policy to every stored row, with no API call or fetch.
+
+    Recomputes content_visible from each row's stored url (browser and X
+    rows), canonicalizes X post locators, titles hidden X posts with the
+    handle only (hidden articles: none), and masks a hidden item's locator
+    as [hidden link] in the current text and title of the visible X posts
+    that link it (a new content revision; earlier revisions are kept).
+    `muninn ingest x` runs the same pass over X rows before every sync.
+
+    Un-hiding (removing a rule) makes rows visible again, but text already
+    masked as [hidden link] is restored only by re-reading it from X:
+    `muninn ingest x --full`.
+    """
+    from muninn.db import connect  # lazy
+    from muninn.ingest.policy import apply_policy  # lazy
+    from muninn.scrape.domain_policy import DomainPolicyError, load_domain_policy  # lazy
+
+    try:
+        policy = load_domain_policy(policy_file)
+    except DomainPolicyError as exc:
+        raise click.ClickException(str(exc)) from exc
+    conn = connect(ctx.obj.get("db"))
+    try:
+        report = apply_policy(conn, policy, dry_run=dry_run)
+    finally:
+        conn.close()
+    prefix = "Dry run (nothing written): would change" if dry_run else "Applied domain policy:"
+    click.echo(f"{prefix} {report.summary()}")
+    if report.newly_visible:
+        click.echo("Rows made visible again keep any [hidden link] masks until "
+                   "`muninn ingest x --full` re-reads them.")
 
 
 @cli.command("scrape")
