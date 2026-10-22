@@ -249,7 +249,11 @@ def packet_integrity_errors(packet: dict[str, Any]) -> list[str]:
                 check_excerpt(ewhere, cited, ev["excerpt"])
     for n, a in enumerate(packet["assessments"]):
         prior = a.get("prior_assessment")
-        if prior and prior["ref"] in assessments and assessments[prior["ref"]] != prior["digest"]:
+        if not prior:
+            continue
+        if prior["ref"] not in assessments:
+            errors.append(f"assessments[{n}].prior_assessment is not in assessments")
+        elif assessments[prior["ref"]] != prior["digest"]:
             errors.append(f"assessments[{n}].prior_assessment digest mismatch")
 
     primary = packet["primary_assessment"]
@@ -559,6 +563,10 @@ def build_packet(
                 revision_rows.setdefault(rev_row["scrape_history_id"], rev_row)
             revision_rows.setdefault(own["scrape_history_id"], own)
 
+    final = _resolve_priors(assessments)
+    assessments = [(a, final[rec["assessment_id"]]) for a, rec in assessments]
+    latest_by_item = {item: final[rec["assessment_id"]] for item, rec in latest_by_item.items()}
+
     order = {item_id: n for n, item_id in enumerate(item_rows)}
     revisions = sorted(
         revision_rows.values(),
@@ -571,7 +579,7 @@ def build_packet(
             seen_profiles.add(a["profile_sha256"])
             profiles.append(R.profile_record(conn, a["profile_sha256"]))
 
-    primary_rec = R.assessment_record(conn, primary, cache)
+    primary_rec = final[primary["assessment_ulid"]]
     latest_by_item[subject_id] = primary_rec
 
     questions: list[str] = []
@@ -624,6 +632,32 @@ def build_packet(
     if exposes(canonical_json(packet).decode("utf-8")):  # defence in depth
         raise PacketNotExportable("packet would quote a hidden item's locator; re-sync and reassess")
     return packet
+
+
+def _resolve_priors(
+    assessments: Sequence[tuple[sqlite3.Row, dict[str, Any]]]
+) -> dict[str, dict[str, Any]]:
+    """The included assessment records with ``prior_assessment`` resolved
+    inside the packet (contract §6.1): kept, with its digest recomputed,
+    when the prior assessment is included too, and omitted otherwise (the
+    prior was left out for a reason: hidden, withdrawn or cited content).
+
+    Records are processed in insertion order, so a prior (always an
+    earlier row) is final before anything references it. Returns
+    ``{assessment ULID: record}``; the shared record cache is not mutated.
+    """
+    final: dict[str, dict[str, Any]] = {}
+    for _row, rec in sorted(assessments, key=lambda pair: pair[0]["assessment_id"]):
+        out = dict(rec)
+        prior = out.get("prior_assessment")
+        if prior is not None:
+            target = final.get(prior["ref"])
+            if target is None:
+                del out["prior_assessment"]
+            else:
+                out["prior_assessment"] = {"ref": prior["ref"], "digest": record_digest(target)}
+        final[out["assessment_id"]] = out
+    return final
 
 
 def _masked_item(record: dict[str, Any], hidden: set[str]) -> dict[str, Any]:

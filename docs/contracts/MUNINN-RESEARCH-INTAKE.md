@@ -411,6 +411,13 @@ Cross-record rules (checked by `packet_integrity_errors` in the reference
 implementation):
 
 - Every reference resolves inside the packet, with a matching digest.
+  This includes `prior_assessment`: an included assessment carries it
+  only when the prior assessment is included too, and otherwise omits it.
+  A prior is left out for a privacy or withdrawal reason (below), so it
+  is never added just to resolve the reference. The digest of such an
+  assessment is computed over the record as carried. The same
+  `assessment_id` can therefore carry a different digest in a later
+  packet, once its prior has been left out.
 - Each assessment's `item_id` and `coverage` equal those of its revision.
 - `matched_interests` belong to the referenced profile revision.
 - Included `text` is normalized and matches its digest.

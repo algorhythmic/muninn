@@ -15,11 +15,18 @@ import pytest
 from click.testing import CliRunner
 
 from muninn.consumers.cli.main import cli
-from muninn.consumers.packets import context_digest, export_packets, resolve_packet
+from muninn.consumers.packets import (
+    context_digest,
+    export_packets,
+    packet_integrity_errors,
+    record_digest,
+    resolve_packet,
+)
+from muninn.consumers.packets.schemas import schema_errors
 from muninn.consumers.vault import x_pages
 from muninn.enrich.interest_profile import load_interest_profile
 from muninn.enrich.suitability import assess_suitability
-from muninn.intake_records import current_revision_row, mask_title, mentions_locator
+from muninn.intake_records import assessment_record, current_revision_row, mask_title, mentions_locator
 from muninn.revisions import record_revision
 from tests.integration.intake_fakes import fake_client, judgement, write_profile
 from tests.integration.intake_seed import add_revision, seed_link, seed_x_post
@@ -346,3 +353,32 @@ def test_packet_titles_mask_a_hidden_locator(fresh_db, tmp_path) -> None:
     packet = json.loads(written.path.read_bytes())
     assert packet["items"][0]["title"] == "@synth_author_a: Masked text [hidden link]"
     assert SECRET_HOST not in _packet_texts(tmp_path / "out")
+
+
+# ── Finding 17: prior_assessment resolves inside the packet ──────────
+
+
+def test_prior_assessment_is_omitted_when_its_target_is_left_out(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    _post, link = _post_with_link(conn)
+    profile = load_interest_profile(write_profile(tmp_path))
+    ev = [{"item_id": link.item_id, "stance": "supports", "excerpt": "Hybrid retrieval improved recall at ten.",
+           "note": "Measured result."}]
+    assess_suitability(conn, profile, fake_client(default=judgement(evidence=ev)), model=MODEL, now=T0 + 100)
+    _hide(conn, link)  # the first assessment cites it: left out of every later packet
+    assess_suitability(conn, profile, fake_client(), model=MODEL, now=T0 + 200)
+    first, second = conn.execute("SELECT * FROM assessments ORDER BY assessment_id").fetchall()
+    stored = assessment_record(conn, second)
+    assert stored["prior_assessment"]["ref"] == first["assessment_ulid"]
+
+    (written,) = export_packets(conn, tmp_path / "out", now=T0 + 300).written
+    packet = json.loads(written.path.read_bytes())
+    (only,) = packet["assessments"]
+    assert only["assessment_id"] == stored["assessment_id"] and "prior_assessment" not in only
+    assert packet["primary_assessment"] == {"ref": only["assessment_id"], "digest": record_digest(only)}
+    assert packet_integrity_errors(packet) == [] and schema_errors("evidence-packet", packet) == []
+
+    # The integrity check rejects a prior that does not resolve inside the packet.
+    only["prior_assessment"] = stored["prior_assessment"]
+    packet["primary_assessment"]["digest"] = record_digest(only)
+    assert "assessments[0].prior_assessment is not in assessments" in packet_integrity_errors(packet)
