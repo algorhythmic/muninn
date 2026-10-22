@@ -683,26 +683,39 @@ def vault_group(ctx: click.Context) -> None:
     default=None,
     help="Override MUNINN_PERSONAL_VAULT_DIR (used by the never-same-vault guard).",
 )
+@click.option(
+    "--no-prune",
+    is_flag=True,
+    help="Keep compiled pages this run did not write (default: remove them).",
+)
 @click.pass_context
 def vault_compile_cmd(
-    ctx: click.Context, vault_dir: str | None, personal_dir: str | None
+    ctx: click.Context, vault_dir: str | None, personal_dir: str | None, no_prune: bool
 ) -> None:
-    """Compile the vault. Refuses to run if output and personal paths overlap."""
+    """Compile the vault. Refuses to run if output and personal paths overlap.
+
+    Compiled pages in wiki/bookmarks/ that this run did not write (their row
+    is now hidden or gone, or their slug changed) are removed; files without
+    the compiler's frontmatter marker are never touched.
+    """
     from muninn.consumers.vault.compiler import (  # lazy
         VaultPathConflictError,
-        compile_vault,
+        compile_vault_report,
     )
 
     try:
-        count = compile_vault(
+        report = compile_vault_report(
             db_path=ctx.obj.get("db"),
             output_dir=vault_dir,
             personal_dir=personal_dir,
+            prune=not no_prune,
         )
     except VaultPathConflictError as exc:
         click.echo(f"Vault path conflict: {exc}", err=True)
         sys.exit(1)
-    click.echo(f"Compiled {count} vault page(s).")
+    for name in report.removed:
+        click.echo(f"  removed stale page wiki/bookmarks/{name}")
+    click.echo(f"Compiled {report.written} vault page(s); removed {len(report.removed)} stale page(s).")
 
 
 @cli.command("mcp")

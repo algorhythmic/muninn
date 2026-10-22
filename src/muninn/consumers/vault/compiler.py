@@ -5,7 +5,10 @@ them through `templates/bookmark_page.md.j2` into the unified vault's
 `wiki/bookmarks/` namespace (ADR-001/ADR-008: the output dir is the vault
 ROOT; this compiler owns — and only writes — `wiki/bookmarks/` beneath it).
 Hidden bookmarks (`content_visible = 0`) are skipped entirely — no page is
-written and no wikilink target is registered.
+written and no wikilink target is registered — and each run then prunes
+compiled pages it did not write (a row hidden since the last run, or a
+moved slug). Pruning only touches files carrying the compiler's
+frontmatter marker, never hand-written ones.
 
 X-lane rows (`source` in `x`, `x_article`, `x_link`) compile into the same
 namespace through `templates/x_item_page.md.j2`, with bidirectional links
@@ -22,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -182,18 +186,74 @@ def _build_slugs(bookmarks: list[sqlite3.Row]) -> dict[int, str]:
     return slug_by_id
 
 
+# ── pruning ────────────────────────────────────────────────────────
+
+# Every page either template renders opens with this frontmatter: the
+# compiler's marker. A file without it (hand-written, or another tool's)
+# is never deleted.
+_FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+_MARKER_PAGE_TYPE = re.compile(r"^page_type: bookmark$", re.M)
+_MARKER_BOOKMARK_ID = re.compile(r"^bookmark_id: \d+$", re.M)
+_MARKER_SCAN_BYTES = 8192
+
+
+def is_compiled_page(path: Path) -> bool:
+    """True when ``path`` is a page this compiler generated: a regular
+    ``.md`` file whose YAML frontmatter has ``page_type: bookmark`` and an
+    integer ``bookmark_id``."""
+    if path.suffix != ".md" or path.is_symlink() or not path.is_file():
+        return False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(_MARKER_SCAN_BYTES)
+    except OSError:
+        return False
+    m = _FRONTMATTER_RE.match(head)
+    if m is None:
+        return False
+    block = m.group(1)
+    return bool(_MARKER_PAGE_TYPE.search(block) and _MARKER_BOOKMARK_ID.search(block))
+
+
+def prune_stale_pages(pages_dir: Path, *, keep: set[str]) -> list[str]:
+    """Delete compiled pages in ``pages_dir`` (not its subdirectories)
+    whose file name is not in ``keep``; return the deleted names, sorted.
+
+    A row that became hidden (``content_visible = 0``) or whose slug changed
+    leaves its old page behind; for a hidden row that page is exactly the
+    data domain policy says to withdraw. Only files carrying the compiler's
+    frontmatter marker are candidates."""
+    removed = []
+    for path in sorted(pages_dir.glob("*.md")):
+        if path.name in keep or not is_compiled_page(path):
+            continue
+        path.unlink()
+        removed.append(path.name)
+    return removed
+
+
 # ── entry point ────────────────────────────────────────────────────
 
 
-def compile_vault(
+@dataclass(frozen=True)
+class CompileReport:
+    written: int
+    removed: list[str] = field(default_factory=list)
+
+
+def compile_vault_report(
     db_path: str | Path | None = None,
     output_dir: str | Path | None = None,
     personal_dir: str | Path | None = None,
-) -> int:
-    """Compile the vault. Returns the count of pages written.
+    *,
+    prune: bool = True,
+) -> CompileReport:
+    """Compile the vault and, unless ``prune=False``, remove stale pages.
 
     `output_dir` is the vault ROOT (the muninn-vault repo checkout); pages
-    are written to `{output_dir}/wiki/bookmarks/{slug}.md`.
+    are written to `{output_dir}/wiki/bookmarks/{slug}.md`. Afterwards any
+    compiled page (see :func:`is_compiled_page`) that this run did not
+    write is deleted: its row is now hidden or gone, or its slug moved.
 
     Resolution order for output_dir / personal_dir:
         explicit argument → muninn.config.load_paths() → error if neither.
@@ -233,7 +293,7 @@ def compile_vault(
         rows_by_id = {r["bookmark_id"]: r for r in bookmarks}
         graph = x_pages.load_link_graph(conn, set(rows_by_id))
 
-        count = 0
+        written: set[str] = set()
         for bm in bookmarks:
             enr = conn.execute(
                 "SELECT summary, tags, entities, key_quotes, language "
@@ -281,12 +341,28 @@ def compile_vault(
                     cross_refs=cross_refs,
                 )
 
-            (pages_dir / f"{slug_by_id[bm['bookmark_id']]}.md").write_text(content)
-            count += 1
-
-        return count
+            name = f"{slug_by_id[bm['bookmark_id']]}.md"
+            (pages_dir / name).write_text(content)
+            written.add(name)
     finally:
         conn.close()
+
+    removed = prune_stale_pages(pages_dir, keep=written) if prune else []
+    return CompileReport(written=len(written), removed=removed)
+
+
+def compile_vault(
+    db_path: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    personal_dir: str | Path | None = None,
+    *,
+    prune: bool = True,
+) -> int:
+    """Compile the vault (see :func:`compile_vault_report`). Returns the
+    count of pages written."""
+    return compile_vault_report(
+        db_path=db_path, output_dir=output_dir, personal_dir=personal_dir, prune=prune
+    ).written
 
 
 # Back-compat alias used by the CLI.
@@ -295,8 +371,12 @@ def generate_vault(*args, **kwargs) -> int:
 
 
 __all__ = [
+    "CompileReport",
     "VaultPathConflictError",
     "_validate_vault_paths",
     "compile_vault",
+    "compile_vault_report",
     "generate_vault",
+    "is_compiled_page",
+    "prune_stale_pages",
 ]
