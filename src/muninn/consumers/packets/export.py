@@ -1017,6 +1017,9 @@ def export_packets(
     wanted = set(item_ids or ())
 
     _sweep_withdrawals(conn, out, run, ts)
+    # A dry run withdraws nothing, but plans as if the due withdrawals had
+    # been applied at ``ts``, so it reports what the real run would do.
+    pending = {d.ref: ts for d in run.would_withdraw}
 
     selected = []
     for primary in _latest_assessments(conn):
@@ -1037,7 +1040,12 @@ def export_packets(
             (subject_ref,),
         ).fetchall()
         latest = history[0] if history else None
-        if latest is not None and latest["withdrawn_at"] is not None and primary["assessed_at"] <= latest["withdrawn_at"]:
+        latest_withdrawn_at = (
+            None if latest is None
+            else latest["withdrawn_at"] if latest["withdrawn_at"] is not None
+            else pending.get(f"{latest['packet_ulid']}@{latest['revision']}")
+        )
+        if latest_withdrawn_at is not None and primary["assessed_at"] <= latest_withdrawn_at:
             run.skipped.append((subject_ref, f"latest revision {latest['packet_ulid']}@{latest['revision']} is withdrawn"))
             continue
 
@@ -1058,7 +1066,7 @@ def export_packets(
             run.invalid.append((subject_ref, [f"cannot build packet: {exc}"]))
             continue
 
-        if latest is not None and latest["withdrawn_at"] is None:
+        if latest is not None and latest_withdrawn_at is None:
             if _core_digest(json.loads(latest["body_json"])) == _core_digest(packet):
                 run.unchanged.append(f"{latest['packet_ulid']}@{latest['revision']}")
                 if not dry_run:

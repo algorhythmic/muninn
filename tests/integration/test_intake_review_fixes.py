@@ -454,3 +454,28 @@ def test_assessments_of_a_deleted_items_old_content_are_never_exported(fresh_db,
     assert not any(a["item_id"] == link.item_id for a in packet["assessments"])  # made on the old text
     assert [a["rationale"] for a in packet["assessments"]] == ["Post only."]
     assert "Hybrid retrieval" not in json.dumps(packet)
+
+
+# ── Finding 16: a dry run plans what the real run would do ───────────
+
+
+def test_dry_run_applies_due_withdrawals_to_its_plan(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    post = seed_x_post(conn, "1900000000000000061", "Thread on retrieval eval.", captured_at=T0, published_at=T0 - 100)
+    profile = load_interest_profile(write_profile(tmp_path))
+    assess_suitability(conn, profile, fake_client(), model=MODEL, now=T0 + 100)
+    # A link recorded after the assessment: in the packet, not in the model's context.
+    link = seed_link(conn, post, position=0, unwound_url="https://example.com/later",
+                     text="A later page.", retrieved_at=T0 + 120)
+    out = tmp_path / "out"
+    (r1,) = export_packets(conn, out, now=T0 + 150).written
+    _hide(conn, link)
+
+    dry = export_packets(conn, out, dry_run=True, now=T0 + 200)
+    real_reason = f"latest revision {r1.ref} is withdrawn"
+    assert [d.ref for d in dry.would_withdraw] == [r1.ref]
+    assert dry.planned == [] and dry.skipped == [(post.item_id, real_reason)]
+    assert conn.execute("SELECT withdrawn_at FROM evidence_packets").fetchone()[0] is None  # nothing applied
+
+    real = export_packets(conn, out, now=T0 + 200)
+    assert real.written == [] and real.skipped == dry.skipped
