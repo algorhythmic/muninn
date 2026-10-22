@@ -61,13 +61,13 @@ tested. The bulk run waits for P1, because of the `selectolax` regression.
 
 Target: make Muninn's saved knowledge available to Claude Code sessions and Claude.ai, and to Odin as a `recall` scope.
 
-- [ ] **Implement the MCP server.** It is bound to the search interface plus the vault filesystem. Entry points:
+- [x] **Implement the MCP server.** *Done 2026-10-21 on `x-slice`* (contract in [`mcp-api.md`](mcp-api.md)). It is bound to the search interface plus the vault filesystem. Entry points:
   - `search(query: str, namespace: str | None, top_k: int = 10)` — semantic + keyword hybrid
   - `get_page(path: str)` — fetch a specific `wiki/*.md` page by path
   - `list_namespace(namespace: str)` — enumerate pages in a namespace with one-line summaries
-- [ ] **Expose MCP over Tailscale.** The MCP endpoint is reachable on the tailnet only, with no public internet exposure.
+- [ ] **Expose MCP over Tailscale.** The MCP endpoint is reachable on the tailnet only, with no public internet exposure. *Code side done 2026-10-21:* `muninn mcp --transport http [--host H] [--port P] [--allowed-host NAME]` (streamable HTTP, loopback by default, no auth layer). Remaining (operator): `tailscale serve` / ACLs on the homelab host.
 - [ ] **Wire up the Claude.ai remote MCP connector.** Register Muninn as a custom connector, for recall over saved knowledge. Project truth lives in Odin (ADR-011).
-- [ ] **Document the MCP contract.** Write `docs/mcp-api.md` for consumers (Odin recall, Claude sessions) and for operator debugging.
+- [x] **Document the MCP contract.** *Done 2026-10-21:* [`mcp-api.md`](mcp-api.md). Write `docs/mcp-api.md` for consumers (Odin recall, Claude sessions) and for operator debugging.
 
 ## Phase 3 — removed
 

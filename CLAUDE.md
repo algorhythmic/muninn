@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**The browser-bookmark pipeline is implemented** (commit `ab874cb`). It runs ingest → sanitize → dual-pass scrape → Haiku enrich → consumers (CLI, MCP, vault compiler, timeline, Parquet), plus synthesis scaffolding and a real test suite (438 tests on branch `adr-reset-x-first`, where `selectolax<1` is pinned; 858 on `x-slice`).
+**The browser-bookmark pipeline is implemented** (commit `ab874cb`). It runs ingest → sanitize → dual-pass scrape → Haiku enrich → consumers (CLI, MCP, vault compiler, timeline, Parquet), plus synthesis scaffolding and a real test suite (438 tests on branch `adr-reset-x-first`, where `selectolax<1` is pinned; 1001 on `x-slice`).
 
 **v1 is now X bookmarks first** (ADR-012). The code for every "Blocking v1" item is on branch `x-slice` (stacked on `adr-reset-x-first`), tested against synthetic fixtures only: the migrator, the X connector and sync writer, the `muninn-research-intake` 0.1.0-draft contract, suitability assessment, packet export, X vault pages and the search interface. What remains is operator-run: live X qualification (RI-02a, $5 cap), then the first real sync, assessment and recall check. The browser-bookmark bulk run is v1.1.
 
@@ -50,12 +50,12 @@ Per-bookmark `ADD_DATE` unix timestamps are the authoritative dates for browser 
 - `scrape/`: live, at_capture ±365d and recent_archive passes; IA CDX cache; rate limiter; auth-wall heuristic.
 - `enrich/`: Haiku via the Anthropic API, prompt-cached, with the idempotency triple. `suitability.py` is the `--task suitability` assessment (interest profile in `interest_profile.py`, price table and budget in `pricing.py`).
 - `vector/`: pluggable embeddings. sentence-transformers/EmbeddingGemma is the default; `hash` is a placeholder for tests/offline, selected via `MUNINN_EMBEDDING_BACKEND`. Also the Qdrant helpers and `reconcile.py` (backfills missing points, refreshes stale ones, drops points for hidden rows; `scripts/reconcile-vector-index.py` wraps it).
-- `search/`: the retrieval interface (ADR-014). MCP search goes through `get_search_backend()` (`MUNINN_SEARCH_BACKEND`, default `fts5-qdrant`). Backends return bookmark ids only; visibility is enforced when hits are hydrated from SQLite.
+- `search/`: the retrieval interface (ADR-014). MCP search goes through `get_search_backend()` (`MUNINN_SEARCH_BACKEND`, default `fts5-qdrant`); `hybrid.py` fuses keyword and semantic rankings (RRF). Backends return bookmark ids only; visibility is enforced when hits are hydrated from SQLite. `consumers/mcp/vault_fs.py` serves vault pages (`get_page`, `list_namespace`, authored-lane scan) with strict path and visibility checks.
 - `intake_records.py`, `revisions.py`: row → contract-record mapping and the shared `scrape_history` writer (stdlib-only).
 - `synthesis/`: orchestrator, JSON Schema validation, the task/result file contract (`muninn-synthesis/1`, `docs/synthesis-contract.md`) and the budgeted direct API runner (default model `claude-opus-5-5`; per-run `--max-cost-usd`, and a required monthly cap `MUNINN_SYNTHESIS_MONTHLY_BUDGET_USD`). The Saga-style container path is removed (ADR-013).
 - `consumers/`: Click CLI `muninn …`, FastMCP stdio server, vault compiler with Jinja templates (X items in `vault/x_pages.py`), timeline, Parquet, and `packets/` (evidence-packet export, canonical JSON, tombstones).
 
-CLI: `muninn ingest [html] PATH|ingest x|x auth|scrape|enrich [--task suitability]|synthesize {era|deep-pass|analyze} [--emit-task DIR]|synthesize ingest-result FILE|triage|status|deep-pass|export parquet|export packets|timeline|vault|mcp|db migrate|db status`.
+CLI: `muninn ingest [html] PATH|ingest x|x auth|scrape|enrich [--task suitability]|synthesize {era|deep-pass|analyze} [--emit-task DIR]|synthesize ingest-result FILE|triage|status|deep-pass|export parquet|export packets|timeline|vault|mcp [--transport stdio|http]|db migrate|db status`. MCP tools and their privacy rules are specified in `docs/mcp-api.md`.
 
 DB: numbered migrations in `schemas/sql/NNN_*.sql`, applied only by `muninn db migrate [--dry-run]` (backup first) or by `init_db()` / `scripts/init-db.py` for a fresh file. `PRAGMA user_version` is the applied version; `connect()` refuses a missing, empty or behind database and warns on an ahead one. `schema.sql` is a test-guarded byte mirror of `001_initial.sql` only, not the full schema.
 
