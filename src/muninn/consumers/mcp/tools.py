@@ -14,6 +14,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from muninn.consumers.vault import x_pages
 from muninn.db import connect
 from muninn.search import DEFAULT_BACKEND, SearchBackend, SearchHit, get_search_backend
 
@@ -29,15 +30,33 @@ def _row_to_dict(row: sqlite3.Row | None) -> dict:
     return dict(row) if row else {}
 
 
+def _item_kind(row: sqlite3.Row) -> str | None:
+    """Contract item kind (``x_post``, ``x_article``, ``github_repo``,
+    ``web_page``) for X-lane rows; None for browser bookmarks."""
+    if row["source"] not in x_pages.X_SOURCES:
+        return None
+    return x_pages.item_kind_for(row)
+
+
+def _title(row: sqlite3.Row) -> str | None:
+    """``bookmarks.title``; an X post without one (known only from an
+    ``errors[]`` entry or a bare reference) falls back to ``@handle``."""
+    if row["title"] or row["source"] != "x":
+        return row["title"]
+    return x_pages.display_name(row)
+
+
 def _bookmark_summary(row: sqlite3.Row, score: float | None = None) -> dict:
     """Compact bookmark view for search results."""
     out = {
         "bookmark_id": row["bookmark_id"],
-        "title": row["title"],
+        "title": _title(row),
         "url": row["url"],
         "era_label": row["era_label"],
         "domain": row["domain"],
         "summary": row["summary"] if "summary" in row.keys() else None,
+        "source": row["source"],
+        "item_kind": _item_kind(row),
     }
     if score is not None:
         out["score"] = score
@@ -75,7 +94,7 @@ def _hydrate(
         for hit in hits:
             row = conn.execute(
                 "SELECT b.bookmark_id, b.title, b.url, b.era_label, b.domain, "
-                "       e.summary "
+                "       b.source, b.source_id, b.source_metadata, e.summary "
                 "FROM bookmarks b LEFT JOIN enriched e "
                 "  ON e.bookmark_id = b.bookmark_id "
                 "WHERE b.bookmark_id = ? AND b.content_visible = 1",
@@ -158,6 +177,7 @@ def get_bookmark(bookmark_id: int, db_path: str | Path | None = None) -> str:
         ).fetchall()
 
         out = _row_to_dict(row)
+        out["item_kind"] = _item_kind(row)
         out["scrape_results"] = [_row_to_dict(s) for s in scrape]
         return json.dumps(out, indent=2, default=str)
     finally:

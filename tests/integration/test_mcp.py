@@ -295,8 +295,53 @@ def test_fake_backend_keyword_output_has_no_score(db_path: Path):
             "era_label": "early-web",
             "domain": "example.com",
             "summary": "A short summary about quokkas",
+            "source": "netscape",
+            "item_kind": None,  # browser bookmarks have no contract item kind
         }
     ]
+
+
+def test_search_results_carry_source_and_item_kind_for_x_rows(db_path: Path):
+    """X rows: `source`, the contract `item_kind`, and `bookmarks.title`
+    (an X post the writer saw only as an errors[] entry has no title, so
+    the result falls back to its author handle). Hidden rows stay hidden."""
+    _seed(db_path)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = [
+            (10, "x", "1900000000000000010", "@synth_author: A synthetic post",
+             "https://x.com/synth_author/status/1900000000000000010", "x.com", 1,
+             json.dumps({"kind": "x_post", "author": {"id": "9", "username": "synth_author"}})),
+            (11, "x", "1900000000000000011", None,
+             "https://x.com/synth_author/status/1900000000000000011", "x.com", 1,
+             json.dumps({"kind": "x_post", "author": {"id": "9", "username": "synth_author"}})),
+            (12, "x_link", "a" * 64, "synthetic-org/synthetic-repo",
+             "https://github.com/synthetic-org/synthetic-repo", "github.com", 1,
+             json.dumps({"kind": "github_repo"})),
+            (13, "x_link", "b" * 64, "Hidden page", "https://intranet.example/p",
+             "intranet.example", 0, json.dumps({"kind": "web_page"})),
+        ]
+        conn.executemany(
+            "INSERT INTO bookmarks (bookmark_id, source, source_id, title, url, domain, "
+            "  content_visible, source_metadata, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    fake = _FakeBackend(keyword_hits=[(10, 3.0), (11, 2.0), (12, 1.0), (13, 0.5), (1, 0.1)])
+    out = json.loads(tools.fts_search("synthetic", db_path=db_path, backend=fake))
+    got = [(r["bookmark_id"], r["source"], r["item_kind"], r["title"]) for r in out]
+    assert got == [
+        (10, "x", "x_post", "@synth_author: A synthetic post"),
+        (11, "x", "x_post", "@synth_author"),
+        (12, "x_link", "github_repo", "synthetic-org/synthetic-repo"),
+        (1, "netscape", None, "Quokka rescue"),
+    ]
+    assert "Hidden page" not in json.dumps(out)
+    full = json.loads(tools.get_bookmark(12, db_path=db_path))
+    assert full["source"] == "x_link" and full["item_kind"] == "github_repo"
+    assert "error" in json.loads(tools.get_bookmark(13, db_path=db_path))
 
 
 def test_fake_backend_semantic_unavailable_falls_back_to_its_keyword(db_path: Path):
