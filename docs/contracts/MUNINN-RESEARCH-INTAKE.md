@@ -593,6 +593,8 @@ browser-bookmark lane keeps its at-capture-first behaviour unchanged.
 - Every locator passes through `sanitize_url`. Raw URLs, OAuth tokens,
   pagination cursors and response headers never appear in a record.
   `usage-record.operation` is a template, so it cannot carry them.
+  On X hosts only (`x.com`, `twitter.com`), sanitization rule 1c also
+  strips the share-tracking parameters `s`, `t`, `ref_src` and `ref_url`.
 - X OAuth tokens are stored outside the database. The sync-checkpoint
   table stores only the opaque pagination cursor.
 - Hidden items (`content_visible = 0`) are never exported. They are never
@@ -725,9 +727,14 @@ Conventions the writer implements:
   normalized text with whitespace collapsed. When it is longer than 80
   characters it is cut to its first 79 and ended with `…`. The title is
   just `@username` when the post has no text, and the text alone when the
-  author is unknown. Titles make handles keyword-searchable.
+  author is unknown. Titles make handles keyword-searchable. A post that
+  domain policy hides is titled `@username` only, with no title when the
+  handle is unknown. A hidden X Article has no title.
 - **Post locator.** `https://x.com/<username>/status/<id>`, or
-  `https://x.com/i/web/status/<id>` when the handle is unknown.
+  `https://x.com/i/web/status/<id>` when the handle is unknown. It is
+  always this canonical form, whatever form of URL first referenced the
+  post. Until the API names the author, the handle from the referencing
+  URL stands in. The locator is rewritten when the API's handle differs.
 - **GitHub repositories.** A repository's canonical locator is its
   lowercase root `https://github.com/<owner>/<name>`, whatever case,
   `.git` or trailing slash the link used. So one repository is one
@@ -738,10 +745,21 @@ Conventions the writer implements:
   `api_reference` for `quotes`, `replies_to` and `article`, which are
   referenced by ID.
 - **Hidden content.** Domain policy sets `content_visible` on every row
-  exactly as it does for browser bookmarks, and re-applies it on every
-  sync. A hidden post or article gets no text revision and no current
-  text. A hidden link destination inside another post's text becomes
-  `[hidden link]` (section 10).
+  exactly as it does for browser bookmarks. A hidden post or article gets
+  no text revision and no current text. A hidden link destination inside
+  another post's text becomes `[hidden link]` (section 10).
+  - **Re-application.** Policy is re-applied to every stored X row at the
+    start of each sync, and on demand with `muninn policy apply`, which
+    also covers browser rows.
+  - **X hosts.** `x.com` and `twitter.com`, with or without `www.`,
+    `mobile.` or `m.`, are aliases, and handle paths match ignoring case.
+  - **Masking.** When a visible post's linked item becomes hidden, the
+    post's current text is masked and recorded as a new `x_api` revision
+    whose `retrieved_at` is the time of the pass. Nothing is refetched,
+    and earlier revisions are kept (the exporter refuses them, section
+    6.1).
+  - **Un-hiding.** It restores `content_visible`. The masked text comes
+    back only with `muninn ingest x --full`.
 - **Browser bookmarks** (`muninn scrape`, the v1.1 lane) get content
   revisions too. They are keyed by the page's `web:` or `github:repo:`
   identity, so a page bookmarked in the browser and linked from X shares
@@ -764,7 +782,13 @@ bookmark. It stops there, without fetching further pages, as `completed`
 with `config_json.stop_reason = "caught_up"`. Each closed run records its
 `stop_reason` in `config_json`: `end_of_list`, `caught_up`,
 `rate_limited`, `page_budget`, `usage_capped` or `error`. It also records
-`cap_reached: true` when the history cap was hit.
+`cap_reached: true` when the history cap was hit. A pagination token that
+repeats ends the run with stop reason `error` and
+`error_code = pagination-cycle`.
+
+Usage: every billed X request gets a `usage_records` row, even when
+writing its page fails. A `GET /2/users/me` call made before a resume that
+is then refused may have a NULL `sync_checkpoint_id`.
 
 `config_json` also holds the run's configuration rather than constants:
 
@@ -939,8 +963,9 @@ Design questions for review:
   withdraws their packets). A visible post that links to the domain keeps
   the locator in its stored title and its earlier text revisions. These
   are masked on the way to the model and refused at export (section 6.1),
-  so the post is exported again only once a capture with `[hidden link]`
-  has been reassessed. Whether muninn should also withdraw such revisions
+  so the post is exported again only once the masked revision has been
+  reassessed. That revision is written by the next sync or by
+  `muninn policy apply` (section 10.1). Whether muninn should also withdraw such revisions
   in storage is open.
 - Odin's `SNAPSHOT.schema.json` hard-codes the producer `saga`. Odin must
   generalize it before it can pin this contract. That is Odin's task.
