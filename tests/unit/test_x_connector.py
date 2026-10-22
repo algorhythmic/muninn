@@ -32,6 +32,7 @@ from muninn.ingest.x import (
     XClient,
     XConnectorConfig,
     XForbidden,
+    XPaginationCycle,
     XTokens,
     XTransportError,
     XUsageCapped,
@@ -178,6 +179,55 @@ def test_token_that_does_not_advance_is_an_error(mock) -> None:
     mock.get(BOOKMARKS).mock(side_effect=pages_handler({T2: [loop]}))
     with pytest.raises(XApiError, match="did not advance"):
         list(make_client(FakeClock()).iter_bookmark_pages(XCheckpoint(user_id=USER)))
+
+
+def test_token_cycle_longer_than_one_page_is_an_error(mock) -> None:
+    # page 3 hands back page 2's token: T2 -> T3 -> T2 would loop forever.
+    loop = fx("bookmarks_page3", override={"meta": {"result_count": 2, "next_token": T2}})
+    route = mock.get(BOOKMARKS).mock(side_effect=pages_handler({T3: [loop]}))
+    sync = make_client(FakeClock()).iter_bookmark_pages(XCheckpoint(user_id=USER))
+    seen = []
+    with pytest.raises(XPaginationCycle, match="repeated") as info:
+        for page in sync:
+            seen.append(page.request_token)
+    assert seen == [None, T2] and route.call_count == 3
+    # The repeating page was fetched (billed) but not yielded; it rides on the error.
+    assert info.value.page is not None and info.value.page.request_token == T3
+    assert sync.checkpoint.next_token == T3  # resume would refetch, not skip
+
+
+def test_resumed_cycle_back_to_the_start_token_is_an_error(mock) -> None:
+    loop = fx("bookmarks_page2", override={"meta": {"result_count": 2, "next_token": T3}})
+    back = fx("bookmarks_page3", override={"meta": {"result_count": 2, "next_token": T2}})
+    mock.get(BOOKMARKS).mock(side_effect=pages_handler({T2: [loop], T3: [back]}))
+    sync = make_client(FakeClock()).iter_bookmark_pages(
+        XCheckpoint(user_id=USER, status="in_progress", next_token=T2)
+    )
+    with pytest.raises(XPaginationCycle):
+        list(sync)
+
+
+def test_folder_pagination_cycles_and_page_bound(mock) -> None:
+    folders = f"{BOOKMARKS}/folders"
+
+    def cycling(request: httpx.Request) -> httpx.Response:
+        nxt = {None: "fa", "fa": "fb", "fb": "fa"}[request.url.params.get("pagination_token")]
+        return httpx.Response(200, json={"data": [{"id": "1500000000000000001"}],
+                                         "meta": {"next_token": nxt}})
+
+    route = mock.get(folders).mock(side_effect=cycling)
+    with pytest.raises(XPaginationCycle, match="repeated"):
+        make_client(FakeClock()).list_bookmark_folders(USER)
+    assert route.call_count == 3
+
+    counter = iter(range(10**6))
+    mock.get(folders).mock(side_effect=lambda req: httpx.Response(
+        200, json={"data": [{"id": "1500000000000000001"}], "meta": {"next_token": f"t{next(counter)}"}}))
+    client = make_client(FakeClock(), config=XConnectorConfig(max_folder_pages=4))
+    with pytest.raises(XApiError, match="more than 4 pages"):
+        client.list_bookmark_folders(USER)
+    with pytest.raises(ValueError):
+        XConnectorConfig(max_folder_pages=0)
 
 
 def test_max_pages_budget_stops_resumably(mock) -> None:

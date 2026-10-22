@@ -124,10 +124,14 @@ class XConnectorConfig:
     rate_limit_fallback_wait_seconds: float = 60.0
     rate_limit_margin_seconds: float = 1.0
     timeout_seconds: float = 30.0
+    # Upper bound on pages of a folder endpoint (folder list, folder posts).
+    max_folder_pages: int = 100
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_results <= 100:
             raise ValueError("max_results must be within 1..100")
+        if self.max_folder_pages < 1:
+            raise ValueError("max_folder_pages must be at least 1")
         if self.bookmark_cap is not None and self.bookmark_cap < 1:
             raise ValueError("bookmark_cap must be positive or None")
 
@@ -197,6 +201,17 @@ class XUsageCapped(XError):
 
 class XApiError(XError):
     """Any other non-200, a malformed body, or a pagination token that didn't advance."""
+
+
+class XPaginationCycle(XApiError):
+    """A ``next_token`` this run already followed (or the one just used): the
+    list would loop. ``page`` is the bookmarks page whose token repeated; it
+    was fetched (and billed) but is not yielded, so the caller can still
+    record its usage. None for the folder endpoints."""
+
+    def __init__(self, message: str, *, page: "BookmarkPage | None" = None, **kw: Any) -> None:
+        super().__init__(message, problem="pagination-cycle", **kw)
+        self.page = page
 
 
 class XTransportError(XError):
@@ -1033,7 +1048,7 @@ class XClient:
             config=self.config,
         )
         if page.next_token is not None and page.next_token == token:
-            raise XApiError("pagination token did not advance")
+            raise XPaginationCycle("pagination token did not advance", page=page)
         log.debug(
             "X bookmarks page %d: %d posts, %d problems, more=%s",
             page.index, len(page.posts), len(page.problems), not page.is_last,
@@ -1060,20 +1075,32 @@ class XClient:
     # ── transport ────────────────────────────────────────────────
 
     def _paginate(self, path: str, params: dict[str, str]) -> Iterator[Mapping[str, Any]]:
+        """Items of a paginated folder endpoint. Stops with
+        :class:`XPaginationCycle` on any repeated token and with
+        :class:`XApiError` past ``config.max_folder_pages`` pages."""
         token: str | None = None
+        seen: set[str] = set()
+        pages = 0
         while True:
+            if pages >= self.config.max_folder_pages:
+                raise XApiError(
+                    f"GET {path}: more than {self.config.max_folder_pages} pages; "
+                    "stopping (raise max_folder_pages if the list is really that long)"
+                )
             q = dict(params)
             if token:
                 q["pagination_token"] = token
             body, _ = self._get(path, q)
+            pages += 1
             for item in body.get("data") or []:
                 if isinstance(item, Mapping) and item.get("id"):
                     yield item
             nxt = (body.get("meta") or {}).get("next_token") or None
             if nxt is None:
                 return
-            if nxt == token:
-                raise XApiError("pagination token did not advance")
+            if nxt == token or nxt in seen:
+                raise XPaginationCycle(f"GET {path}: pagination token repeated")
+            seen.add(nxt)
             token = nxt
 
     def _tokens(self) -> XTokens:
@@ -1187,6 +1214,9 @@ class BookmarkSync:
         self.max_pages = max_pages
         self.outcome: SyncOutcome | None = None
         self.error: XError | None = None
+        # Every token this run has requested or been handed: X returning any
+        # of them again means the list loops, not just a token that stalls.
+        self._seen_tokens: set[str] = {checkpoint.next_token} if checkpoint.next_token else set()
 
     def __iter__(self) -> Iterator[BookmarkPage]:
         if self.checkpoint.status == "complete":
@@ -1205,6 +1235,13 @@ class BookmarkSync:
             except XRateLimited as exc:
                 self._stop("rate_limited", exc, resume_after=exc.reset_at)
                 return
+            if page.next_token is not None:
+                if page.next_token in self._seen_tokens:
+                    raise XPaginationCycle(
+                        f"pagination token repeated after {page.index + 1} page(s): the "
+                        "bookmark list loops; stopping", page=page,
+                    )
+                self._seen_tokens.add(page.next_token)
             self.checkpoint = page.checkpoint
             fetched += 1
             yield page
@@ -1254,6 +1291,7 @@ __all__ = [
     "XItemProblem",
     "XLink",
     "XMedia",
+    "XPaginationCycle",
     "XPost",
     "XRateLimited",
     "XTokens",
