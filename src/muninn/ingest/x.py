@@ -5,8 +5,8 @@ and bookmark folders with an OAuth 2.0 user-context token, and turns each
 response page into placeholder records. It is a transport-and-parse layer
 only:
 
-- it never writes to the database (RI-04 adds the upsert into
-  ``bookmarks`` and ``item_links``) and has no CLI command;
+- it never writes to the database: :mod:`muninn.ingest.x_store` maps its
+  pages onto the stage-native tables, and ``muninn ingest x`` drives both;
 - ``muninn.ingest`` does not import it, so the ingest entry point stays
   free of ``httpx`` (see ``tests/unit/test_import_isolation.py``).
 
@@ -96,10 +96,12 @@ class XConnectorConfig:
         "article",
         "attachments",
         "author_id",
+        "conversation_id",
         "created_at",
         "entities",
         "lang",
         "note_tweet",
+        "possibly_sensitive",
         "referenced_tweets",
     )
     user_fields: tuple[str, ...] = ("name", "username", "protected")
@@ -489,11 +491,16 @@ class XAuthor:
 
 @dataclass(frozen=True)
 class XArticle:
-    """PLACEHOLDER pending RI-03. ``body`` is None when the API omits it."""
+    """PLACEHOLDER pending RI-03. ``body`` is None when the API omits it.
+
+    ``id`` is read from the article object when the API supplies one
+    (unverified, RI-02a); otherwise the writer takes it from an
+    ``x.com/i/article/<id>`` URL entity on the post."""
 
     title: str | None
     preview_text: str | None = None
     body: str | None = None
+    id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -527,6 +534,10 @@ class XLink:
     path_redacted: bool = False
     userinfo_redacted: bool = False
     parse_error: str | None = None
+    # The entity's t.co ``url`` exactly as it appears in the post text, kept
+    # only so the writer can replace it with ``locator`` (contract §10). It
+    # is a public short link, never a destination URL; None for non-t.co.
+    short_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -555,6 +566,8 @@ class XPost:
     links: tuple[XLink, ...]
     observed_at: int | None
     list_position: int | None  # 0-based position across the whole run
+    conversation_id: str | None = None
+    possibly_sensitive: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -671,6 +684,9 @@ class BookmarkPage:
     observed_at: int
     rate_limit: RateLimitInfo | None
     checkpoint: XCheckpoint
+    # Expansion counts, for usage estimates (whether X bills them is open).
+    included_post_count: int = 0
+    included_user_count: int = 0
 
     @property
     def is_last(self) -> bool:
@@ -705,10 +721,24 @@ def _classify(locator: str) -> tuple[LinkKind, str | None, str | None]:
     return "web", None, None
 
 
+def _short_url(value: object) -> str | None:
+    """The t.co link as written in the post text, or None if it isn't one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if (parts.hostname or "").lower() != "t.co" or parts.query or parts.username or parts.password:
+        return None
+    return value
+
+
 def parse_url_entity(entity: Mapping[str, Any], position: int) -> XLink:
     """Pick the locator (``unwound_url`` → ``expanded_url`` → ``url``) and sanitize it."""
     status = entity.get("status")
     media_key = entity.get("media_key")
+    short_url = _short_url(entity.get("url"))
     first_error: str | None = None
     for source in LOCATOR_ORDER:
         candidate = entity.get(source)
@@ -734,6 +764,7 @@ def parse_url_entity(entity: Mapping[str, Any], position: int) -> XLink:
             redacted_param_names=tuple(result.redacted_param_names),
             path_redacted=result.path_redacted,
             userinfo_redacted=result.userinfo_redacted,
+            short_url=short_url,
         )
     return XLink(
         position=position,
@@ -744,6 +775,7 @@ def parse_url_entity(entity: Mapping[str, Any], position: int) -> XLink:
         media_key=media_key,
         title=entity.get("title"),
         parse_error=first_error or "no_locator",
+        short_url=short_url,
     )
 
 
@@ -785,7 +817,11 @@ def _parse_article(raw: object, config: XConnectorConfig) -> XArticle | None:
     body = next(
         (raw[k] for k in config.article_body_keys if isinstance(raw.get(k), str) and raw[k]), None
     )
-    return XArticle(title=raw.get("title"), preview_text=raw.get("preview_text"), body=body)
+    raw_id = raw.get("id")
+    article_id = str(raw_id) if isinstance(raw_id, (str, int)) and str(raw_id).isdigit() else None
+    return XArticle(
+        title=raw.get("title"), preview_text=raw.get("preview_text"), body=body, id=article_id
+    )
 
 
 def _parse_post(
@@ -844,6 +880,10 @@ def _parse_post(
         links=tuple(parse_url_entity(e, i) for i, e in enumerate(entities)),
         observed_at=observed_at,
         list_position=position,
+        conversation_id=raw.get("conversation_id"),
+        possibly_sensitive=(
+            raw["possibly_sensitive"] if isinstance(raw.get("possibly_sensitive"), bool) else None
+        ),
     )
 
 
@@ -914,6 +954,8 @@ def parse_bookmark_page(
         observed_at=observed_at,
         rate_limit=rate_limit,
         checkpoint=after,
+        included_post_count=len(inc.posts),
+        included_user_count=len(inc.users),
     )
 
 
