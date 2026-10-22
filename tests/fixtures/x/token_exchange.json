@@ -1,0 +1,7 @@
+{
+  "token_type": "bearer",
+  "expires_in": 7200,
+  "access_token": "synthetic-access-token-0001",
+  "scope": "tweet.read users.read bookmark.read offline.access",
+  "refresh_token": "synthetic-refresh-token-0001"
+}

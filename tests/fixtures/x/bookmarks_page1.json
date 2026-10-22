@@ -1,0 +1,188 @@
+{
+  "data": [
+    {
+      "id": "1111111111111111101",
+      "author_id": "9000000011",
+      "created_at": "2026-09-01T08:15:00.000Z",
+      "lang": "en",
+      "text": "A plain synthetic post with a fully unwound link https://t.co/EXAMPLE0101",
+      "edit_history_tweet_ids": [
+        "1111111111111111101"
+      ],
+      "entities": {
+        "urls": [
+          {
+            "start": 49,
+            "end": 73,
+            "url": "https://t.co/EXAMPLE0101",
+            "expanded_url": "https://short.example.net/a1",
+            "display_url": "short.example.net/a1",
+            "unwound_url": "https://www.example.com/articles/synthetic-guide?id=42&utm_source=twitter&utm_medium=social",
+            "status": 200,
+            "title": "A synthetic guide",
+            "description": "Documentation-derived example page."
+          }
+        ]
+      }
+    },
+    {
+      "id": "1111111111111111102",
+      "author_id": "9000000012",
+      "created_at": "2026-08-28T17:40:00.000Z",
+      "lang": "en",
+      "text": "A long synthetic post that X truncates at the classic limit. A long synthetic post that X truncates at the classic limit. A long synthetic post that X truncates at the classic limit. A long synthetic post that X truncates at the classic limit. … https://t.co/EXAMPLE0102",
+      "edit_history_tweet_ids": [
+        "1111111111111111102"
+      ],
+      "entities": {
+        "urls": [
+          {
+            "start": 246,
+            "end": 270,
+            "url": "https://t.co/EXAMPLE0102",
+            "expanded_url": "https://github.com/example-org/example-repo",
+            "display_url": "github.com/example-org/exam…",
+            "unwound_url": "https://github.com/example-org/example-repo",
+            "status": 200,
+            "title": "example-org/example-repo"
+          }
+        ]
+      },
+      "note_tweet": {
+        "text": "A long synthetic post that X truncates at the classic limit. A long synthetic post that X truncates at the classic limit. A long synthetic post that X truncates at the classic limit. A long synthetic post that X truncates at the classic limit. The full text only arrives in note_tweet. The repository is at https://t.co/EXAMPLE0102 and the write-up is at https://t.co/EXAMPLE0112",
+        "entities": {
+          "urls": [
+            {
+              "start": 307,
+              "end": 331,
+              "url": "https://t.co/EXAMPLE0102",
+              "expanded_url": "https://github.com/example-org/example-repo",
+              "display_url": "github.com/example-org/exam…",
+              "unwound_url": "https://github.com/example-org/example-repo",
+              "status": 200,
+              "title": "example-org/example-repo"
+            },
+            {
+              "start": 355,
+              "end": 379,
+              "url": "https://t.co/EXAMPLE0112",
+              "expanded_url": "https://blog.example.org/posts/write-up",
+              "display_url": "blog.example.org/posts/write-up",
+              "unwound_url": "https://blog.example.org/posts/write-up",
+              "status": 200
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "1111111111111111103",
+      "author_id": "9000000011",
+      "created_at": "2026-08-20T11:05:00.000Z",
+      "lang": "en",
+      "text": "Quoting a synthetic post https://t.co/EXAMPLE0103",
+      "edit_history_tweet_ids": [
+        "1111111111111111103"
+      ],
+      "referenced_tweets": [
+        {
+          "type": "quoted",
+          "id": "1111111111111111191"
+        }
+      ],
+      "entities": {
+        "urls": [
+          {
+            "start": 25,
+            "end": 49,
+            "url": "https://t.co/EXAMPLE0103",
+            "expanded_url": "https://x.com/quoted_author/status/1111111111111111191",
+            "display_url": "x.com/quoted_author/…"
+          }
+        ]
+      }
+    },
+    {
+      "id": "1111111111111111104",
+      "author_id": "9000000012",
+      "created_at": "2026-08-15T06:30:00.000Z",
+      "lang": "en",
+      "text": "A synthetic post with an attached image https://t.co/EXAMPLE0104",
+      "edit_history_tweet_ids": [
+        "1111111111111111104"
+      ],
+      "attachments": {
+        "media_keys": [
+          "3_1111111111111111104"
+        ]
+      },
+      "entities": {
+        "urls": [
+          {
+            "start": 40,
+            "end": 64,
+            "url": "https://t.co/EXAMPLE0104",
+            "expanded_url": "https://x.com/synthetic_dev/status/1111111111111111104/photo/1",
+            "display_url": "pic.x.com/EXAMPLE0104",
+            "media_key": "3_1111111111111111104"
+          }
+        ]
+      }
+    }
+  ],
+  "includes": {
+    "users": [
+      {
+        "id": "9000000011",
+        "name": "Example Author",
+        "username": "example_author",
+        "protected": false
+      },
+      {
+        "id": "9000000012",
+        "name": "Synthetic Dev",
+        "username": "synthetic_dev",
+        "protected": false
+      },
+      {
+        "id": "9000000014",
+        "name": "Quoted Author",
+        "username": "quoted_author",
+        "protected": false
+      }
+    ],
+    "tweets": [
+      {
+        "id": "1111111111111111191",
+        "author_id": "9000000014",
+        "created_at": "2026-08-19T22:00:00.000Z",
+        "lang": "en",
+        "text": "The quoted synthetic post, with a t.co-only link https://t.co/EXAMPLE0191",
+        "edit_history_tweet_ids": [
+          "1111111111111111191"
+        ],
+        "entities": {
+          "urls": [
+            {
+              "start": 49,
+              "end": 73,
+              "url": "https://t.co/EXAMPLE0191"
+            }
+          ]
+        }
+      }
+    ],
+    "media": [
+      {
+        "media_key": "3_1111111111111111104",
+        "type": "photo",
+        "url": "https://media.example.com/EXAMPLE0104.jpg",
+        "alt_text": "A synthetic diagram"
+      }
+    ]
+  },
+  "meta": {
+    "result_count": 4,
+    "next_token": "synthetic_next_token_page2"
+  }
+}

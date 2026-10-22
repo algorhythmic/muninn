@@ -1,0 +1,51 @@
+{
+  "data": [
+    {
+      "id": "1111111111111111107",
+      "author_id": "9000000011",
+      "created_at": "2026-07-30T19:20:00.000Z",
+      "lang": "en",
+      "text": "A synthetic post with no links at all.",
+      "edit_history_tweet_ids": [
+        "1111111111111111107"
+      ]
+    },
+    {
+      "id": "1111111111111111108",
+      "author_id": "9000000011",
+      "created_at": "2026-07-29T07:00:00.000Z",
+      "lang": "en",
+      "text": "A link whose destination carries a credential-shaped param https://t.co/EXAMPLE0108",
+      "edit_history_tweet_ids": [
+        "1111111111111111108"
+      ],
+      "entities": {
+        "urls": [
+          {
+            "start": 59,
+            "end": 83,
+            "url": "https://t.co/EXAMPLE0108",
+            "expanded_url": "https://docs.example.com/share?access_token=synthetic-not-a-real-token&page=2",
+            "display_url": "docs.example.com/share?…",
+            "unwound_url": "https://docs.example.com/share?access_token=synthetic-not-a-real-token&page=2",
+            "status": 200
+          }
+        ]
+      }
+    }
+  ],
+  "includes": {
+    "users": [
+      {
+        "id": "9000000011",
+        "name": "Example Author",
+        "username": "example_author",
+        "protected": false
+      }
+    ]
+  },
+  "meta": {
+    "result_count": 2,
+    "previous_token": "synthetic_previous_token_page2"
+  }
+}

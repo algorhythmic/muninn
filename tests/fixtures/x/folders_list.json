@@ -1,0 +1,15 @@
+{
+  "data": [
+    {
+      "id": "1500000000000000001",
+      "name": "Synthetic reading list"
+    },
+    {
+      "id": "1500000000000000002",
+      "name": "Synthetic tools"
+    }
+  ],
+  "meta": {
+    "result_count": 2
+  }
+}

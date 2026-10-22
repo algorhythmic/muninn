@@ -1,0 +1,7 @@
+{
+  "_fixture": "synthetic, documentation-derived, not recorded",
+  "status": 403,
+  "headers": {
+    "content-type": "application/json; charset=utf-8"
+  }
+}
