@@ -303,3 +303,28 @@ def test_http_cache_max_age(tmp_path) -> None:
     assert cache.get("k", max_age=11) == {"a": 1}
     assert cache.get("k", max_age=9) is None
     assert cache.get("k") == {"a": 1}  # no max_age: never expires
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_redirect_final_url_is_sanitized(seeded, make_client) -> None:
+    """A redirect target carrying a token-shaped param is stored sanitized,
+    in `scrape_results.final_url` as in the revision's `final_locator`."""
+    conn, ids = seeded
+    secret = "synthetic-redirect-token-CANARY-0002"
+    landing = "https://blog.example.org/posts/landing"
+    respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
+    respx.get(LINK).mock(return_value=httpx.Response(
+        302, headers={"location": f"{landing}?access_token={secret}&page=2&utm_source=x"}))
+    respx.get(landing).mock(return_value=httpx.Response(200, text=PAGE))
+    respx.get(HTML_URL).mock(return_value=httpx.Response(200, text=PAGE))
+    await _scrape(conn, make_client())
+
+    final_url = conn.execute(
+        "SELECT final_url FROM scrape_results WHERE bookmark_id = ? AND pass = 'live'", (ids["link"],)
+    ).fetchone()[0]
+    assert final_url == f"{landing}?page=2"
+    (rev,) = history(conn, ids["link"])
+    assert rev["final_locator"] == final_url
+    dump = "\n".join(conn.iterdump())
+    assert secret not in dump and "access_token" not in dump

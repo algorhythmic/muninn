@@ -301,8 +301,7 @@ def _record_history(conn: sqlite3.Connection, r: ScrapeResult, identity: dict) -
     is_archive = r.pass_ in ("at_capture", "recent_archive")
     if is_archive and r.actual_snapshot_at is None:
         return  # an archive revision must name its snapshot time
-    final = r.final_url or (r.archive_url if is_archive else None)
-    final_locator = sanitize_url(final).sanitized_url if final else None
+    final_locator = _sanitized_locator(r.final_url or (r.archive_url if is_archive else None))
     if final_locator == identity["url"]:
         final_locator = None
     record_revision(
@@ -324,7 +323,15 @@ def _record_history(conn: sqlite3.Connection, r: ScrapeResult, identity: dict) -
     )
 
 
+def _sanitized_locator(url: Optional[str]) -> Optional[str]:
+    """``sanitize_url`` for a fetched locator; None when it is rejected."""
+    return sanitize_url(url).sanitized_url if url else None
+
+
 def _upsert_scrape_result(conn: sqlite3.Connection, r: ScrapeResult) -> None:
+    # ``final_url`` is wherever the redirects ended. It can carry a
+    # credential-shaped param the bookmark's own (sanitized) URL never had,
+    # so it is sanitized like every other stored locator.
     conn.execute(_UPSERT_SCRAPE_SQL, {
         "bookmark_id": r.bookmark_id,
         "pass": r.pass_,
@@ -332,7 +339,7 @@ def _upsert_scrape_result(conn: sqlite3.Connection, r: ScrapeResult) -> None:
         "target_timestamp": r.target_timestamp,
         "actual_snapshot_at": r.actual_snapshot_at,
         "archive_url": r.archive_url,
-        "final_url": r.final_url,
+        "final_url": _sanitized_locator(r.final_url),
         "http_status": r.http_status,
         "scrape_status": r.scrape_status,
         "extraction_quality": r.extraction_quality,
