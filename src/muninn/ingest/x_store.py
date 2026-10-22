@@ -730,7 +730,7 @@ class XPageWriter:
 
         for problem in page.problems:
             result.revisions_new += self.write_problem(problem, seen, referenced)
-        result.resources = len(page.posts) + page.included_post_count + page.included_user_count
+        result.resources = page_resources(page)
         return result
 
     # ── errors[] ─────────────────────────────────────────────────
@@ -760,6 +760,38 @@ class XPageWriter:
 
 # ── Sync runs ───────────────────────────────────────────────────────────
 
+def page_resources(page: BookmarkPage) -> int:
+    """Resources a bookmarks page is estimated to bill: its posts plus the
+    expanded posts and users (whether X bills expansions is open)."""
+    return len(page.posts) + page.included_post_count + page.included_user_count
+
+
+def _usage_alone(
+    conn: sqlite3.Connection,
+    report: SyncReport,
+    *,
+    checkpoint_id: int | None,
+    operation: str,
+    resources: int,
+    pricing: XPricing,
+    occurred_at: int,
+) -> None:
+    """Record one billed request in its own transaction: for a request whose
+    page write failed (and was rolled back) or a run that was refused after
+    ``/users/me``. Never masks the caller's exception."""
+    if conn.in_transaction:
+        conn.rollback()
+    try:
+        with transaction(conn):
+            report.cost_micro_usd += _usage(
+                conn, checkpoint_id=checkpoint_id, operation=operation, resources=resources,
+                pricing=pricing, occurred_at=occurred_at,
+            )
+        report.resources += resources
+    except Exception:  # pragma: no cover - the DB itself is failing
+        log.warning("could not record X usage for %s", operation, exc_info=True)
+
+
 def _usage(
     conn: sqlite3.Connection,
     *,
@@ -780,6 +812,19 @@ def _usage(
         (new_ulid(occurred_at * 1000), operation, checkpoint_id, resources, cost, occurred_at),
     )
     return cost
+
+
+def _check_resumable(rows: list[sqlite3.Row], now: int) -> None:
+    """Raise :class:`NothingToResume` unless some unfinished run in ``rows``
+    (newest first) may resume now."""
+    if not rows:
+        raise NothingToResume("no unfinished X sync run to resume")
+    if all(r["resume_after"] is not None and r["resume_after"] > now for r in rows):
+        newest = rows[0]
+        raise NothingToResume(
+            f"run {newest['run_ulid']} is rate-limited until epoch "
+            f"{newest['resume_after']}; try again later"
+        )
 
 
 def find_resumable(
@@ -829,19 +874,32 @@ def sync_bookmarks(
     if options.max_pages is not None and options.max_pages < 1:
         raise ValueError("max_pages must be at least 1 (or None for no bound)")
 
-    me = client.get_me()
     now = int(clock())
+    if options.resume:
+        # Refuse before the billed /users/me call whenever the DB alone can tell.
+        _check_resumable(
+            conn.execute(
+                "SELECT run_ulid, resume_after FROM sync_checkpoints WHERE source = 'x' "
+                "AND collection = ? AND status <> 'completed' ORDER BY sync_checkpoint_id DESC",
+                (options.collection,),
+            ).fetchall(),
+            now,
+        )
+
+    me = client.get_me()
     account = me.id
     resumed_row = None
     if options.resume:
         resumed_row = find_resumable(conn, account_ref=account, collection=options.collection)
-        if resumed_row is None:
-            raise NothingToResume("no unfinished X sync run to resume")
-        if resumed_row["resume_after"] is not None and resumed_row["resume_after"] > now:
-            raise NothingToResume(
-                f"run {resumed_row['run_ulid']} is rate-limited until epoch "
-                f"{resumed_row['resume_after']}; try again later"
+        try:
+            _check_resumable([resumed_row] if resumed_row is not None else [], now)
+        except NothingToResume:
+            _usage_alone(
+                conn, SyncReport(run_ulid=None, status="not_started"),
+                checkpoint_id=int(resumed_row["sync_checkpoint_id"]) if resumed_row else None,
+                operation=OPERATION_ME, resources=1, pricing=pricing, occurred_at=now,
             )
+            raise
 
     with transaction(conn):
         if resumed_row is not None:
@@ -889,28 +947,38 @@ def sync_bookmarks(
     stop_reason: str | None = None
     try:
         for page in sync:
-            with transaction(conn):
-                res = writer.write_page(page)
-                report.cost_micro_usd += _usage(
-                    conn, checkpoint_id=checkpoint_id, operation=OPERATION_BOOKMARKS,
-                    resources=res.resources, pricing=pricing, occurred_at=page.observed_at,
+            try:
+                with transaction(conn):
+                    res = writer.write_page(page)
+                    report.cost_micro_usd += _usage(
+                        conn, checkpoint_id=checkpoint_id, operation=OPERATION_BOOKMARKS,
+                        resources=res.resources, pricing=pricing, occurred_at=page.observed_at,
+                    )
+                    caught_up = (
+                        mode == "incremental" and res.posts > 0 and res.known_posts == res.posts
+                    )
+                    done = page.is_last or caught_up
+                    conn.execute(
+                        """
+                        UPDATE sync_checkpoints SET
+                            next_token = ?, pages_fetched = pages_fetched + 1,
+                            items_seen = items_seen + ?, items_new = items_new + ?,
+                            status = ?, completed_at = ?, updated_at = ?
+                        WHERE sync_checkpoint_id = ?
+                        """,
+                        (
+                            None if done else page.next_token, res.posts, res.new_posts,
+                            "completed" if done else "running",
+                            page.observed_at if done else None, page.observed_at, checkpoint_id,
+                        ),
+                    )
+            except BaseException:
+                # The page's rows were rolled back, but the request was billed.
+                _usage_alone(
+                    conn, report, checkpoint_id=checkpoint_id, operation=OPERATION_BOOKMARKS,
+                    resources=page_resources(page), pricing=pricing, occurred_at=page.observed_at,
                 )
-                caught_up = mode == "incremental" and res.posts > 0 and res.known_posts == res.posts
-                done = page.is_last or caught_up
-                conn.execute(
-                    """
-                    UPDATE sync_checkpoints SET
-                        next_token = ?, pages_fetched = pages_fetched + 1,
-                        items_seen = items_seen + ?, items_new = items_new + ?,
-                        status = ?, completed_at = ?, updated_at = ?
-                    WHERE sync_checkpoint_id = ?
-                    """,
-                    (
-                        None if done else page.next_token, res.posts, res.new_posts,
-                        "completed" if done else "running",
-                        page.observed_at if done else None, page.observed_at, checkpoint_id,
-                    ),
-                )
+                raise
             report.pages += 1
             report.posts_seen += res.posts
             report.posts_new += res.new_posts
@@ -924,6 +992,12 @@ def sync_bookmarks(
             if page.is_last:
                 stop_reason = "end_of_list"
     except XError as exc:
+        cycled = getattr(exc, "page", None)
+        if isinstance(cycled, BookmarkPage):  # fetched and billed, then refused
+            _usage_alone(
+                conn, report, checkpoint_id=checkpoint_id, operation=OPERATION_BOOKMARKS,
+                resources=page_resources(cycled), pricing=pricing, occurred_at=cycled.observed_at,
+            )
         _finish(conn, checkpoint_id, report, "failed", clock, stop_reason="error",
                 error_code=exc.problem or type(exc).__name__, error_detail=str(exc))
         return report
@@ -1017,6 +1091,7 @@ __all__ = [
     "HIDDEN_LINK",
     "format_usd",
     "link_locator",
+    "page_resources",
     "post_text",
     "post_title",
     "sync_bookmarks",

@@ -433,7 +433,12 @@ def test_writer_crash_rolls_back_the_page_and_resume_completes(fresh_db, x_api) 
     cp = fresh_db.execute("SELECT * FROM sync_checkpoints").fetchone()
     assert (cp["status"], cp["next_token"], cp["pages_fetched"]) == ("failed", T3, 2)
     assert cp["error_code"] == "RuntimeError"
-    assert count(fresh_db, "usage_records") == 3
+    # me + pages 1-3: page 3 was fetched (billed) even though its write was rolled back.
+    usage = fresh_db.execute("SELECT * FROM usage_records ORDER BY usage_record_id").fetchall()
+    assert len(usage) == 4
+    assert usage[-1]["operation"] == "GET /2/users/:id/bookmarks"
+    assert usage[-1]["sync_checkpoint_id"] == cp["sync_checkpoint_id"]
+    assert usage[-1]["resource_count"] > 0
 
     # A killed process leaves "running": resume picks that up as well.
     fresh_db.execute("UPDATE sync_checkpoints SET status = 'running', error_code = NULL")
@@ -490,8 +495,58 @@ def test_page_budget_pauses_and_resume_continues(fresh_db, x_api) -> None:
 def test_resume_with_nothing_to_resume(fresh_db, x_api) -> None:
     x_api.get(BOOKMARKS).mock(side_effect=serve())
     run(fresh_db, FakeClock())
+    me_calls = len(_me_calls(x_api))
+    usage = count(fresh_db, "usage_records")
     with pytest.raises(NothingToResume):
         run(fresh_db, FakeClock(), resume=True)
+    # Refused from the DB alone: no billed /users/me call, nothing to record.
+    assert len(_me_calls(x_api)) == me_calls and count(fresh_db, "usage_records") == usage
+
+
+def _me_calls(mock) -> list:
+    return [c for c in mock.calls if c.request.url.path == "/2/users/me"]
+
+
+def test_rate_limited_resume_is_refused_before_users_me(fresh_db, x_api) -> None:
+    x_api.get(BOOKMARKS).mock(side_effect=serve({T2: [fx("error_429_rate_limit")]}))
+    run(fresh_db, FakeClock(), config=XConnectorConfig(max_rate_limit_waits=0))
+    me_calls, usage = len(_me_calls(x_api)), count(fresh_db, "usage_records")
+    with pytest.raises(NothingToResume, match="rate-limited"):
+        run(fresh_db, FakeClock(BASE + 1), resume=True)
+    assert len(_me_calls(x_api)) == me_calls and count(fresh_db, "usage_records") == usage
+
+
+def test_refusal_after_users_me_still_records_its_usage(fresh_db, x_api) -> None:
+    # An unfinished run of another account: only /users/me can tell it isn't ours.
+    fresh_db.execute(
+        "INSERT INTO sync_checkpoints (run_ulid, source, account_ref, collection, status, "
+        "config_json, started_at, updated_at) VALUES "
+        "('01JA0000000000000000000009', 'x', '9000000999', 'bookmarks', 'paused', '{}', ?, ?)",
+        (BASE, BASE),
+    )
+    fresh_db.commit()
+    with pytest.raises(NothingToResume):
+        run(fresh_db, FakeClock(), resume=True)
+    assert len(_me_calls(x_api)) == 1
+    usage = fresh_db.execute("SELECT * FROM usage_records").fetchall()
+    assert [(u["operation"], u["sync_checkpoint_id"], u["resource_count"]) for u in usage] == [
+        ("GET /2/users/me", None, 1)
+    ]
+
+
+def test_pagination_cycle_fails_the_run_and_records_the_billed_page(fresh_db, x_api) -> None:
+    page3 = json.loads((FIX / "bookmarks_page3.json").read_text(encoding="utf-8"))
+    page3["meta"]["next_token"] = T2  # T2 -> T3 -> T2: a loop
+    x_api.get(BOOKMARKS).mock(side_effect=serve({T3: [httpx.Response(200, json=page3)]}))
+    report = run(fresh_db, FakeClock())
+    assert report.status == "failed" and report.error_code == "pagination-cycle"
+    assert report.pages == 2
+    cp = fresh_db.execute("SELECT * FROM sync_checkpoints").fetchone()
+    assert (cp["status"], cp["next_token"], cp["error_code"]) == ("failed", T3, "pagination-cycle")
+    usage = [r["operation"] for r in fresh_db.execute("SELECT operation FROM usage_records")]
+    assert usage == ["GET /2/users/me"] + ["GET /2/users/:id/bookmarks"] * 3
+    total = fresh_db.execute("SELECT SUM(cost_micro_usd) FROM usage_records").fetchone()[0]
+    assert report.cost_micro_usd == total
 
 
 # ── Domain policy ───────────────────────────────────────────────────────
