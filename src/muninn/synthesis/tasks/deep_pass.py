@@ -11,8 +11,13 @@ Materials passed to the container:
 DB writes (in order, single transaction):
   1. UPDATE enriched SET summary, tags, entities, content_type, language,
      word_count, key_quotes, deep_pass_requested=0 (the request is now
-     served — clearing it drains the --pending queue), enrichment_model,
-     enrichment_prompt_version, content_hash, enriched_at
+     served — clearing it drains the --pending queue).
+     The per-bookmark idempotency triple (enrichment_model,
+     enrichment_prompt_version, content_hash) and enriched_at are left
+     alone: they record the bulk enrichment, and overwriting them made the
+     next `muninn enrich` re-enrich every deep-passed row (RI-01 D6). Only
+     when no enriched row exists yet does the INSERT record the deep pass's
+     own provenance, since the NOT NULL columns need a value.
   2. INSERT INTO cross_references with created_by='deep_pass' (skipped on
      UNIQUE conflict).
 """
@@ -125,7 +130,8 @@ def write_output(
 
     cur = conn.cursor()
 
-    # 1. Upsert enriched row. UPDATE the deep-pass-overridable columns.
+    # 1. Upsert enriched row. On conflict, UPDATE only the deep-pass
+    #    columns — never the idempotency triple or enriched_at (D6).
     cur.execute(
         """
         INSERT INTO enriched (
@@ -141,11 +147,7 @@ def write_output(
             language                  = excluded.language,
             word_count                = excluded.word_count,
             key_quotes                = excluded.key_quotes,
-            deep_pass_requested       = 0,
-            enrichment_model          = excluded.enrichment_model,
-            enrichment_prompt_version = excluded.enrichment_prompt_version,
-            content_hash              = excluded.content_hash,
-            enriched_at               = excluded.enriched_at
+            deep_pass_requested       = 0
         """,
         (
             bookmark_id,

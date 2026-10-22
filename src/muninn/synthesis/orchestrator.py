@@ -109,7 +109,8 @@ def run_deep_pass(
 
     Writes:
       - UPDATE enriched (summary, tags, entities, content_type, language,
-        word_count, key_quotes, deep_pass_requested=1)
+        word_count, key_quotes, deep_pass_requested=0); the enrichment
+        idempotency triple is preserved (see tasks/deep_pass.py)
       - INSERT cross_references (created_by='deep_pass')
     Verbatim quote check + cross-reference target FK validation are performed
     BEFORE any canonical-table write.
