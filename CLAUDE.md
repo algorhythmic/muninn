@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**The browser-bookmark pipeline is implemented** (commit `ab874cb`). It runs ingest → sanitize → dual-pass scrape → Haiku enrich → consumers (CLI, MCP, vault compiler, timeline, Parquet), plus synthesis scaffolding and a real test suite (438 tests on branch `adr-reset-x-first`, where `selectolax<1` is pinned).
+**The browser-bookmark pipeline is implemented** (commit `ab874cb`). It runs ingest → sanitize → dual-pass scrape → Haiku enrich → consumers (CLI, MCP, vault compiler, timeline, Parquet), plus synthesis scaffolding and a real test suite (438 tests on branch `adr-reset-x-first`, where `selectolax<1` is pinned; 858 on `x-slice`).
 
 **v1 is now X bookmarks first** (ADR-012). The code for every "Blocking v1" item is on branch `x-slice` (stacked on `adr-reset-x-first`), tested against synthetic fixtures only: the migrator, the X connector and sync writer, the `muninn-research-intake` 0.1.0-draft contract, suitability assessment, packet export, X vault pages and the search interface. What remains is operator-run: live X qualification (RI-02a, $5 cap), then the first real sync, assessment and recall check. The browser-bookmark bulk run is v1.1.
 
