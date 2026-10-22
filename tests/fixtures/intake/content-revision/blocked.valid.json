@@ -24,10 +24,10 @@
       "name": "muninn.scrape.extract",
       "version": "selectolax-0.4.13"
     },
-    "http_status": 403,
     "published_at": null,
     "retrieved_at": "2026-10-20T08:03:50Z",
     "observed_at": "2026-10-20T08:00:00Z",
+    "http_status": 403,
     "scrape_pass": "live",
     "final_locator": "https://paywalled.example.net/story/42"
   }

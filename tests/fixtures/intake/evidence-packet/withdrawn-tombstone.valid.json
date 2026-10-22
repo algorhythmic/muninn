@@ -16,7 +16,7 @@
     "status": "withdrawn",
     "packet_id": "01M5CFFNW0FQ053JHJZVCQNEDA",
     "revision": 1,
-    "digest": "8f2fd172b5573976a72eb7f1714280ee3c923e207862a91943cef27ae05af31e",
+    "digest": "792de934198f98a78dbb67cc50fa4d5f5238fbddc61bbc5d01c3951d8c59585a",
     "withdrawn_at": "2026-10-21T08:00:00Z",
     "withdrawal_reason": "operator_request"
   }

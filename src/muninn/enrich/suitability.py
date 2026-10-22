@@ -27,6 +27,17 @@ Rules (contract ``muninn-research-intake`` §4.6, RI-01 §3):
   ``deleted`` or ``empty`` revision cannot be ``candidate`` (schema and
   DDL). When neither the item nor any linked item has readable content,
   no call is made at all. Retrieval failures are never dispositions.
+* **Model-cited evidence**: the model may cite up to ``MAX_EVIDENCE``
+  verbatim excerpts, each naming the item it quotes and whether it
+  supports or contradicts the item's claim or relevance. Each citation is
+  checked before it is stored (``assessments.evidence_json``): the item
+  must be the subject or a linked item shown in this call (so never a
+  hidden one), it must have readable text, and the excerpt (at most
+  ``EVIDENCE_EXCERPT_MAX`` characters) must occur in that revision's
+  stored text, whitespace aside. A citation that fails is stripped and
+  counted (``evidence_dropped``); the judgement itself still stands. The
+  stored entry carries the cited revision's ``{ref, digest}``, filled in
+  by muninn, never by the model.
 * **Failure isolation**: output that fails validation is recorded as a
   failed outcome (its paid call still gets a usage row, with no
   assessment) and the run continues. API errors are counted; three in a
@@ -47,6 +58,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -59,12 +71,6 @@ from muninn.config import (
     SUITABILITY_PROMPT_VERSION,
 )
 from muninn.consumers.packets.canonical import new_ulid
-from muninn.consumers.packets.records import (
-    current_revision_row,
-    item_id_for,
-    iso,
-    revision_text,
-)
 from muninn.consumers.packets.schemas import schema_errors
 from muninn.db import transaction
 from muninn.enrich.haiku import _load_system_prompt, _parse_json_response
@@ -74,6 +80,12 @@ from muninn.enrich.pricing import (
     format_usd,
     price_for,
     worst_case_micro_usd,
+)
+from muninn.intake_records import (
+    current_revision_row,
+    export_item_id,
+    iso,
+    revision_text,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -94,6 +106,13 @@ CHILDREN_MAX_CHARS = 9_000
 MAX_CHILDREN = 8
 # Conservative chars-per-token for the pre-call worst-case estimate.
 CHARS_PER_TOKEN_BOUND = 3
+
+# Model-cited evidence limits (part of the policy version; the assessment
+# schema caps excerpts at 300 and notes at 500 characters, 8 entries).
+MAX_EVIDENCE = 6
+EVIDENCE_EXCERPT_MAX = 300
+EVIDENCE_NOTE_MAX = 500
+EVIDENCE_STANCES = ("supports", "contradicts")
 
 NO_CONTENT = frozenset({"blocked", "deleted", "empty"})
 DEFAULT_SOURCES = ("x",)
@@ -171,6 +190,8 @@ class SuitabilityRun:
     invalid_output: int = 0
     api_errors: int = 0
     cache_hits: int = 0
+    evidence_cited: int = 0
+    evidence_dropped: int = 0
     spent_micro_usd: int = 0
     estimated_micro_usd: int = 0
     stopped: str | None = None  # budget | api_errors
@@ -194,6 +215,8 @@ class SuitabilityRun:
             "invalid_output": self.invalid_output,
             "api_errors": self.api_errors,
             "cache_hits": self.cache_hits,
+            "evidence_cited": self.evidence_cited,
+            "evidence_dropped": self.evidence_dropped,
             "spent": format_usd(self.spent_micro_usd),
             "budget": format_usd(self.budget_micro_usd),
             "estimated_upper_bound": format_usd(self.estimated_micro_usd),
@@ -332,6 +355,89 @@ def _int_or_zero(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def _locate_excerpt(excerpt: str, text: str) -> str | None:
+    """The span of ``text`` the excerpt quotes: an exact substring, or the
+    same words with different whitespace (the stored span is returned)."""
+    if excerpt in text:
+        return excerpt
+    words = excerpt.split()
+    if not words:
+        return None
+    match = re.search(r"\s+".join(map(re.escape, words)), text)
+    return match.group(0) if match else None
+
+
+def validate_evidence(
+    raw: Any, context: Sequence[ContextItem]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Model-cited evidence → the entries to store, plus why others were dropped.
+
+    ``context`` is every item shown to the model in this call. An entry is
+    kept only if it names one of those items with readable text, its stance
+    is known, its note is short, and its excerpt occurs in that item's
+    revision text (see :func:`_locate_excerpt`). The revision reference is
+    taken from the context, never from the model. Reasons never quote the
+    rejected excerpt.
+    """
+    if raw is None:
+        return [], []
+    if not isinstance(raw, list):
+        return [], ["evidence is not an array"]
+    by_id = {c.item_id: c for c in context}
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for n, entry in enumerate(raw):
+        where = f"evidence[{n}]"
+        if len(kept) >= MAX_EVIDENCE:
+            dropped.append(f"{where}: more than {MAX_EVIDENCE} entries")
+            continue
+        if not isinstance(entry, dict):
+            dropped.append(f"{where}: not an object")
+            continue
+        cited = entry.get("item_id")
+        item = by_id.get(cited) if isinstance(cited, str) else None
+        if item is None:
+            dropped.append(f"{where}: cites an item that was not shown")
+            continue
+        text = revision_text(item.revision) if item.has_content else None
+        if not text:
+            dropped.append(f"{where}: cites an item with no readable text")
+            continue
+        stance = entry.get("stance")
+        if stance not in EVIDENCE_STANCES:
+            dropped.append(f"{where}: stance is not supports or contradicts")
+            continue
+        note = entry.get("note")
+        note = note.strip() if isinstance(note, str) else ""
+        if not note or len(note) > EVIDENCE_NOTE_MAX:
+            dropped.append(f"{where}: note is empty or longer than {EVIDENCE_NOTE_MAX} characters")
+            continue
+        excerpt = entry.get("excerpt")
+        excerpt = excerpt.strip() if isinstance(excerpt, str) else ""
+        span = _locate_excerpt(excerpt, text) if excerpt else None
+        if span is None:
+            dropped.append(f"{where}: excerpt does not occur in the cited text")
+            continue
+        if len(span) > EVIDENCE_EXCERPT_MAX:
+            dropped.append(f"{where}: excerpt is longer than {EVIDENCE_EXCERPT_MAX} characters")
+            continue
+        key = (item.item_id, stance, span)
+        if key in seen:
+            dropped.append(f"{where}: duplicate")
+            continue
+        seen.add(key)
+        rev = item.revision
+        kept.append({
+            "stance": stance,
+            "item_id": item.item_id,
+            "source": {"ref": rev["revision_ulid"], "digest": rev["content_sha256"]},
+            "excerpt": span,
+            "note": note,
+        })
+    return kept, dropped
+
+
 def build_assessment_record(
     data: Any,
     *,
@@ -342,10 +448,14 @@ def build_assessment_record(
     model: str,
     prompt_version: str,
     assessed_at: int,
+    children: Sequence[ContextItem] = (),
+    dropped: list[str] | None = None,
 ) -> tuple[dict[str, Any] | None, list[str]]:
     """The contract ``assessment`` for a model judgement, or the reasons it
     is invalid. ``prior_assessment`` is not part of the judgement and is
-    added when the row is written."""
+    added when the row is written. Evidence citations that fail
+    :func:`validate_evidence` are stripped (their reasons are appended to
+    ``dropped``) and do not invalidate the judgement."""
     if not isinstance(data, dict):
         return None, ["output is not a JSON object"]
     missing = [k for k in _JUDGEMENT_KEYS if k not in data]
@@ -370,6 +480,11 @@ def build_assessment_record(
         "unresolved_questions": data["unresolved_questions"],
         "assessed_at": iso(assessed_at),
     }
+    evidence, why = validate_evidence(data.get("evidence"), [subject, *children])
+    if dropped is not None:
+        dropped.extend(why)
+    if evidence:
+        record["evidence"] = evidence
     errors = schema_errors("assessment", record)
     if not errors:
         unknown = sorted(set(record["matched_interests"]) - profile.interest_ids)
@@ -400,9 +515,9 @@ def _insert_assessment(
             assessment_ulid, scrape_history_id, bookmark_id, item_ref, content_sha256,
             content_coverage, profile_sha256, policy_version, model, prompt_version,
             disposition, relevance, confidence, rationale, matched_interests,
-            unresolved_questions, prior_assessment_id, input_token_count,
+            unresolved_questions, evidence_json, prior_assessment_id, input_token_count,
             output_token_count, assessed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record["assessment_id"],
@@ -421,6 +536,7 @@ def _insert_assessment(
             record["rationale"],
             json.dumps(record["matched_interests"]),
             json.dumps(record["unresolved_questions"], ensure_ascii=False),
+            json.dumps(record["evidence"], ensure_ascii=False) if record.get("evidence") else None,
             prior["assessment_id"] if prior else None,
             usage.get("input_tokens"),
             usage.get("output_tokens"),
@@ -548,7 +664,7 @@ def assess_suitability(
             break
         run.selected += 1
         try:
-            item_id = item_id_for(row)
+            item_id = export_item_id(row)
         except ValueError:
             run.skipped_no_revision += 1
             run.outcomes.append(ItemOutcome(f"bookmark:{row['bookmark_id']}", "skipped_no_identity"))
@@ -647,6 +763,7 @@ def assess_suitability(
 
         errors: list[str]
         record: dict[str, Any] | None = None
+        dropped: list[str] = []
         if getattr(response, "stop_reason", None) == "max_tokens":
             errors = ["output truncated at max_tokens"]
         else:
@@ -664,6 +781,8 @@ def assess_suitability(
                     model=model,
                     prompt_version=prompt_version,
                     assessed_at=ts,
+                    children=call.children,
+                    dropped=dropped,
                 )
 
         with transaction(conn):
@@ -682,6 +801,10 @@ def assess_suitability(
             )
         else:
             run.assessed += 1
+            run.evidence_cited += len(record.get("evidence", ()))
+            run.evidence_dropped += len(dropped)
+            if dropped:
+                logger.warning("Suitability evidence for %s stripped: %s", item_id, "; ".join(dropped[:3]))
             run.outcomes.append(
                 ItemOutcome(item_id, "assessed", record["assessment_id"], record["disposition"], cost)
             )

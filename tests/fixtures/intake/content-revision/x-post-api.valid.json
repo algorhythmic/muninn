@@ -23,7 +23,6 @@
       "name": "muninn.ingest.x",
       "version": "0.1.0"
     },
-    "http_status": 200,
     "published_at": "2026-09-30T14:05:00Z",
     "retrieved_at": "2026-10-20T08:00:05Z",
     "observed_at": "2026-10-20T08:00:00Z",

@@ -14,8 +14,8 @@ import pytest
 from click.testing import CliRunner
 
 from muninn.consumers.cli.main import cli
-from muninn.consumers.packets import record_digest
-from muninn.consumers.packets.records import assessment_record, usage_record
+from muninn.consumers.packets import link_item_id, record_digest
+from muninn.intake_records import assessment_record, usage_record
 from muninn.consumers.packets.schemas import schema_errors
 from muninn.enrich.interest_profile import (
     EXAMPLE_PROFILE,
@@ -24,6 +24,7 @@ from muninn.enrich.interest_profile import (
 )
 from muninn.enrich.pricing import PRICES, cost_micro_usd, usd_to_micro
 from muninn.enrich.suitability import SuitabilityError, assess_suitability
+from muninn.sanitize import sanitize_url
 from tests.integration.intake_fakes import (
     PROFILE_V1,
     PROFILE_V2,
@@ -101,7 +102,7 @@ def test_assesses_selected_items_and_writes_contract_rows(corpus, profile) -> No
         assert (row["kind"], row["provider"], row["operation"], row["model"]) == ("model", "anthropic", "enrich:suitability", MODEL)
         assert row["cost_micro_usd"] == expected and row["cost_basis"] == "estimated"
         assert row["assessment_id"] is not None
-        assert schema_errors("usage-record", usage_record(corpus, row)) == []
+        assert schema_errors("usage-record", usage_record(row)) == []
     assert run.spent_micro_usd == 3 * expected
 
     # The profile revision is recorded, and every assessment is a valid record.
@@ -226,6 +227,94 @@ def test_truncated_output_is_a_failure(corpus, profile) -> None:
     trunc = response(judgement(), stop_reason="max_tokens")
     run = assess_suitability(corpus, profile, fake_client({A: trunc}, default=_safe_for_c), model=MODEL, now=T0 + 1000, limit=1)
     assert run.outcomes[0].status == "invalid_output" and "max_tokens" in run.outcomes[0].detail
+
+
+# ── Model-cited evidence ─────────────────────────────────────────────
+
+NOTES = link_item_id(sanitize_url("https://example.com/articles/notes?utm_source=twitter").sanitized_url)
+BLOCKED_LINK = link_item_id(sanitize_url("https://t.co/SynthB0003").sanitized_url)
+
+
+def _cite(item: str, excerpt: str, stance: str = "supports", note: str = "Shows a measured result.") -> dict:
+    return {"item_id": item, "stance": stance, "excerpt": excerpt, "note": note}
+
+
+def test_cited_evidence_is_verified_against_the_cited_revision(corpus, profile) -> None:
+    evidence = [
+        _cite(NOTES, "Hybrid retrieval improved recall at ten."),  # linked page, verbatim
+        _cite(A, "evaluating   retrieval\nover small corpora", "contradicts", "Scope is small corpora only."),
+        _cite(NOTES, "Hybrid retrieval doubled recall."),  # fabricated quote
+        _cite("x:post:1900000000000000099", "Synthetic thread"),  # an item that was not shown
+        _cite(BLOCKED_LINK, "Please log in"),  # blocked capture: nothing readable to cite
+        _cite(A, "Synthetic thread", "neutral"),  # unknown stance
+        _cite(A, "Synthetic thread", note="n" * 501),  # note too long
+        "not an object",
+        _cite(NOTES, "Hybrid retrieval improved recall at ten."),  # duplicate
+    ]
+    run = assess_suitability(corpus, profile, fake_client({A: judgement(evidence=evidence)}, default=_safe_for_c),
+                             model=MODEL, now=T0 + 1000, limit=1)
+    assert run.assessed == 1 and run.evidence_cited == 2 and run.evidence_dropped == 7
+    assert run.summary()["evidence_dropped"] == 7
+
+    row = corpus.execute("SELECT * FROM assessments WHERE item_ref = ?", (A,)).fetchone()
+    stored = json.loads(row["evidence_json"])
+    notes_rev = corpus.execute("SELECT * FROM scrape_history WHERE item_ref = ?", (NOTES,)).fetchone()
+    post_rev = corpus.execute("SELECT * FROM scrape_history WHERE scrape_history_id = ?", (row["scrape_history_id"],)).fetchone()
+    assert stored == [
+        {"stance": "supports", "item_id": NOTES, "excerpt": "Hybrid retrieval improved recall at ten.",
+         "note": "Shows a measured result.",
+         "source": {"ref": notes_rev["revision_ulid"], "digest": notes_rev["content_sha256"]}},
+        # Whitespace differences are tolerated; the stored excerpt is the revision's own span.
+        {"stance": "contradicts", "item_id": A, "excerpt": "evaluating retrieval over small corpora",
+         "note": "Scope is small corpora only.",
+         "source": {"ref": post_rev["revision_ulid"], "digest": post_rev["content_sha256"]}},
+    ]
+    rec = assessment_record(corpus, row)
+    assert rec["evidence"] == stored and schema_errors("assessment", rec) == []
+    for ev in stored:
+        assert ev["excerpt"] in corpus.execute(
+            "SELECT content_text FROM scrape_history WHERE revision_ulid = ?", (ev["source"]["ref"],)).fetchone()[0]
+
+
+def test_no_surviving_citation_stores_no_evidence(corpus, profile) -> None:
+    run = assess_suitability(
+        corpus, profile, fake_client({A: judgement(evidence=[_cite(NOTES, "invented words")])}, default=_safe_for_c),
+        model=MODEL, now=T0 + 1000, limit=1)
+    assert run.assessed == 1 and run.evidence_dropped == 1
+    row = corpus.execute("SELECT * FROM assessments WHERE item_ref = ?", (A,)).fetchone()
+    assert row["evidence_json"] is None and "evidence" not in assessment_record(corpus, row)
+    # Evidence that is not an array is ignored, not fatal.
+    run = assess_suitability(corpus, profile, fake_client(default=judgement(evidence="see above")),
+                             model=MODEL, now=T0 + 1000, sources=("x",), since=T0 + 350, until=T0 + 450)
+    assert run.assessed == 1 and run.evidence_dropped == 1
+
+
+def test_overlong_excerpt_is_dropped(corpus, profile) -> None:
+    from tests.integration.intake_seed import Seeded
+
+    post_b = corpus.execute("SELECT bookmark_id FROM bookmarks WHERE source_id = ?", (POST_B,)).fetchone()[0]
+    long_text = "Synthetic measurement " * 20  # > 300 characters once normalized
+    add_revision(corpus, Seeded(post_b, B), long_text, retrieval_method="x_api", retrieved_at=T0 + 900)
+    run = assess_suitability(
+        corpus, profile, fake_client({B: judgement(evidence=[_cite(B, long_text.strip())])}),
+        model=MODEL, now=T0 + 1000, sources=("x",), since=T0 + 350, until=T0 + 450)
+    assert run.assessed == 1 and run.evidence_cited == 0 and run.evidence_dropped == 1
+
+
+def test_hidden_linked_items_are_never_shown_or_citable(corpus, profile) -> None:
+    secret = "Synthetic private passage."
+    post_a = corpus.execute("SELECT bookmark_id FROM bookmarks WHERE source_id = ?", (POST_A,)).fetchone()[0]
+    from tests.integration.intake_seed import Seeded
+
+    hidden = seed_link(corpus, Seeded(post_a, A), position=3, unwound_url="https://private.example.net/doc",
+                       text=secret, retrieved_at=T0 + 540, content_visible=0)
+    client = fake_client({A: judgement(evidence=[_cite(hidden.item_id, secret)])})
+    run = assess_suitability(corpus, profile, client, model=MODEL, now=T0 + 1000, limit=1)
+    message = client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert secret not in message and hidden.item_id not in message
+    assert run.evidence_dropped == 1 and run.evidence_cited == 0
+    for (evidence,) in corpus.execute("SELECT evidence_json FROM assessments"):
+        assert evidence is None
 
 
 # ── Budget, limits, dry run ──────────────────────────────────────────

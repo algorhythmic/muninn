@@ -2,13 +2,15 @@
 
 Contract: muninn-research-intake, version 0.1.0-draft
 
-> **Status:** draft, written 2026-10-21 for roadmap item RI-03. It has not
-> been reviewed by the operator or by the Odin consumer side. The record
-> schemas are **validated**: their valid fixtures pass and their invalid
-> fixtures fail in muninn's own test run. Capture, assessment and the
-> exporter are **not implemented**; nothing here has run against live X
-> data, a model, or Odin. Section 12 gives the status of each part, and
-> section 14 lists every open question.
+> **Status:** draft, written 2026-10-21 for roadmap item RI-03 and amended
+> in place the same day (the draft was never released or applied to a real
+> database). It has not been reviewed by the operator or by the Odin
+> consumer side. The record schemas are **validated**: their valid fixtures
+> pass and their invalid fixtures fail in muninn's own test run. X capture,
+> content revisions, suitability assessment, the exporter and withdrawal
+> are **implemented** against synthetic fixtures and mocked clients only;
+> nothing here has run against live X data, a model, or Odin. Section 12
+> gives the status of each part, and section 14 lists every open question.
 
 **Producer.** Muninn, a standalone personal archive of saved material
 (public repository `github.com/algorhythmic/muninn`). This file is
@@ -48,8 +50,10 @@ the repository at the pinned commit.
 | `docs/contracts/MUNINN-RESEARCH-INTAKE-0.1.0-draft.sha256` | Release manifest: the sha256 of this file and of every schema and fixture (section 11) |
 
 Informative, not part of the consumer contract: `schemas/sql/002_research_intake.sql`
-(muninn's internal storage) and `src/muninn/consumers/packets/` (the
-reference implementation of the digest, identity and resolution rules).
+(muninn's internal storage), `src/muninn/intake_records.py` (the single
+mapping from internal rows to records) and `src/muninn/consumers/packets/`
+(the reference implementation of the digest, identity, resolution and
+withdrawal rules).
 
 ### What this contract is not
 
@@ -57,7 +61,8 @@ reference implementation of the digest, identity and resolution rules).
   decisions and the human review surface (RI-07) are Odin-owned.
 - It is not an API. Muninn exports files, and neither side reads the
   other's database.
-- It does not describe running software. The exporter is a stub.
+- It is not a manual for muninn's commands. Section 6.3 names the export
+  command only so that the files it writes can be traced.
 
 ## 1. Scope and boundary
 
@@ -85,6 +90,12 @@ applicability review, proposals and human decisions.
   `urn:muninn:research-intake:<record>:<MAJOR>.<MINOR>`, here `...:0.1`.
   Schemas reference each other by `$id`, so a validator needs all nine
   files loaded into one registry.
+- **Optional keys.** A key a schema requires is always present, and is
+  `null` where the schema allows null and the value is unknown (for
+  example `published_at`). A key a schema leaves optional is omitted when
+  there is no value; it is never written as `null`. The one exception is
+  `source-item.author`, where `null` states that the X API returned no
+  author, and absence means the item has no author at all.
 - **Numbers.** Integers only, within ±(2^53 − 1). There are no floats
   anywhere. Scores are integers 0–100, and money is integer micro-USD.
 - **Times.** ISO-8601 UTC, second precision, `Z` suffix
@@ -140,10 +151,11 @@ Each item has one typed export ID:
 
 | Item | `bookmarks.source` | `bookmarks.source_id` | Export `item_id` | Status |
 |---|---|---|---|---|
-| X post | `x` | post ID | `x:post:<id>` | validated |
-| X Article | `x_article` | article ID | `x:article:<id>` | **proposed** (open: RI-02a article body) |
-| GitHub repository | `x_link` | sha256 of the sanitized canonical locator | `github:repo:<owner>/<name>` | validated |
-| Web page | `x_link` | sha256 of the sanitized canonical locator | `web:<same sha256>` | validated |
+| X post | `x` | post ID | `x:post:<id>` | implemented |
+| X Article | `x_article` | article ID | `x:article:<id>` | implemented when the API names an article ID; the identity stays **proposed** (open: RI-02a article body, an article without an ID) |
+| GitHub repository | `x_link` | sha256 of the lowercase root locator `https://github.com/<owner>/<name>` | `github:repo:<owner>/<name>` | implemented |
+| Web page | `x_link` | sha256 of the sanitized canonical locator | `web:<same sha256>` | implemented |
+| Browser bookmark | `bookmarks_html` | the bookmark's own key | `web:` or `github:repo:` of its sanitized `url` | implemented (v1.1 lane) |
 
 Rules:
 
@@ -216,9 +228,9 @@ An explicit parent-to-child relation. The `relation` values are:
 
 `position` is the 0-based URL-entity index for `links_to`, and 0
 otherwise. `locator_resolution` is `unwound`, `expanded` or `short` for
-`links_to`, and `api_reference` for `quotes` and `replies_to`.
-`entity_status` is the HTTP status X reported on the entity, if any. The
-parent and child must differ.
+`links_to`, and `api_reference` for `quotes`, `replies_to` and
+`article`. `entity_status` is the HTTP status X reported on the entity,
+omitted when X reported none. The parent and child must differ.
 
 ### 4.3 bookmark-observation
 
@@ -253,8 +265,12 @@ One distinct captured content state of an item. Rules:
   `archive`. An archive revision must carry `archive_snapshot_at`. Research
   selection uses current revisions; historical ones are comparisons only.
 - `extractor` names the extractor and its version.
+- `http_status` is omitted when there was no HTTP fetch (X API revisions),
+  and `final_locator` when it is the item's own locator.
 - `text` is optional. When present it is the normalized text, and its
-  sha256 equals `content_sha256`.
+  sha256 equals `content_sha256`. Muninn includes it only for a readable
+  (`full` or `partial`), non-withdrawn revision whose stored text still
+  matches its digest.
 
 ### 4.5 interest-profile
 
@@ -281,11 +297,28 @@ One append-only suitability judgement.
 - **Coverage** of the assessed revision is copied into the assessment, so
   the judgement always shows how much content it saw. An assessment of a
   `blocked`, `deleted` or `empty` revision may not be `candidate`. This
-  rule is **proposed** here, and it is enforced by both the schema and the
-  database.
+  rule is implemented: the schema and the database both reject such an
+  assessment, and the suitability task makes no model call at all when
+  neither the item nor any of its linked items has readable content.
 - `relevance` and `confidence` are integers from 0 to 100.
   `matched_interests` are `interest_id` values from the referenced profile
   revision.
+- **Evidence** (optional, 1–8 entries, omitted when there is none) is the
+  model's own citations. Each entry has a `stance` (`supports` or
+  `contradicts` the item's claim or its relevance), the cited `item_id`, a
+  `source` `{ref, digest}` to that item's content revision, a verbatim
+  `excerpt` of at most 300 characters and a `note` of at most 500
+  characters. Muninn, not the model, fills in `source`, and stores an
+  entry only if:
+  - the cited item is the assessed item or one of the linked items shown
+    to the model in that call (hidden items are never shown, so they can
+    never be cited);
+  - the cited revision has readable text;
+  - the excerpt occurs in that revision's stored normalized text (a quote
+    that differs only in whitespace is replaced by the stored span).
+
+  Other citations are dropped, not repaired, and the judgement itself
+  still stands.
 
 ### 4.7 evidence-packet
 
@@ -341,7 +374,16 @@ It also carries:
   qualified the packet
 - `evidence.supporting` and `evidence.contradictory`. Each entry is a
   statement plus a `{ref, digest}` to a content revision, with an optional
-  verbatim `excerpt`.
+  verbatim `excerpt`. They are drawn from the latest included assessment
+  of each item (for the subject, the primary assessment). When that
+  assessment carries model-cited `evidence` (section 4.6), each of its
+  entries becomes one packet entry: `supports` goes to `supporting` and
+  `contradicts` to `contradictory`, the `note` is the statement, and the
+  excerpt and source are kept. Otherwise the assessment contributes one
+  statement derived from its judgement (disposition, scores, coverage and
+  rationale), with no excerpt: supporting for `candidate` and
+  `reference_only`, contradictory for `rejected`, and none for the other
+  dispositions.
 - `repository_revisions`: the GitHub items and commit SHAs inspected
 - `unresolved_questions`
 - optionally, `usage`
@@ -353,11 +395,20 @@ implementation):
 - Each assessment's `item_id` and `coverage` equal those of its revision.
 - `matched_interests` belong to the referenced profile revision.
 - Included `text` is normalized and matches its digest.
-- An `excerpt` occurs in its revision's text.
+- Every `excerpt`, in the packet's evidence and in each assessment's
+  evidence, occurs in the text of the revision it cites, and the packet
+  includes that text.
+- Each assessment evidence entry cites an item in `items`, and its source
+  revision belongs to that item.
 - The subject and every link endpoint are in `items`.
 
 Excluded content: items the operator has hidden (`content_visible = 0`)
-are never exported.
+are never exported, and neither is a withdrawn content revision. An
+assessment whose evidence cites an item the packet does not include (it
+was hidden or unlinked after the assessment) or a revision that has been
+withdrawn is left out of the packet. If that assessment is the primary
+one, the subject is not exported until it is reassessed, so an excerpt of
+hidden content never reaches a packet.
 
 ### 6.2 Revisions
 
@@ -386,10 +437,30 @@ Resolving `{ref: "<packet_id>@<n>", digest}` works as follows:
 Muninn also keeps each exported packet in its `evidence_packets` table, so
 a lost file can be re-materialized byte-for-byte.
 
-Planned CLI (**proposed**; registered with the exporter):
+The exporter's command (**implemented**):
 
-    muninn export packets [--out DIR] [--item ITEM_ID]... [--since DATE] [--limit N] [--dry-run]
+    muninn export packets [--out DIR] [--item ITEM_ID]... [--since DATE]
+                          [--disposition DISPOSITION]... [--limit N] [--dry-run]
     muninn export packets --withdraw PACKET_ID@REVISION --reason REASON
+
+- `--out` defaults to `$MUNINN_PACKETS_DIR`, else `<data dir>/packets`.
+- `--item` and `--since` narrow the subjects. `--since` applies to the
+  primary assessment's time.
+- `--disposition` (repeatable) names the primary-assessment dispositions
+  to export. The default is `candidate` alone.
+- `--limit` caps the number of subjects.
+- `--dry-run` builds and validates every packet, reports the withdrawals
+  that are due, and writes nothing.
+- `--withdraw` withdraws one packet revision with the given reason
+  (section 7). It takes no other selection option.
+
+Every run that is not a dry run first applies the withdrawal sweep of
+section 7 to all active packets, whatever the selection. It reports the
+withdrawn references, a count per reason and the number of content
+revisions withdrawn, then exports. A packet carries model-cited evidence
+only through its assessments' `evidence` field (section 4.6) and the
+packet `evidence` entries drawn from it (section 6.1). No separate
+evidence file is exported.
 
 ## 7. Withdrawal and tombstones
 
@@ -410,7 +481,29 @@ and a tombstone takes its place:
 - Withdrawing one revision does not withdraw the others; each needs its own
   tombstone.
 - The underlying content revisions are withdrawn the same way (content
-  cleared, row kept).
+  cleared, `withdrawn_at` and `withdrawal_reason` set, row kept) when the
+  reason removes the material itself, unless another active packet still
+  references the revision:
+  - `source_deleted`: the packet's revisions of the items whose source row
+    is gone;
+  - `retention`: every revision the packet carries.
+
+  `policy_hidden` and `operator_request` keep the content revisions. The
+  material is still muninn's; it is only no longer exported.
+
+Withdrawal is automatic (**implemented**). Each export run starts by
+checking every active packet revision against muninn's current rows:
+
+- If any item in the packet no longer has a source row, the revision is
+  withdrawn with `source_deleted`.
+- Otherwise, if any item in it is hidden (`content_visible = 0`), the
+  revision is withdrawn with `policy_hidden`.
+
+A subject whose latest packet revision was withdrawn is exported again
+only after an assessment newer than the withdrawal, and then as revision
+n + 1 whose `previous_revision` points at the tombstoned revision.
+`operator_request` and `retention` are applied by the operator
+(`--withdraw`).
 
 ## 8. Times and freshness
 
@@ -432,7 +525,11 @@ browser-bookmark lane keeps its at-capture-first behaviour unchanged.
   `usage-record.operation` is a template, so it cannot carry them.
 - X OAuth tokens are stored outside the database. The sync-checkpoint
   table stores only the opaque pagination cursor.
-- Hidden items (`content_visible = 0`) are never exported.
+- Hidden items (`content_visible = 0`) are never exported. They are never
+  shown to the model either, so no assessment can quote them. An
+  assessment that quoted an item before it was hidden is left out of
+  every later packet (section 6.1), and the packets that already contain
+  the item are withdrawn (section 7).
 - A canary test plants a synthetic secret in raw connector inputs
   (`tests/fixtures/intake/canary/raw-inputs.json`). It asserts that the
   secret appears in no valid fixture, no schema, and not in this file, and
@@ -453,10 +550,14 @@ seven STRICT tables and alters nothing that 001 created:
 - `sync_checkpoints`
 - `usage_records`
 
-It contains no transaction control, because the migrator wraps it. It has
-been applied to a 001 database in tests, with the existing tables, indexes
-and rows unchanged and the integrity and foreign-key checks passing. No
-runtime path applies it yet.
+It contains no transaction control, because the migrator wraps it. In
+tests it has been applied to a 001 database, with the existing tables,
+indexes and rows unchanged and the integrity and foreign-key checks
+passing. `muninn db migrate` applies it at runtime, but it has not yet
+been applied to any real database. That is why it could still be amended
+in place: `assessments.evidence_json` (the assessment record's
+`evidence`, NULL when there is none, with a `json_valid` CHECK) was added
+that way.
 
 The two design points RI-01 left open are settled as follows, without any
 table rebuild:
@@ -490,15 +591,22 @@ table rebuild:
    Deleted or blocked posts keep their earlier revisions, and their
    current row records the failure.
 
-Text from the X API is normalized with `muninn-text/1`. Each `t.co` link
-in the text is replaced by its entity's canonical locator, or left as-is
-when sanitization rejects every candidate (**proposed**).
+Text from the X API is normalized with `muninn-text/1` (**implemented**).
+Each `t.co` link in the text is handled in one of three ways:
 
-### 10.1 X adapter mapping (informative, for RI-04)
+- it is replaced by its entity's canonical locator;
+- it is left as-is when sanitization rejects every candidate;
+- it is replaced by the literal `[hidden link]` when domain policy hides
+  the destination, so a hidden locator never reaches the stored text, the
+  full-text index or a model.
 
-The X connector maps an X API v2 bookmarks response as follows. The field
-names follow the documented response shapes, and items marked open depend
-on RI-02a.
+### 10.1 X adapter mapping (informative, implemented by RI-04)
+
+`muninn ingest x` maps an X API v2 bookmarks response as follows. The
+field names follow the documented response shapes. Items marked open
+depend on RI-02a live qualification. The code is in
+`src/muninn/ingest/x_store.py`, and the rows map to records through
+`src/muninn/intake_records.py`.
 
 | X response field | Internal | Contract record field |
 |---|---|---|
@@ -510,7 +618,7 @@ on RI-02a.
 | `data[].entities.urls[i]` (`url`, `expanded_url`, `unwound_url`, `status`) | `bookmarks(source='x_link', source_id=sha256(locator))` + `item_links(relation='links_to', position=i)` | `item-link` (`locator_resolution`, `entity_status`); child `source-item` |
 | URL entity that is an X post URL | `item_links` to that post's `x:post` item (not a `web:` item) | `item-link.child_item_id` = `x:post:<id>` |
 | `data[].referenced_tweets[]` (`quoted`, `replied_to`) | `item_links(relation='quotes' or 'replies_to')` | `locator_resolution` = `api_reference` |
-| `data[].article` (shape and body open) | `bookmarks(source='x_article')` + `item_links(relation='article')` | `x:article:<id>` (proposed) |
+| `data[].article` with an article ID (shape and body open) | `bookmarks(source='x_article', url='https://x.com/i/article/<id>')` + `item_links(relation='article')`; body → coverage `full`, preview text only → `partial` | `x:article:<id>` (proposed), `locator_resolution` = `api_reference` |
 | `errors[]` type `resource-not-found` for a bookmarked ID | `scrape_history` coverage `deleted`; `scrape_results.scrape_status = 'failed'` | `content-revision.coverage` = `deleted` |
 | `errors[]` type `not-authorized-for-resource` or `resource-unavailable` | `scrape_history` coverage `blocked`; `scrape_results.scrape_status = 'auth_required'` | `content-revision.coverage` = `blocked` |
 | first sync that sees the ID | `bookmarks.captured_at` | `bookmark-observation.observed_at` (`first_seen_by_sync`) |
@@ -519,16 +627,82 @@ on RI-02a.
 | the run itself | `sync_checkpoints` (`run_ulid`, `source='x'`, `account_ref` = user ID from `/2/users/me`, `collection` = `bookmarks` or `bookmark_folder:<id>`, `status`, `next_token`, `pages_fetched`, `items_seen`, `items_new`, `resume_after` from `x-rate-limit-reset`, `error_code`, `config_json`) | `sync_run_id` |
 | each page fetched | `usage_records(kind='x_api', operation='GET /2/users/:id/bookmarks', resource_count, cost_micro_usd, cost_basis='estimated')` | `usage-record` |
 
+Conventions the writer implements:
+
+- **Bookmarked or referenced.** Every X post is a `source='x'` row,
+  including posts that a bookmarked post quotes, replies to or links.
+  `source_metadata.bookmarked` is `true` for the operator's bookmarks and
+  `false` for posts written only as references. Only bookmarked posts
+  produce a `bookmark-observation`. A referenced post that is later
+  bookmarked is promoted: `bookmarked` becomes `true`, and `captured_at`
+  becomes that sync's time.
+- **Metadata keys** in `source_metadata`, never the text:
+  - `author`: `{id, username, name}`, the X API's own names, which map to
+    `{platform_id, handle, display_name}` in the record. It is `null` when
+    the API returned no author.
+  - `published_at`: epoch seconds, an integer.
+  - `lang`, `conversation_id`, `possibly_sensitive`, `is_long_post`.
+  - `media_keys`: a list, which may be empty; `x_post.has_media` is true
+    when it is non-empty.
+  - `referenced`: `[{type, id}]`.
+  - `article`: `{id, title, has_body}`.
+  - `first_sync_run_id` (the `bookmark-observation.sync_run_id`),
+    `last_sync_run_id`, `last_observed_at` and `list_position`.
+- **Post title.** `@username: <text>`, where `<text>` is the post's
+  normalized text with whitespace collapsed. When it is longer than 80
+  characters it is cut to its first 79 and ended with `…`. The title is
+  just `@username` when the post has no text, and the text alone when the
+  author is unknown. Titles make handles keyword-searchable.
+- **Post locator.** `https://x.com/<username>/status/<id>`, or
+  `https://x.com/i/web/status/<id>` when the handle is unknown.
+- **GitHub repositories.** A repository's canonical locator is its
+  lowercase root `https://github.com/<owner>/<name>`, whatever case,
+  `.git` or trailing slash the link used. So one repository is one
+  `x_link` row, and that row's `source_id` is the sha256 of this root.
+  `source_metadata.item_id` records the export ID.
+- **Resolution.** `locator_resolution` is the URL-entity field that gave
+  the locator (`unwound`, `expanded` or `short`) for `links_to`, and
+  `api_reference` for `quotes`, `replies_to` and `article`, which are
+  referenced by ID.
+- **Hidden content.** Domain policy sets `content_visible` on every row
+  exactly as it does for browser bookmarks, and re-applies it on every
+  sync. A hidden post or article gets no text revision and no current
+  text. A hidden link destination inside another post's text becomes
+  `[hidden link]` (section 10).
+- **Browser bookmarks** (`muninn scrape`, the v1.1 lane) get content
+  revisions too. They are keyed by the page's `web:` or `github:repo:`
+  identity, so a page bookmarked in the browser and linked from X shares
+  one item, and their `observed_at` is the bookmark's `ADD_DATE`
+  (`captured_at`). `muninn scrape` skips `x` and `x_article` rows.
+
 Sync status values:
 
-- `paused`: rate-limited and resumable
+- `running`: in progress, or interrupted before it could close
+- `paused`: rate-limited (`resume_after` set) or stopped at the page
+  budget; resumable from `next_token`
 - `exhausted`: `usage-capped`, a hard stop
-- `failed`
-- `completed`: only when no `next_token` is returned
+- `failed`: an error, with `error_code` set
+- `completed`: the run ended normally, and `next_token` is cleared
 
-`config_json` holds `max_results`, the accepted field-name spelling
-(`tweet.fields` or `post.fields`) and the item cap (historically 800), as
-configuration rather than constants.
+A run completes in either of two ways. In the first, X returned no
+`next_token`: the end of the list was reached. In the second, an
+incremental run reached a page on which every post was already a known
+bookmark. It stops there, without fetching further pages, as `completed`
+with `config_json.stop_reason = "caught_up"`. Each closed run records its
+`stop_reason` in `config_json`: `end_of_list`, `caught_up`,
+`rate_limited`, `page_budget`, `usage_capped` or `error`. It also records
+`cap_reached: true` when the history cap was hit.
+
+`config_json` also holds the run's configuration rather than constants:
+
+- `max_results`
+- `post_fields_param`, the accepted field-name spelling (`tweet.fields`
+  or `post.fields`)
+- `includes_posts_key`
+- `bookmark_cap`, the item cap (historically 800)
+- `mode` (`full` or `incremental`)
+- `max_pages`
+- `price_micro_usd_per_resource`
 
 ## 11. Compatibility policy
 
@@ -565,7 +739,7 @@ configuration rather than constants.
 
 | Version | Date | Status | Manifest | Notes |
 |---|---|---|---|---|
-| 0.1.0-draft | 2026-10-21 | draft, unreleased: schemas validated; exporter, capture and assessment not implemented | `docs/contracts/MUNINN-RESEARCH-INTAKE-0.1.0-draft.sha256` | First draft (RI-03). Open questions in section 14 |
+| 0.1.0-draft | 2026-10-21 | draft, unreleased: schemas validated; capture, revisions, assessment, exporter and withdrawal implemented on synthetic data | `docs/contracts/MUNINN-RESEARCH-INTAKE-0.1.0-draft.sha256` | First draft (RI-03). Amended in place before release: assessment `evidence`, the optional-key convention (null removed from the optional `entity_status`, `http_status` and `final_locator`), automatic withdrawal, and the section 10.1 conventions. Open questions in section 14 |
 
 ## 12. Status by part
 
@@ -573,11 +747,20 @@ configuration rather than constants.
 |---|---|---|
 | Record schemas and fixtures (section 4) | validated | `tests/unit/test_intake_schemas.py` |
 | Canonical JSON, digests, ULIDs, item IDs, text normalization | implemented | `src/muninn/consumers/packets/canonical.py`; same tests |
-| Packet file writing, withdrawal, resolution, integrity checks | implemented (library only; no CLI) | `src/muninn/consumers/packets/export.py`; same tests |
-| Draft 002 storage | validated (applies additively; constraints tested) | `tests/unit/test_intake_migration.py`; no runtime writer |
-| `export_packets` (database to packets), `muninn export packets` | proposed | interface stub raises `NotImplementedError` |
-| X capture (`muninn ingest x`), suitability assessment | proposed | RI-04, RI-05 |
-| No-candidate-without-content rule; `x:article` identity; t.co replacement in post text | proposed | specified here; schema and DDL enforce the first |
+| Row-to-record mapping, optional-key convention | implemented | `src/muninn/intake_records.py`; `tests/unit/test_intake_records.py` |
+| Draft 002 storage | implemented (`muninn db migrate`; applied to no real database yet) | `tests/unit/test_intake_migration.py`, `tests/integration/test_migrations.py` |
+| X capture (`muninn ingest x`): items, links, observations, sync runs, usage (section 10.1) | implemented against synthetic X responses; not run against live X | `tests/integration/test_x_sync.py`, `tests/integration/test_cli_x.py` |
+| Content revisions (`scrape_history`) from X and `muninn scrape` | implemented | `tests/integration/test_scrape_history.py`, `tests/integration/test_x_sync.py` |
+| t.co replacement and `[hidden link]` in post text | implemented | `tests/integration/test_x_sync.py` |
+| Suitability assessment (`muninn enrich --task suitability`), with budget and idempotency | implemented with a mocked model client; never run against a model | `tests/integration/test_suitability.py` |
+| Model-cited assessment evidence and excerpt verification | implemented with a mocked model client | `tests/integration/test_suitability.py`, `tests/integration/test_packet_export.py` |
+| No candidate without content | implemented (schema, DDL and no call without readable content) | `tests/integration/test_suitability.py`, `tests/unit/test_intake_migration.py` |
+| Exporter (`muninn export packets`): selection, revisions, re-materialization, integrity checks | implemented | `tests/integration/test_packet_export.py` |
+| Tombstones, resolution, manual and automatic withdrawal, content-revision withdrawal | implemented | `tests/integration/test_packet_export.py`, `tests/unit/test_intake_schemas.py` |
+| `x:article` identity and article coverage | proposed (written when the API names an ID; open: RI-02a) | `tests/integration/test_x_sync.py` |
+| `repository_revisions` (inspected commits) | proposed (always empty: nothing inspects commits yet) | none |
+| Folder capture (`folder_ids`, `bookmark_folder:<id>` collections) | proposed (open: RI-02a) | none |
+| Odin consumption | proposed | none |
 
 ## 13. Producer conformance checks
 
@@ -593,15 +776,23 @@ These run in muninn's test suite, offline and without credentials:
    - a changed-profile reassessment
    - an old packet revision that still resolves after a newer one
    - blocked and partial captures assessed with coverage shown
+   - model-cited supporting and contradicting assessment evidence
    - a withdrawn-packet tombstone
    - the canary
-4. Packet integrity rules, digest stability, and file sha256 equal to the
-   packet digest.
+4. Packet integrity rules (including the excerpts and items that
+   assessment evidence cites), digest stability, and file sha256 equal to
+   the packet digest.
 5. 002 applies to a 001 database without changing it, and its
    append-only, coverage, disposition and SET NULL rules hold.
-6. The packets package imports no heavy dependency (Qdrant, embeddings,
-   DuckDB, Parquet, MCP, Jinja, the model SDK, the HTTP client).
+6. The packets package and the row-to-record mapping import no heavy
+   dependency (Qdrant, embeddings, DuckDB, Parquet, MCP, Jinja, the model
+   SDK, the HTTP client).
 7. The release manifest matches the files.
+8. Packets built from the database validate. Hidden items, their text and
+   any excerpt of them are never exported, nor is the canary. Fabricated
+   or out-of-scope citations are dropped before they are stored. Deleted
+   or hidden material withdraws every active packet revision that
+   contains it.
 
 ## 14. Open questions
 
@@ -625,6 +816,11 @@ or the rules informative:
 - Whether the full X Article body is returned. This determines whether
   the `x:article` item and its revisions are real, and what an
   article-only coverage means.
+- **An article without an ID.** When the API reports an article but gives
+  no article ID, and no URL entity names one, no `x:article` item is
+  written. Only `source_metadata.article` (`id: null`, `title`,
+  `has_body`) on the post records it, and the body is not captured.
+  Whether such articles need an identity of their own is open.
 - Bookmark-folder semantics and billing (`folder_ids`).
 - Retrievable history depth (the historical 800 cap) and list ordering
   (`list_position`).
@@ -632,15 +828,19 @@ or the rules informative:
   `data`, in `errors`, or not at all. This affects the `errors[]` mapping
   in section 10.1.
 - Whether `note_tweet` is returned for long posts.
-- Whether expansions (`includes.users`) are billed separately
-  (`usage-record.resource_count`).
+- **Whether X bills expansions.** The writer counts every post in `data`,
+  plus every included post and user, as a billed resource
+  (`usage-record.resource_count`, and so the estimated cost). If
+  expansions (`includes.users`, `includes.tweets`) are not billed
+  separately, this overstates the cost.
 
 Design questions for review:
 
 - Whether `sanitize_url` redaction needs a rule identifier for audit. 0.1
   records names and flags only.
 - Un-bookmark detection. 0.1 records `last_observed_at` only. Whether a
-  removed bookmark should withdraw packets is open.
+  removed bookmark should withdraw packets is open. The withdrawal sweep
+  (section 7) acts only on deleted rows and hidden items.
 - A dedicated `enrichment_source = 'x_api'` value, deferred until a
   `bookmarks` rebuild is needed for another reason (section 10).
 - Database-enforced append-only behaviour (triggers), deferred until the
@@ -648,6 +848,25 @@ Design questions for review:
   it in the application, plus foreign keys and CHECKs.
 - Retweet references (`referenced_tweets` type `retweeted`) are not
   modelled.
-- The A-to-B-to-A revision limitation (section 5).
+- **The revision key leaves out the retrieval method.** It is
+  `(item_id, content_sha256, coverage)`, a content-addressed set
+  (section 5), and this has three consequences:
+  - Content that goes from A to B and back to A creates no third
+    revision, and A keeps its first `retrieved_at`.
+  - A live capture and an archive capture with identical text share one
+    revision, whichever was written first. `muninn scrape` writes the live
+    pass first, so the shared revision is normally `current`. But an
+    archive capture recorded before any live capture of the same text
+    stays `historical`, and the item then has no current revision for
+    that text.
+  - A withdrawn revision cannot come back. Re-fetching identical content
+    hits the key and stays withdrawn.
+- **Locators that policy hides later.** Domain policy is applied at write
+  time. Hiding a domain later hides the items on it (and the sweep
+  withdraws their packets). But a visible post that links to the domain
+  keeps the locator in its stored title and in its earlier text
+  revisions. Its next capture writes a new revision with `[hidden link]`,
+  and the title is not rewritten. Whether to rewrite or withdraw such
+  titles and revisions is open.
 - Odin's `SNAPSHOT.schema.json` hard-codes the producer `saga`. Odin must
   generalize it before it can pin this contract. That is Odin's task.

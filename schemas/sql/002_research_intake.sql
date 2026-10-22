@@ -130,6 +130,10 @@ CREATE INDEX idx_interest_profiles_id ON interest_profiles (profile_id);
 -- changed profile or policy appends a new row and leaves earlier rows in
 -- place. Disposition is a judgement, never a retrieval state, and a
 -- capture with no readable content cannot be a candidate.
+-- evidence_json is the model-cited evidence (the assessment record's
+-- evidence array), NULL when no citation survived validation. Every
+-- excerpt was checked against the cited revision's stored text before the
+-- row was written.
 -- scrape_history_id has no ON DELETE action: an assessed revision cannot
 -- be deleted, only withdrawn.
 CREATE TABLE assessments (
@@ -150,6 +154,7 @@ CREATE TABLE assessments (
     rationale           TEXT    NOT NULL,
     matched_interests   TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(matched_interests)),
     unresolved_questions TEXT   NOT NULL DEFAULT '[]' CHECK (json_valid(unresolved_questions)),
+    evidence_json       TEXT    CHECK (evidence_json IS NULL OR json_valid(evidence_json)),
     prior_assessment_id INTEGER REFERENCES assessments (assessment_id),
     input_token_count   INTEGER,
     output_token_count  INTEGER,

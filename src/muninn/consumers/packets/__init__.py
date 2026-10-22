@@ -3,8 +3,9 @@
 Stdlib-only: importing this package must not pull in Qdrant, embeddings,
 DuckDB, Parquet, MCP or Jinja (ADR-009); ``jsonschema`` is imported only
 when a record is validated. See ``canonical`` for the digest and identity
-rules, ``records`` for the database-row to record mappings, ``schemas``
-for validation and ``export`` for the exporter.
+rules, ``schemas`` for validation and ``export`` for the exporter. The
+database-row to record mappings live in :mod:`muninn.intake_records`,
+shared with the writers and the suitability task.
 """
 
 from muninn.consumers.packets.canonical import (
@@ -27,8 +28,10 @@ from muninn.consumers.packets.export import (
     CONTRACT_NAME,
     CONTRACT_VERSION,
     WITHDRAWAL_REASONS,
+    DueWithdrawal,
     ExportedPacket,
     ExportRun,
+    PacketNotExportable,
     PacketResolution,
     build_packet,
     export_packets,
@@ -40,6 +43,7 @@ from muninn.consumers.packets.export import (
     resolve_packet,
     withdraw_exported_packet,
     withdraw_packet,
+    withdrawals_due,
     write_packet,
 )
 
@@ -49,8 +53,10 @@ __all__ = [
     "TEXT_NORMALIZATION",
     "WITHDRAWAL_REASONS",
     "CanonicalizationError",
+    "DueWithdrawal",
     "ExportRun",
     "ExportedPacket",
+    "PacketNotExportable",
     "PacketResolution",
     "build_packet",
     "canonical_json",
@@ -72,6 +78,7 @@ __all__ = [
     "sha256_hex",
     "withdraw_exported_packet",
     "withdraw_packet",
+    "withdrawals_due",
     "write_packet",
     "x_article_item_id",
     "x_post_item_id",

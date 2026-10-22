@@ -23,10 +23,10 @@
       "name": "muninn.scrape.extract",
       "version": "selectolax-0.4.13"
     },
-    "http_status": 200,
     "published_at": "2026-09-28T00:00:00Z",
     "retrieved_at": "2026-10-20T08:03:10Z",
     "observed_at": "2026-10-20T08:00:00Z",
+    "http_status": 200,
     "scrape_pass": "live",
     "text": "Synthetic notes on retrieval evaluation.\n\nWe compare BM25, dense and hybrid retrieval on a ten-thousand-document synthetic corpus. Hybrid retrieval improved recall at ten by a wide margin.\n\nMethod: fixed query set, judged by two annotators."
   }

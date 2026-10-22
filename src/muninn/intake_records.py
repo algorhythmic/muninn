@@ -1,28 +1,45 @@
 """Map stage-native rows onto muninn-research-intake 0.1 contract records.
 
-Neutral ground between the writers (``muninn ingest x``, ``muninn scrape``)
-and the readers (the packet exporter): one place that knows how a
-``bookmarks`` / ``item_links`` / ``scrape_history`` / ``usage_records`` row
-becomes a ``source-item`` / ``item-link`` / ``content-revision`` /
-``bookmark-observation`` / ``usage-record`` dict, per
+The one implementation of the row-to-record mapping, shared by the writers
+(``muninn ingest x``, ``muninn scrape``), the suitability task and the
+packet exporter: how a ``bookmarks`` / ``item_links`` / ``scrape_history`` /
+``assessments`` / ``usage_records`` row becomes a ``source-item`` /
+``item-link`` / ``bookmark-observation`` / ``content-revision`` /
+``assessment`` / ``usage-record`` dict, per
 ``docs/contracts/MUNINN-RESEARCH-INTAKE.md`` §3, §4 and §10.1.
+
+Optional keys: a key the schema *requires* is always present, null where
+the schema allows null and the value is unknown. A key the schema leaves
+*optional* is omitted when there is no value, and never written as null.
+The one exception is ``source-item.author``, where null is a stated fact
+(the X API returned no author) and absence means the item has no author.
 
 Stdlib only (plus the stdlib-only packets canonical module), so any stage
 may import it. Rows may be ``sqlite3.Row`` or plain mappings. Times in the
 database are epoch seconds; records carry ISO-8601 UTC with a ``Z``.
 
 The functions build records; they do not validate them. Tests validate the
-output against ``schemas/json/intake/``.
+output against ``schemas/json/intake/``, and the exporter validates every
+packet before it writes it.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from muninn.consumers.packets.canonical import link_item_id, x_article_item_id, x_post_item_id
+from muninn.consumers.packets.canonical import (
+    content_digest,
+    is_ulid,
+    link_item_id,
+    normalize_text,
+    record_digest,
+    x_article_item_id,
+    x_post_item_id,
+)
 
 # bookmarks.source values written by the X adapter.
 SOURCE_X_POST = "x"
@@ -31,17 +48,43 @@ SOURCE_X_LINK = "x_link"
 X_SOURCES = (SOURCE_X_POST, SOURCE_X_ARTICLE, SOURCE_X_LINK)
 # Sources whose own text comes from the X API, never from `muninn scrape`.
 API_CONTENT_SOURCES = (SOURCE_X_POST, SOURCE_X_ARTICLE)
+# Coverages that carry no readable content (contract §4.4).
+NO_CONTENT_COVERAGE = ("blocked", "deleted", "empty")
 
+ITEM_ID_RE = re.compile(
+    r"^(x:post:[1-9][0-9]{0,19}|x:article:[1-9][0-9]{0,19}"
+    r"|github:repo:[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}|web:[0-9a-f]{64})$"
+)
 _LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 _X_ID_RE = re.compile(r"^[1-9][0-9]{0,19}$")
+_FOLDER_RE = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
 
+
+# ── Times and row access ─────────────────────────────────────────────
 
 def iso(epoch: int | None) -> str | None:
     """Epoch seconds → ``2026-10-20T08:00:00Z`` (None stays None)."""
     if epoch is None:
         return None
     return datetime.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def to_epoch(value: Any) -> int | None:
+    """Epoch seconds from an int or an ISO-8601 string (X ``created_at``)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    return None
 
 
 def _get(row: Mapping[str, Any], key: str, default: Any = None) -> Any:
@@ -82,7 +125,7 @@ def item_ref_for(
     - any other source with a locator (browser bookmarks) → the web/github
       identity of its sanitized URL, so the same page shares one item
     - otherwise ``<source>:<source_id>``, an internal-only reference that is
-      not a contract item ID
+      not a contract item ID (:func:`export_item_id` refuses it)
     """
     if source == SOURCE_X_POST:
         return x_post_item_id(source_id)
@@ -104,6 +147,18 @@ def item_ref_for_row(row: Mapping[str, Any]) -> str:
     )
 
 
+def export_item_id(row: Mapping[str, Any]) -> str:
+    """The contract ``item_id`` of a ``bookmarks`` row, or ValueError when the
+    row has no exportable identity (no locator and no X ID)."""
+    try:
+        item_id = item_ref_for_row(row)
+    except ValueError as exc:
+        raise ValueError(f"bookmark {_get(row, 'bookmark_id')} has no exportable identity") from exc
+    if not ITEM_ID_RE.match(item_id):
+        raise ValueError(f"bookmark {_get(row, 'bookmark_id')} has no exportable identity")
+    return item_id
+
+
 def item_kind(item_id: str) -> str:
     if item_id.startswith("x:post:"):
         return "x_post"
@@ -114,12 +169,11 @@ def item_kind(item_id: str) -> str:
     return "web_page"
 
 
-# ── Records ──────────────────────────────────────────────────────────
+# ── Items, links, observations ───────────────────────────────────────
 
-def _author(meta: Mapping[str, Any]) -> dict[str, Any] | None:
+def _author(raw: Any) -> dict[str, Any] | None:
     """``source_metadata.author`` (``{id, username, name}``, the X API's own
     names) → the record's ``{platform_id, handle, display_name}``."""
-    raw = meta.get("author")
     if not isinstance(raw, Mapping):
         return None
     platform_id = str(raw.get("id") or raw.get("platform_id") or "")
@@ -130,8 +184,8 @@ def _author(meta: Mapping[str, Any]) -> dict[str, Any] | None:
     if isinstance(handle, str) and _HANDLE_RE.match(handle):
         out["handle"] = handle
     name = raw.get("name") or raw.get("display_name")
-    if isinstance(name, str) and 0 < len(name) <= 100:
-        out["display_name"] = name
+    if isinstance(name, str) and name.strip():
+        out["display_name"] = name.strip()[:100]
     return out
 
 
@@ -140,18 +194,19 @@ def source_item_record(row: Mapping[str, Any]) -> dict[str, Any]:
     meta = row_metadata(row)
     item_id = item_ref_for_row(row)
     kind = item_kind(item_id)
-    title = _get(row, "title")
-    if isinstance(title, str):
-        title = title[:1000] or None
+    url = _get(row, "url")
+    title = (_get(row, "title") or "").strip()
     record: dict[str, Any] = {
         "record_type": "source-item",
         "item_id": item_id,
         "kind": kind,
-        "locator": _get(row, "url"),
-        "title": title,
-        "published_at": iso(meta.get("published_at")),
+        "locator": url if isinstance(url, str) and url.startswith(("http://", "https://")) else None,
+        "title": title[:1000] or None,
+        "published_at": iso(to_epoch(meta.get("published_at"))),
         "redaction": {
-            "param_names": list(dict.fromkeys(_json(_get(row, "redacted_param_names"), []))),
+            "param_names": list(dict.fromkeys(
+                str(n) for n in _json(_get(row, "redacted_param_names"), []) or []
+            )),
             "path_redacted": bool(_get(row, "path_redacted", 0)),
             "userinfo_redacted": bool(meta.get("userinfo_redacted", False)),
         },
@@ -160,13 +215,15 @@ def source_item_record(row: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(language, str) and _LANGUAGE_RE.match(language):
         record["language"] = language
     if kind in ("x_post", "x_article") and "author" in meta:
-        record["author"] = _author(meta)
+        record["author"] = _author(meta["author"])
     if kind == "x_post":
         x_post: dict[str, Any] = {"is_long_post": bool(meta.get("is_long_post", False))}
         if _X_ID_RE.match(str(meta.get("conversation_id") or "")):
             x_post["conversation_id"] = str(meta["conversation_id"])
         if isinstance(meta.get("media_keys"), list):
             x_post["has_media"] = bool(meta["media_keys"])
+        elif isinstance(meta.get("has_media"), bool):
+            x_post["has_media"] = meta["has_media"]
         if isinstance(meta.get("possibly_sensitive"), bool):
             x_post["possibly_sensitive"] = meta["possibly_sensitive"]
         record["x_post"] = x_post
@@ -193,11 +250,11 @@ def is_bookmarked(row: Mapping[str, Any]) -> bool:
 
 def bookmark_observation_record(row: Mapping[str, Any]) -> dict[str, Any] | None:
     """A ``bookmarks`` row → ``bookmark-observation``, or None if it is no bookmark."""
-    if not is_bookmarked(row):
+    if not is_bookmarked(row) or _get(row, "captured_at") is None:
         return None
     source = _get(row, "source")
-    meta = row_metadata(row)
     if source == SOURCE_X_POST:
+        meta = row_metadata(row)
         record: dict[str, Any] = {
             "record_type": "bookmark-observation",
             "item_id": item_ref_for_row(row),
@@ -205,19 +262,28 @@ def bookmark_observation_record(row: Mapping[str, Any]) -> dict[str, Any] | None
             "observed_at": iso(_get(row, "captured_at")),
             "observed_at_basis": "first_seen_by_sync",
         }
-        if meta.get("last_observed_at") is not None:
-            record["last_observed_at"] = iso(meta["last_observed_at"])
-        if meta.get("first_sync_run_id"):
+        last = to_epoch(meta.get("last_observed_at"))
+        if last is not None:
+            record["last_observed_at"] = iso(last)
+        if is_ulid(meta.get("first_sync_run_id")):
             record["sync_run_id"] = meta["first_sync_run_id"]
-        if isinstance(meta.get("folder_ids"), list):
-            record["folder_ids"] = list(dict.fromkeys(meta["folder_ids"]))
-        if isinstance(meta.get("list_position"), int):
-            record["list_position"] = meta["list_position"]
+        folders = meta.get("folder_ids")
+        if isinstance(folders, list):
+            clean = [str(f) for f in folders if _FOLDER_RE.match(str(f))]
+            if clean:
+                record["folder_ids"] = list(dict.fromkeys(clean))
+        position = meta.get("list_position")
+        if isinstance(position, int) and not isinstance(position, bool) and position >= 0:
+            record["list_position"] = position
         return record
-    if source == "bookmarks_html" and _get(row, "url") and _get(row, "captured_at"):
+    if source == "bookmarks_html":
+        try:
+            item_id = export_item_id(row)
+        except ValueError:
+            return None
         return {
             "record_type": "bookmark-observation",
-            "item_id": item_ref_for_row(row),
+            "item_id": item_id,
             "source": "bookmarks_html",
             "observed_at": iso(_get(row, "captured_at")),
             "observed_at_basis": "source_reported",
@@ -227,25 +293,46 @@ def bookmark_observation_record(row: Mapping[str, Any]) -> dict[str, Any] | None
 
 def item_link_record(row: Mapping[str, Any]) -> dict[str, Any]:
     """An ``item_links`` row → ``item-link`` record."""
+    relation = _get(row, "relation")
+    resolution = _get(row, "locator_resolution")
+    if resolution is None and relation != "links_to":
+        resolution = "api_reference"  # referenced by ID; a links_to link must say how
     record: dict[str, Any] = {
         "record_type": "item-link",
         "parent_item_id": _get(row, "parent_ref"),
         "child_item_id": _get(row, "child_ref"),
-        "relation": _get(row, "relation"),
+        "relation": relation,
         "position": int(_get(row, "position", 0)),
-        "locator_resolution": _get(row, "locator_resolution") or "api_reference",
+        "locator_resolution": resolution,
         "first_seen_at": iso(_get(row, "first_seen_at")),
     }
     status = _get(row, "entity_status")
-    record["entity_status"] = int(status) if status is not None else None
+    if status is not None:
+        record["entity_status"] = int(status)
     return record
+
+
+# ── Content revisions ────────────────────────────────────────────────
+
+def revision_text(row: Mapping[str, Any]) -> str | None:
+    """The revision's normalized text, if it is stored, readable and matches
+    its digest (withdrawn and no-content revisions have none)."""
+    if _get(row, "withdrawn_at") is not None or _get(row, "coverage") in NO_CONTENT_COVERAGE:
+        return None
+    raw = _get(row, "content_text")
+    if raw is None:
+        return None
+    text = normalize_text(raw)
+    if not text or content_digest(text) != _get(row, "content_sha256"):
+        return None
+    return text
 
 
 def content_revision_record(row: Mapping[str, Any], *, include_text: bool = False) -> dict[str, Any]:
     """A ``scrape_history`` row → ``content-revision`` record.
 
-    ``include_text`` adds the normalized ``text`` when the row still holds it
-    (withdrawn rows do not).
+    ``include_text`` adds the normalized ``text`` when the row still holds
+    readable text that matches its digest (see :func:`revision_text`).
     """
     method = _get(row, "retrieval_method")
     record: dict[str, Any] = {
@@ -275,15 +362,123 @@ def content_revision_record(row: Mapping[str, Any], *, include_text: bool = Fals
         record["final_locator"] = row["final_locator"]
     if method == "archive":
         record["archive_snapshot_at"] = iso(_get(row, "archive_snapshot_at"))
-    if include_text and _get(row, "withdrawn_at") is None:
-        text = _get(row, "content_text")
-        if text is not None or record["coverage"] in ("blocked", "deleted", "empty"):
-            record["text"] = text or ""
+    if include_text:
+        text = revision_text(row)
+        if text is not None:
+            record["text"] = text
     return record
 
 
-def usage_record(row: Mapping[str, Any], *, sync_run_id: str | None = None) -> dict[str, Any]:
-    """A ``usage_records`` row → ``usage-record`` (``sync_run_id`` is the run's ULID)."""
+def current_revision_row(
+    conn: sqlite3.Connection, item_ref: str, bookmark_id: int | None = None
+) -> sqlite3.Row | None:
+    """The item's current content revision, or None.
+
+    Current means a non-withdrawn ``x_api`` or ``live`` revision (archive
+    revisions are historical, contract §8). Revisions are a
+    content-addressed set, not a timeline (contract §5), so the revision
+    whose digest matches the item's current ``scrape_results`` live row
+    wins; the most recently retrieved one is the fallback.
+    """
+    rows = conn.execute(
+        """
+        SELECT * FROM scrape_history
+        WHERE  item_ref = ? AND withdrawn_at IS NULL
+          AND  retrieval_method IN ('x_api', 'live')
+        ORDER  BY retrieved_at DESC, scrape_history_id DESC
+        """,
+        (item_ref,),
+    ).fetchall()
+    if not rows:
+        return None
+    if bookmark_id is not None:
+        live = conn.execute(
+            "SELECT content_text FROM scrape_results WHERE bookmark_id = ? AND pass = 'live'",
+            (bookmark_id,),
+        ).fetchone()
+        if live is not None:
+            want = content_digest(live["content_text"])
+            for row in rows:
+                if row["content_sha256"] == want:
+                    return row
+    return rows[0]
+
+
+# ── Profiles, assessments, usage ─────────────────────────────────────
+
+def profile_record(conn: sqlite3.Connection, profile_sha256: str) -> dict[str, Any]:
+    """The stored ``interest-profile`` revision with this digest."""
+    row = conn.execute(
+        "SELECT body_json FROM interest_profiles WHERE profile_sha256 = ?", (profile_sha256,)
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"interest profile {profile_sha256} is not recorded")
+    return json.loads(row["body_json"])
+
+
+def assessment_record(
+    conn: sqlite3.Connection,
+    row: Mapping[str, Any],
+    cache: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """An ``assessments`` row → ``assessment`` record (with its prior's digest).
+
+    ``evidence`` is present only when the row stores model-cited evidence
+    (``evidence_json``), already checked against the cited revisions when
+    the assessment was written.
+    """
+    cache = cache if cache is not None else {}
+    if row["assessment_id"] in cache:
+        return cache[row["assessment_id"]]
+    rev = conn.execute(
+        "SELECT revision_ulid FROM scrape_history WHERE scrape_history_id = ?",
+        (row["scrape_history_id"],),
+    ).fetchone()
+    prof = conn.execute(
+        "SELECT profile_id FROM interest_profiles WHERE profile_sha256 = ?", (row["profile_sha256"],)
+    ).fetchone()
+    record: dict[str, Any] = {
+        "record_type": "assessment",
+        "assessment_id": row["assessment_ulid"],
+        "item_id": row["item_ref"],
+        "content_revision": {"ref": rev["revision_ulid"], "digest": row["content_sha256"]},
+        "coverage": row["content_coverage"],
+        "interest_profile": {"ref": prof["profile_id"], "digest": row["profile_sha256"]},
+        "policy_version": row["policy_version"],
+        "model": row["model"],
+        "prompt_version": row["prompt_version"],
+        "disposition": row["disposition"],
+        "relevance": row["relevance"],
+        "confidence": row["confidence"],
+        "rationale": row["rationale"],
+        "matched_interests": _json(row["matched_interests"], []),
+        "unresolved_questions": _json(row["unresolved_questions"], []),
+        "assessed_at": iso(row["assessed_at"]),
+    }
+    evidence = _json(_get(row, "evidence_json"), None)
+    if evidence:
+        record["evidence"] = evidence
+    if row["prior_assessment_id"] is not None:
+        prior = conn.execute(
+            "SELECT * FROM assessments WHERE assessment_id = ?", (row["prior_assessment_id"],)
+        ).fetchone()
+        prior_record = assessment_record(conn, prior, cache)
+        record["prior_assessment"] = {
+            "ref": prior_record["assessment_id"], "digest": record_digest(prior_record),
+        }
+    cache[row["assessment_id"]] = record
+    return record
+
+
+def usage_record(
+    row: Mapping[str, Any], *, sync_run_id: str | None = None, assessment_id: str | None = None
+) -> dict[str, Any]:
+    """A ``usage_records`` row → ``usage-record``.
+
+    ``sync_run_id`` and ``assessment_id`` are the run's and the assessment's
+    ULIDs. When not passed they are read from ``run_ulid`` /
+    ``assessment_ulid`` columns joined onto the row, if present.
+    """
     record: dict[str, Any] = {
         "record_type": "usage-record",
         "usage_id": _get(row, "usage_ulid"),
@@ -306,26 +501,38 @@ def usage_record(row: Mapping[str, Any], *, sync_run_id: str | None = None) -> d
         ):
             if _get(row, col) is not None:
                 record[key] = int(row[col])
+    sync_run_id = sync_run_id or _get(row, "run_ulid")
     if sync_run_id:
         record["sync_run_id"] = sync_run_id
+    assessment_id = assessment_id or _get(row, "assessment_ulid")
+    if assessment_id:
+        record["assessment_id"] = assessment_id
     return record
 
 
 __all__ = [
     "API_CONTENT_SOURCES",
+    "ITEM_ID_RE",
+    "NO_CONTENT_COVERAGE",
     "SOURCE_X_ARTICLE",
     "SOURCE_X_LINK",
     "SOURCE_X_POST",
     "X_SOURCES",
+    "assessment_record",
     "bookmark_observation_record",
     "content_revision_record",
+    "current_revision_row",
+    "export_item_id",
     "is_bookmarked",
     "iso",
     "item_kind",
     "item_link_record",
     "item_ref_for",
     "item_ref_for_row",
+    "profile_record",
+    "revision_text",
     "row_metadata",
     "source_item_record",
+    "to_epoch",
     "usage_record",
 ]

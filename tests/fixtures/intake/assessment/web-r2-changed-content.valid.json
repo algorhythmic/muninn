@@ -5,7 +5,8 @@
     "schema": "assessment",
     "expect": "valid",
     "covers": [
-      "assessment of the changed-content revision"
+      "assessment of the changed-content revision",
+      "model-cited contradicting evidence"
     ],
     "why": "valid assessment"
   },
@@ -38,7 +39,19 @@
     "assessed_at": "2026-10-21T06:30:00Z",
     "prior_assessment": {
       "ref": "01M5CJXHG05GX44JEQE1R0B1J9",
-      "digest": "c688da6ee0c951abe5dff8c7b3cdcb0de2e6bfa497118be355da4ea13b1d0bee"
-    }
+      "digest": "5a82ee00fd5ea824d593c0b78bc79da8fb17d13b8d03bad50bac0a8dd9d9e228"
+    },
+    "evidence": [
+      {
+        "stance": "contradicts",
+        "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+        "source": {
+          "ref": "01M5EGTQY07141HHE4EDJF59CG",
+          "digest": "bce2d570ca7682c4e49ec530422c846cbebfc889d878ecaa64d8bee75b0f40b9"
+        },
+        "excerpt": "the margin shrank after a tokenizer fix.",
+        "note": "The page's update says the margin shrank after a tokenizer fix."
+      }
+    ]
   }
 }

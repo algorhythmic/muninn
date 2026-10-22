@@ -23,11 +23,10 @@
       "enum": ["unwound", "expanded", "short", "api_reference"]
     },
     "entity_status": {
-      "description": "HTTP status X reported on the URL entity, when present.",
-      "oneOf": [
-        { "type": "integer", "minimum": 100, "maximum": 599 },
-        { "type": "null" }
-      ]
+      "description": "HTTP status X reported on the URL entity. Omitted when X reported none.",
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
     },
     "first_seen_at": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" }
   },

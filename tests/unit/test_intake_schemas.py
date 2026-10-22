@@ -178,6 +178,31 @@ def test_valid_active_packets_are_internally_consistent() -> None:
         assert packet_integrity_errors(fixture("evidence-packet", name)) == []
 
 
+def test_assessment_evidence_quotes_its_cited_revision() -> None:
+    for name, revision, stance in (("web-r1-profile-v1", "web-live-r1", "supports"),
+                                   ("web-r2-changed-content", "web-live-r2-changed", "contradicts")):
+        (ev,) = fixture("assessment", name)["evidence"]
+        rev = fixture("content-revision", revision)
+        assert ev["stance"] == stance and ev["item_id"] == rev["item_id"]
+        assert ev["source"] == {"ref": rev["revision_id"], "digest": rev["content_sha256"]}
+        assert ev["excerpt"] in rev["text"]
+    # The packet carries the stored evidence as statement + excerpt.
+    packet = fixture("evidence-packet", "packet-r1")
+    a1 = fixture("assessment", "web-r1-profile-v1")
+    assert {"statement": a1["evidence"][0]["note"], "source": a1["evidence"][0]["source"],
+            "excerpt": a1["evidence"][0]["excerpt"]} in packet["evidence"]["supporting"]
+
+
+def test_integrity_check_catches_bad_assessment_evidence() -> None:
+    packet = copy.deepcopy(fixture("evidence-packet", "packet-r1"))
+    packet["assessments"][0]["evidence"][0]["excerpt"] = "Not in the page."
+    assert any("assessments[0].evidence[0].excerpt is not in the revision text" in e
+               for e in packet_integrity_errors(packet))
+    packet = copy.deepcopy(fixture("evidence-packet", "packet-r1"))
+    packet["assessments"][0]["evidence"][0]["item_id"] = "x:post:1900000000000000999"
+    assert any("assessments[0].evidence[0].item_id is not in items" in e for e in packet_integrity_errors(packet))
+
+
 def test_integrity_check_catches_a_wrong_digest() -> None:
     packet = copy.deepcopy(fixture("evidence-packet", "packet-r1"))
     packet["evidence"]["supporting"][0]["source"]["digest"] = "0" * 64

@@ -351,7 +351,7 @@ def _parse_when(ctx: click.Context, param: click.Parameter, value: str | None) -
     """Click callback: epoch seconds from ``YYYY-MM-DD``, ISO-8601 or epoch digits (UTC)."""
     if value is None:
         return None
-    from muninn.consumers.packets.records import to_epoch  # lazy (stdlib-only)
+    from muninn.intake_records import to_epoch  # lazy (stdlib-only)
 
     epoch = int(value) if value.strip().isdigit() else to_epoch(value)
     if epoch is None:
@@ -619,7 +619,11 @@ def export_packets_cmd(
     withdraw_ref: str | None,
     reason: str | None,
 ) -> None:
-    """Export Research Intake evidence packets (contract muninn-research-intake)."""
+    """Export Research Intake evidence packets (contract muninn-research-intake).
+
+    Every run first withdraws active packets whose subject or linked items
+    were deleted (source_deleted) or hidden by domain policy (policy_hidden),
+    then exports. --dry-run reports both without writing."""
     import json
     import os
 
@@ -643,7 +647,8 @@ def export_packets_cmd(
                 result = withdraw_exported_packet(conn, out, withdraw_ref, reason=reason)
             except (LookupError, ValueError) as exc:
                 raise click.ClickException(str(exc)) from exc
-            click.echo(f"Withdrawn {result.ref} ({reason}); tombstone: {result.path}")
+            cleared = f"; {result.revisions_withdrawn} content revision(s) withdrawn" if result.revisions_withdrawn else ""
+            click.echo(f"Withdrawn {result.ref} ({reason}); tombstone: {result.path}{cleared}")
             return
         run = export_packets(
             conn, out, item_ids=item_ids or None, since=since,
@@ -651,6 +656,10 @@ def export_packets_cmd(
         )
     finally:
         conn.close()
+    for tomb, why in run.withdrawn:
+        click.echo(f"  withdrew {tomb.ref} ({why}) {tomb.path}")
+    for due in run.would_withdraw:
+        click.echo(f"  would withdraw {due.ref} ({due.reason})")
     for exported in run.written:
         click.echo(f"  wrote {exported.ref} {exported.digest} {exported.path}")
     for subject, errors in run.invalid:

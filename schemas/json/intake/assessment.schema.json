@@ -37,6 +37,43 @@
       "type": "array",
       "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
     },
+    "evidence": {
+      "description": "Model-cited evidence: short verbatim excerpts from the content revisions this assessment saw (its own revision or a linked item's current revision). Muninn checks every excerpt against the cited revision's stored text before storing it and fills in the revision reference itself; a citation that fails is dropped. Absent when no citation survived.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["stance", "item_id", "source", "excerpt", "note"],
+        "additionalProperties": false,
+        "properties": {
+          "stance": {
+            "description": "supports: the passage backs the item's claim or its relevance. contradicts: it undercuts them (a correction, a weaker result, a caveat).",
+            "enum": ["supports", "contradicts"]
+          },
+          "item_id": {
+            "description": "The cited item: the assessed item or one of its linked items.",
+            "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id"
+          },
+          "source": {
+            "description": "The cited content revision of item_id.",
+            "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/revision_ref"
+          },
+          "excerpt": {
+            "description": "Verbatim excerpt from the cited revision's normalized text.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "note": {
+            "description": "What the excerpt shows, in the model's words.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      }
+    },
     "prior_assessment": {
       "description": "The earlier assessment of the same item this one re-evaluates, if any.",
       "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/assessment_ref"

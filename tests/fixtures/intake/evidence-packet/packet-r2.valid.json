@@ -131,7 +131,6 @@
         "relation": "links_to",
         "position": 1,
         "locator_resolution": "expanded",
-        "entity_status": null,
         "first_seen_at": "2026-10-20T08:00:00Z"
       },
       {
@@ -179,7 +178,6 @@
           "name": "muninn.ingest.x",
           "version": "0.1.0"
         },
-        "http_status": 200,
         "published_at": "2026-09-30T14:05:00Z",
         "retrieved_at": "2026-10-20T08:00:05Z",
         "observed_at": "2026-10-20T08:00:00Z",
@@ -199,7 +197,6 @@
           "name": "muninn.ingest.x",
           "version": "0.1.0"
         },
-        "http_status": 200,
         "published_at": "2026-09-12T09:30:00Z",
         "retrieved_at": "2026-10-20T08:00:05Z",
         "observed_at": null,
@@ -219,10 +216,10 @@
           "name": "muninn.scrape.extract",
           "version": "selectolax-0.4.13"
         },
-        "http_status": 200,
         "published_at": "2026-09-28T00:00:00Z",
         "retrieved_at": "2026-10-20T08:03:10Z",
         "observed_at": "2026-10-20T08:00:00Z",
+        "http_status": 200,
         "scrape_pass": "live",
         "text": "Synthetic notes on retrieval evaluation.\n\nWe compare BM25, dense and hybrid retrieval on a ten-thousand-document synthetic corpus. Hybrid retrieval improved recall at ten by a wide margin.\n\nMethod: fixed query set, judged by two annotators."
       },
@@ -240,10 +237,10 @@
           "name": "muninn.scrape.extract",
           "version": "selectolax-0.4.13"
         },
-        "http_status": 200,
         "published_at": "2026-09-28T00:00:00Z",
         "retrieved_at": "2026-10-21T06:02:00Z",
         "observed_at": "2026-10-20T08:00:00Z",
+        "http_status": 200,
         "scrape_pass": "live",
         "text": "Synthetic notes on retrieval evaluation.\n\nWe compare BM25, dense and hybrid retrieval on a ten-thousand-document synthetic corpus. Hybrid retrieval improved recall at ten by a modest margin.\n\nMethod: fixed query set, judged by two annotators.\n\nUpdate: the margin shrank after a tokenizer fix."
       },
@@ -261,10 +258,10 @@
           "name": "muninn.scrape.extract",
           "version": "selectolax-0.4.13"
         },
-        "http_status": 200,
         "published_at": "2026-09-28T00:00:00Z",
         "retrieved_at": "2026-10-20T08:04:00Z",
         "observed_at": "2026-10-20T08:00:00Z",
+        "http_status": 200,
         "scrape_pass": "recent_archive",
         "archive_snapshot_at": "2026-09-29T00:00:00Z",
         "text": "Synthetic notes on retrieval evaluation (draft).\n\nResults pending."
@@ -283,10 +280,10 @@
           "name": "muninn.scrape.extract",
           "version": "selectolax-0.4.13"
         },
-        "http_status": 200,
         "published_at": null,
         "retrieved_at": "2026-10-20T08:03:30Z",
         "observed_at": "2026-10-20T08:00:00Z",
+        "http_status": 200,
         "scrape_pass": "live",
         "text": "synthetic-repo\n\nA synthetic hybrid retrieval toolkit. Installation: see docs."
       },
@@ -304,10 +301,10 @@
           "name": "muninn.scrape.extract",
           "version": "selectolax-0.4.13"
         },
-        "http_status": 403,
         "published_at": null,
         "retrieved_at": "2026-10-20T08:03:50Z",
         "observed_at": "2026-10-20T08:00:00Z",
+        "http_status": 403,
         "scrape_pass": "live",
         "final_locator": "https://paywalled.example.net/story/42"
       }
@@ -399,7 +396,19 @@
         "unresolved_questions": [
           "Is the benchmark corpus available?"
         ],
-        "assessed_at": "2026-10-20T09:00:00Z"
+        "assessed_at": "2026-10-20T09:00:00Z",
+        "evidence": [
+          {
+            "stance": "supports",
+            "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+            "source": {
+              "ref": "01M5C5BWHGPNWXPZMBKNJMHZNP",
+              "digest": "e7e96498a4fd286181bd4acb29719be9cfc36a1c05fa70857fc035040018fcaf"
+            },
+            "excerpt": "Hybrid retrieval improved recall at ten by a wide margin.",
+            "note": "Hybrid retrieval improved recall at ten on a synthetic corpus."
+          }
+        ]
       },
       {
         "record_type": "assessment",
@@ -430,7 +439,7 @@
         "assessed_at": "2026-10-20T12:00:00Z",
         "prior_assessment": {
           "ref": "01M5C8KYM0YNFZ2VV6YGSP09KB",
-          "digest": "bff2e87f28c1b19830f68f3654aaa4d7fc41ee38ec57bd8d2afaa918a13429f3"
+          "digest": "920be44355a44e855c511b3fc4c46593e7330e4e5e42ba8d77e0c2b26facc7de"
         }
       },
       {
@@ -462,8 +471,20 @@
         "assessed_at": "2026-10-21T06:30:00Z",
         "prior_assessment": {
           "ref": "01M5CJXHG05GX44JEQE1R0B1J9",
-          "digest": "c688da6ee0c951abe5dff8c7b3cdcb0de2e6bfa497118be355da4ea13b1d0bee"
-        }
+          "digest": "5a82ee00fd5ea824d593c0b78bc79da8fb17d13b8d03bad50bac0a8dd9d9e228"
+        },
+        "evidence": [
+          {
+            "stance": "contradicts",
+            "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+            "source": {
+              "ref": "01M5EGTQY07141HHE4EDJF59CG",
+              "digest": "bce2d570ca7682c4e49ec530422c846cbebfc889d878ecaa64d8bee75b0f40b9"
+            },
+            "excerpt": "the margin shrank after a tokenizer fix.",
+            "note": "The page's update says the margin shrank after a tokenizer fix."
+          }
+        ]
       },
       {
         "record_type": "assessment",
@@ -521,7 +542,7 @@
     ],
     "primary_assessment": {
       "ref": "01M5EJE0J0YHPX52JMK7CEZVRB",
-      "digest": "68200cc6d0d2243deb8eedc9202ccfb5555ed1720bcf79efd1506078da97bc77"
+      "digest": "0971face8fd09dfd138016f66286500f287f4f27bebec2698d3d4479ca0405da"
     },
     "evidence": {
       "supporting": [
@@ -567,7 +588,7 @@
     ],
     "previous_revision": {
       "ref": "01M5CC1T80RJ78TBYPKNMMZ44P@1",
-      "digest": "f2bc6be5977ebf9422c471bb390691977acc9e423454aff919c91493147c4d71"
+      "digest": "d091f7e2bb692eabbbcc6b99b2abadd07ddb6703841334944fa1472d512cf1f4"
     }
   }
 }

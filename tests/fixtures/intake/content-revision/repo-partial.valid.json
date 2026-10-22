@@ -23,10 +23,10 @@
       "name": "muninn.scrape.extract",
       "version": "selectolax-0.4.13"
     },
-    "http_status": 200,
     "published_at": null,
     "retrieved_at": "2026-10-20T08:03:30Z",
     "observed_at": "2026-10-20T08:00:00Z",
+    "http_status": 200,
     "scrape_pass": "live",
     "text": "synthetic-repo\n\nA synthetic hybrid retrieval toolkit. Installation: see docs."
   }

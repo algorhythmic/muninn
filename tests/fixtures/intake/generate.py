@@ -185,7 +185,7 @@ def main() -> None:
     seen = iso("2026-10-20 08:00:00")
     links = [
         {"record_type": "item-link", "parent_item_id": A, "child_item_id": W, "relation": "links_to", "position": 0, "locator_resolution": "unwound", "entity_status": 200, "first_seen_at": seen},
-        {"record_type": "item-link", "parent_item_id": A, "child_item_id": R, "relation": "links_to", "position": 1, "locator_resolution": "expanded", "entity_status": None, "first_seen_at": seen},
+        {"record_type": "item-link", "parent_item_id": A, "child_item_id": R, "relation": "links_to", "position": 1, "locator_resolution": "expanded", "first_seen_at": seen},
         {"record_type": "item-link", "parent_item_id": A, "child_item_id": B, "relation": "links_to", "position": 2, "locator_resolution": "short", "first_seen_at": seen},
         {"record_type": "item-link", "parent_item_id": A, "child_item_id": Q, "relation": "quotes", "position": 0, "locator_resolution": "api_reference", "first_seen_at": seen},
     ]
@@ -218,9 +218,11 @@ def main() -> None:
             "content_sha256": content_digest(t), "normalization": "muninn-text/1", "char_count": len(t),
             "coverage": coverage, "retrieval_method": method,
             "freshness": "historical" if method == "archive" else "current",
-            "extractor": extractor, "http_status": http, "published_at": published,
+            "extractor": extractor, "published_at": published,
             "retrieved_at": retrieved, "observed_at": observed,
         }
+        if http is not None:  # optional keys are omitted, never null
+            r["http_status"] = http
         if pass_:
             r["scrape_pass"] = pass_
         if snapshot:
@@ -234,9 +236,9 @@ def main() -> None:
     x_ext = {"name": "muninn.ingest.x", "version": "0.1.0"}
     web_ext = {"name": "muninn.scrape.extract", "version": "selectolax-0.4.13"}
     rev_a = rev("rev-a", A, "Synthetic post: a short thread on evaluating retrieval over small personal corpora.\n\nNotes https://example.com/articles/synthetic-retrieval-notes and code https://github.com/synthetic-org/synthetic-repo",
-                "full", "x_api", iso("2026-10-20 08:00:05"), extractor=x_ext, published=item_a["published_at"], observed=seen)
+                "full", "x_api", iso("2026-10-20 08:00:05"), extractor=x_ext, http=None, published=item_a["published_at"], observed=seen)
     rev_q = rev("rev-q", Q, "Synthetic quoted post: hybrid search beat dense-only on our toy benchmark.",
-                "full", "x_api", iso("2026-10-20 08:00:05"), extractor=x_ext, published=item_q["published_at"], observed=None)
+                "full", "x_api", iso("2026-10-20 08:00:05"), extractor=x_ext, http=None, published=item_q["published_at"], observed=None)
     w1_text = ("Synthetic notes on retrieval evaluation.\n\nWe compare BM25, dense and hybrid retrieval on a "
                "ten-thousand-document synthetic corpus. Hybrid retrieval improved recall at ten by a wide margin.\n\n"
                "Method: fixed query set, judged by two annotators.")
@@ -292,7 +294,7 @@ def main() -> None:
 
     # ── Assessments ──────────────────────────────────────────────────
     def assess(label, revision, profile, profile_digest, when, disposition, relevance, confidence, rationale,
-               matched, questions, prior=None):
+               matched, questions, prior=None, evidence=None):
         a = {
             "record_type": "assessment", "assessment_id": ulid(label, when), "item_id": revision["item_id"],
             "content_revision": {"ref": revision["revision_id"], "digest": revision["content_sha256"]},
@@ -304,32 +306,50 @@ def main() -> None:
         }
         if prior is not None:
             a["prior_assessment"] = {"ref": prior["assessment_id"], "digest": record_digest(prior)}
+        if evidence:
+            a["evidence"] = evidence
         return a
+
+    def cite(stance, revision, excerpt, note):
+        assert excerpt in revision["text"], excerpt  # model-cited excerpts are verbatim
+        return {"stance": stance, "item_id": revision["item_id"],
+                "source": {"ref": revision["revision_id"], "digest": revision["content_sha256"]},
+                "excerpt": excerpt, "note": note}
 
     a1 = assess("a1", rev_w1, prof_v1, pv1, iso("2026-10-20 09:00:00"), "candidate", 82, 70,
                 "States a method and a measured result relevant to retrieval evaluation.", ["retrieval-eval"],
-                ["Is the benchmark corpus available?"])
+                ["Is the benchmark corpus available?"],
+                evidence=[cite("supports", rev_w1, "Hybrid retrieval improved recall at ten by a wide margin.",
+                               "Hybrid retrieval improved recall at ten on a synthetic corpus.")])
     a2 = assess("a2", rev_w1, prof_v2, pv2, iso("2026-10-20 12:00:00"), "candidate", 88, 70,
                 "Re-assessed under profile v2 (higher retrieval weight). Same content revision.", ["retrieval-eval"],
                 ["Is the benchmark corpus available?"], prior=a1)
     a3 = assess("a3", rev_w2, prof_v2, pv2, iso("2026-10-21 06:30:00"), "needs_evidence", 64, 60,
                 "The update weakens the headline result. The claim needs the corrected numbers.", ["retrieval-eval"],
-                ["What did the tokenizer fix change?"], prior=a2)
+                ["What did the tokenizer fix change?"], prior=a2,
+                evidence=[cite("contradicts", rev_w2, "the margin shrank after a tokenizer fix.",
+                               "The page's update says the margin shrank after a tokenizer fix.")])
     a4 = assess("a4", rev_b, prof_v1, pv1, iso("2026-10-20 09:00:00"), "needs_evidence", 40, 15,
                 "Capture was blocked; only the post context was available.", [],
                 ["Can the page be read through another route?"])
     a5 = assess("a5", rev_r, prof_v1, pv1, iso("2026-10-20 09:00:00"), "reference_only", 50, 45,
                 "Partial README only. Useful as a pointer to the toolkit.", ["retrieval-eval", "sqlite-tooling"], [])
 
-    write("assessment", "web-r1-profile-v1", "valid", a1, ["first assessment"], "valid assessment")
+    write("assessment", "web-r1-profile-v1", "valid", a1, ["first assessment", "model-cited supporting evidence with a verbatim excerpt"], "valid assessment")
     write("assessment", "web-r1-profile-v2-reassessed", "valid", a2, ["changed-profile reassessment: same content revision, new profile digest, prior_assessment set"], "valid assessment")
-    write("assessment", "web-r2-changed-content", "valid", a3, ["assessment of the changed-content revision"], "valid assessment")
+    write("assessment", "web-r2-changed-content", "valid", a3, ["assessment of the changed-content revision", "model-cited contradicting evidence"], "valid assessment")
     write("assessment", "blocked-capture", "valid", a4, ["blocked capture assessed with coverage shown; disposition is a judgement, not the retrieval state"], "valid assessment")
     write("assessment", "partial-capture", "valid", a5, ["partial capture assessed with coverage shown"], "valid assessment")
     bad = copy.deepcopy(a4); bad["disposition"] = "candidate"
     write("assessment", "blocked-candidate", "invalid", bad, ["coverage rules"], "an item whose capture had no readable content cannot be a candidate", fails_at='disposition')
     bad = copy.deepcopy(a4); bad["disposition"] = "blocked"
     write("assessment", "retrieval-state-as-disposition", "invalid", bad, ["disposition enum"], "retrieval failures are operational states, never dispositions", fails_at='disposition')
+    bad = copy.deepcopy(a1); bad["evidence"][0]["excerpt"] = w1_text[:301] + "x" * max(0, 301 - len(w1_text))
+    write("assessment", "evidence-excerpt-too-long", "invalid", bad, ["evidence excerpt cap"], "a cited excerpt is at most 300 characters", fails_at='evidence/0/excerpt')
+    bad = copy.deepcopy(a1); bad["evidence"][0]["stance"] = "neutral"
+    write("assessment", "evidence-unknown-stance", "invalid", bad, ["evidence stance"], "evidence either supports or contradicts", fails_at='evidence/0/stance')
+    bad = copy.deepcopy(a1); bad["evidence"] = []
+    write("assessment", "evidence-empty", "invalid", bad, ["evidence is omitted, never empty"], "an assessment with no surviving citation omits evidence", fails_at='evidence')
     bad = copy.deepcopy(a1); bad["relevance"] = 0.82
     write("assessment", "float-relevance", "invalid", bad, ["integers only"], "relevance is an integer 0-100", fails_at='relevance', fails_with='integer')
 

@@ -49,17 +49,14 @@
       }
     },
     "http_status": {
-      "oneOf": [
-        { "type": "integer", "minimum": 100, "maximum": 599 },
-        { "type": "null" }
-      ]
+      "description": "HTTP status of the fetch. Omitted when there was none (X API revisions).",
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
     },
     "final_locator": {
-      "description": "Sanitized locator after redirects, when different from the item's locator.",
-      "oneOf": [
-        { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/locator" },
-        { "type": "null" }
-      ]
+      "description": "Sanitized locator after redirects. Omitted when it is the item's own locator.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/locator"
     },
     "archive_snapshot_at": {
       "description": "Archive snapshot time (retrieval_method archive only).",

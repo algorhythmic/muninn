@@ -14,6 +14,12 @@ Return ONLY a JSON object with exactly these keys:
 - "rationale": 1-4 plain sentences (at most 600 characters) saying why, naming what in the content supports the judgement and what is missing.
 - "matched_interests": an array of interest_id values from the profile that the item matches. Use only ids that appear in the profile. Empty if none.
 - "unresolved_questions": an array of 0-3 short questions a reviewer would need answered before acting on the item. Empty if none.
+- "evidence": an array of 0-4 passages that back or undercut your judgement, each an object with exactly these keys:
+  - "item_id": the item_id of the item you quote, copied from the user message (the subject or one of its linked items). Only quote an item whose text is shown.
+  - "stance": "supports" if the passage backs the item's claim or its relevance to a matched interest; "contradicts" if it undercuts them (a correction, a weaker result, a caveat, a contradiction between the post and a linked page).
+  - "excerpt": a verbatim quote copied exactly from that item's text, at most 300 characters. Do not paraphrase, abbreviate, join separate passages or add ellipses. Quotes that do not appear in the text are discarded.
+  - "note": one plain sentence (at most 300 characters) saying what the passage shows.
+  Use an empty array when no passage is worth citing. Never cite an item whose coverage is "blocked", "deleted" or "empty".
 
 Coverage rules (these are strict):
 - Coverage "full" means the text shown is the whole captured content; "partial" means only part of it was captured.
