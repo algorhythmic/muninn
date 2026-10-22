@@ -1,0 +1,34 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "why": "Raw connector-side inputs carrying a canary secret. The canary must never appear in any valid export fixture: sanitize_url removes it before any locator is stored."
+  },
+  "canary": "MUNINN-CANARY-7c1e5f0b-not-a-real-secret",
+  "token_response": {
+    "token_type": "bearer",
+    "access_token": "MUNINN-CANARY-7c1e5f0b-not-a-real-secret",
+    "refresh_token": "MUNINN-CANARY-7c1e5f0b-not-a-real-secret"
+  },
+  "url_entities": {
+    "web": {
+      "url": "https://t.co/SynthW0001",
+      "expanded_url": "https://example.com/articles/synthetic-retrieval-notes?utm_source=twitter&access_token=MUNINN-CANARY-7c1e5f0b-not-a-real-secret",
+      "unwound_url": "https://example.com/articles/synthetic-retrieval-notes?access_token=MUNINN-CANARY-7c1e5f0b-not-a-real-secret&utm_source=twitter",
+      "status": 200
+    },
+    "repo": {
+      "url": "https://t.co/SynthR0002",
+      "expanded_url": "https://github.com/Synthetic-Org/synthetic-repo",
+      "unwound_url": null,
+      "status": null
+    },
+    "blocked": {
+      "url": "https://t.co/SynthB0003",
+      "expanded_url": null,
+      "unwound_url": null,
+      "status": null
+    }
+  },
+  "blocked_resolved_url": "https://paywalled.example.net/story/42?session=MUNINN-CANARY-7c1e5f0b-not-a-real-secret"
+}

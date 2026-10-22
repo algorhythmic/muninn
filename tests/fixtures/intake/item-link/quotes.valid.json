@@ -1,0 +1,21 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "item-link",
+    "expect": "valid",
+    "covers": [
+      "quoted post referenced by id"
+    ],
+    "why": "valid link"
+  },
+  "record": {
+    "record_type": "item-link",
+    "parent_item_id": "x:post:1900000000000000001",
+    "child_item_id": "x:post:1900000000000000002",
+    "relation": "quotes",
+    "position": 0,
+    "locator_resolution": "api_reference",
+    "first_seen_at": "2026-10-20T08:00:00Z"
+  }
+}

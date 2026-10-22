@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:assessment:0.1",
+  "title": "Suitability assessment",
+  "description": "One append-only suitability assessment (an assessments row). Key: content revision + profile revision + policy version + model + prompt version. A changed profile or policy creates a new assessment and leaves earlier ones in place. Disposition is a judgement, never a retrieval state; coverage shows how much content the judgement saw.",
+  "type": "object",
+  "required": [
+    "record_type", "assessment_id", "item_id", "content_revision", "coverage", "interest_profile",
+    "policy_version", "model", "prompt_version", "disposition", "relevance", "confidence",
+    "rationale", "matched_interests", "unresolved_questions", "assessed_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "record_type": { "const": "assessment" },
+    "assessment_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid" },
+    "item_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id" },
+    "content_revision": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/revision_ref" },
+    "coverage": {
+      "description": "Coverage of the assessed content revision, copied so it is visible with the judgement.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/coverage"
+    },
+    "interest_profile": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/profile_ref" },
+    "policy_version": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+    "model": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+    "prompt_version": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+    "disposition": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/disposition" },
+    "relevance": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/percent" },
+    "confidence": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/percent" },
+    "rationale": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "matched_interests": {
+      "description": "interest_id values from the referenced profile revision.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/slug" }
+    },
+    "unresolved_questions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "prior_assessment": {
+      "description": "The earlier assessment of the same item this one re-evaluates, if any.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/assessment_ref"
+    },
+    "assessed_at": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "coverage": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/no_content_coverage" } } },
+      "then": { "properties": { "disposition": { "not": { "const": "candidate" } } } }
+    }
+  ]
+}

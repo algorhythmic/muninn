@@ -1,0 +1,32 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "content-revision",
+    "expect": "valid",
+    "covers": [
+      "post text delivered by the X API (retrieval_method x_api)"
+    ],
+    "why": "valid revision"
+  },
+  "record": {
+    "record_type": "content-revision",
+    "revision_id": "01M5C567W82RNFG7TXWKZJPNBT",
+    "item_id": "x:post:1900000000000000001",
+    "content_sha256": "cfcc8bc1d8e0c3718e13155935fcbf4b127ff04cf7b87978c5d47abb353672c3",
+    "normalization": "muninn-text/1",
+    "char_count": 202,
+    "coverage": "full",
+    "retrieval_method": "x_api",
+    "freshness": "current",
+    "extractor": {
+      "name": "muninn.ingest.x",
+      "version": "0.1.0"
+    },
+    "http_status": 200,
+    "published_at": "2026-09-30T14:05:00Z",
+    "retrieved_at": "2026-10-20T08:00:05Z",
+    "observed_at": "2026-10-20T08:00:00Z",
+    "text": "Synthetic post: a short thread on evaluating retrieval over small personal corpora.\n\nNotes https://example.com/articles/synthetic-retrieval-notes and code https://github.com/synthetic-org/synthetic-repo"
+  }
+}

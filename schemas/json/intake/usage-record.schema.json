@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:usage-record:0.1",
+  "title": "Usage record",
+  "description": "One paid call or batch of calls (a usage_records row): X API requests or model calls. Cost is integer micro-USD (1 USD = 1000000).",
+  "type": "object",
+  "required": ["record_type", "usage_id", "kind", "provider", "operation", "request_count", "cost_micro_usd", "cost_basis", "occurred_at"],
+  "additionalProperties": false,
+  "properties": {
+    "record_type": { "const": "usage-record" },
+    "usage_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid" },
+    "kind": { "enum": ["x_api", "model"] },
+    "provider": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/slug" },
+    "operation": {
+      "description": "Endpoint template (e.g. 'GET /2/users/:id/bookmarks') or task name (e.g. 'enrich:suitability'). Never a full URL and never a token.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^?#\\s][^?#]*$"
+    },
+    "model": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+    "request_count": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count" },
+    "resource_count": {
+      "description": "Billed resources (posts, users) for X calls.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count"
+    },
+    "input_tokens": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count" },
+    "output_tokens": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count" },
+    "cache_read_tokens": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count" },
+    "cost_micro_usd": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count" },
+    "cost_basis": {
+      "description": "estimated: computed from a price table. reported: taken from the provider's own usage report.",
+      "enum": ["estimated", "reported"]
+    },
+    "occurred_at": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" },
+    "sync_run_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid" },
+    "assessment_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "model" } } },
+      "then": { "required": ["model"] },
+      "else": {
+        "not": {
+          "anyOf": [
+            { "required": ["model"] },
+            { "required": ["input_tokens"] },
+            { "required": ["output_tokens"] },
+            { "required": ["cache_read_tokens"] }
+          ]
+        }
+      }
+    }
+  ]
+}

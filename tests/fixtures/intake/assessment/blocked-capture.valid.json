@@ -1,0 +1,38 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "assessment",
+    "expect": "valid",
+    "covers": [
+      "blocked capture assessed with coverage shown; disposition is a judgement, not the retrieval state"
+    ],
+    "why": "valid assessment"
+  },
+  "record": {
+    "record_type": "assessment",
+    "assessment_id": "01M5C8KYM08MWY9D48J1WW580A",
+    "item_id": "web:09fc5f88293d378d5cd71bcf4af7c2125f9bcf83421fb67120f11e8f96963782",
+    "content_revision": {
+      "ref": "01M5C5D3KGD3VR4MR4CE9M2KFC",
+      "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "coverage": "blocked",
+    "interest_profile": {
+      "ref": "operator-research",
+      "digest": "b7226c37eef17ca6f70379f695f5a6cf2ed989e5bd727429671aa3d27b8cfdef"
+    },
+    "policy_version": "intake-policy/1",
+    "model": "synthetic-model-small",
+    "prompt_version": "suitability_v1",
+    "disposition": "needs_evidence",
+    "relevance": 40,
+    "confidence": 15,
+    "rationale": "Capture was blocked; only the post context was available.",
+    "matched_interests": [],
+    "unresolved_questions": [
+      "Can the page be read through another route?"
+    ],
+    "assessed_at": "2026-10-20T09:00:00Z"
+  }
+}

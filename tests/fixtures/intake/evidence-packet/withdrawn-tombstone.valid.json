@@ -1,0 +1,23 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "evidence-packet",
+    "expect": "valid",
+    "covers": [
+      "withdrawn packet tombstone: id, revision, original digest, reason, time"
+    ],
+    "why": "valid tombstone"
+  },
+  "record": {
+    "record_type": "evidence-packet",
+    "contract": "muninn-research-intake",
+    "contract_version": "0.1.0-draft",
+    "status": "withdrawn",
+    "packet_id": "01M5CFFNW0FQ053JHJZVCQNEDA",
+    "revision": 1,
+    "digest": "8f2fd172b5573976a72eb7f1714280ee3c923e207862a91943cef27ae05af31e",
+    "withdrawn_at": "2026-10-21T08:00:00Z",
+    "withdrawal_reason": "operator_request"
+  }
+}

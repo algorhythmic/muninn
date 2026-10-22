@@ -1,0 +1,44 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "interest-profile",
+    "expect": "valid",
+    "covers": [
+      "changed profile: new digest"
+    ],
+    "why": "valid profile"
+  },
+  "record": {
+    "record_type": "interest-profile",
+    "profile_id": "operator-research",
+    "label": "Synthetic research interests",
+    "version_label": "v2",
+    "interests": [
+      {
+        "interest_id": "retrieval-eval",
+        "label": "Retrieval evaluation",
+        "description": "Benchmarks and methods for evaluating search over small corpora.",
+        "weight": 90
+      },
+      {
+        "interest_id": "sqlite-tooling",
+        "label": "SQLite tooling",
+        "description": "Migrations, FTS5 and embedded analytics.",
+        "weight": 60
+      },
+      {
+        "interest_id": "agent-harness",
+        "label": "Agent harnesses",
+        "description": "Tooling that runs coding agents under supervision.",
+        "weight": 70
+      }
+    ],
+    "exclusions": [
+      {
+        "exclusion_id": "hype",
+        "description": "Announcements without method or data."
+      }
+    ]
+  }
+}

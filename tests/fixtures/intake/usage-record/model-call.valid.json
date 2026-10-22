@@ -1,0 +1,28 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "usage-record",
+    "expect": "valid",
+    "covers": [
+      "model call for an assessment"
+    ],
+    "why": "valid usage record"
+  },
+  "record": {
+    "record_type": "usage-record",
+    "usage_id": "01M5C8KYM0D9CKEKEXC7PTSQX7",
+    "kind": "model",
+    "provider": "anthropic",
+    "operation": "enrich:suitability",
+    "model": "synthetic-model-small",
+    "request_count": 1,
+    "input_tokens": 1800,
+    "output_tokens": 220,
+    "cache_read_tokens": 0,
+    "cost_micro_usd": 2900,
+    "cost_basis": "estimated",
+    "occurred_at": "2026-10-20T09:00:00Z",
+    "assessment_id": "01M5C8KYM0YNFZ2VV6YGSP09KB"
+  }
+}

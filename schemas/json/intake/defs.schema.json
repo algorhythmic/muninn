@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:defs:0.1",
+  "title": "muninn-research-intake shared definitions",
+  "description": "Shared value types for the muninn-research-intake 0.1 records. Not a record: it has no record_type and no fixtures. Numbers are integers only (no floats) so canonical JSON coincides with RFC 8785.",
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "empty_sha256": {
+      "description": "sha256 of the empty string: the content digest of a capture with no readable content.",
+      "const": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ulid": {
+      "type": "string",
+      "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "timestamp": {
+      "description": "ISO-8601 UTC, second precision, Z suffix.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$"
+    },
+    "item_id": {
+      "description": "Typed stable export ID: x:post:<id>, x:article:<id> (proposed), github:repo:<owner>/<name> (lowercase), web:<sha256 of the sanitized canonical locator>.",
+      "type": "string",
+      "pattern": "^(x:post:[1-9][0-9]{0,19}|x:article:[1-9][0-9]{0,19}|github:repo:[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}|web:[0-9a-f]{64})$"
+    },
+    "github_item_id": {
+      "type": "string",
+      "pattern": "^github:repo:[a-z0-9][a-z0-9-]{0,38}/[a-z0-9._-]{1,100}$"
+    },
+    "locator": {
+      "description": "A sanitized http(s) locator (sanitize_url output). The not-pattern is defence in depth: sanitize_url removes these parameter names, so a locator that still carries one was never sanitized.",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^https?://[^\\s]+$",
+      "not": {
+        "pattern": "[?&#](access_token|refresh_token|id_token|token|auth_token|oauth_token|bearer|jwt|password|passwd|pwd|secret|client_secret|api_key|apikey|key|session|sessionid|session_id|sid|sig|signature|x-amz-signature|x-goog-signature|code|state)="
+      }
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "short_text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "percent": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "coverage": {
+      "enum": ["full", "partial", "blocked", "deleted", "empty"]
+    },
+    "no_content_coverage": {
+      "enum": ["blocked", "deleted", "empty"]
+    },
+    "retrieval_method": {
+      "enum": ["x_api", "live", "archive"]
+    },
+    "disposition": {
+      "enum": ["candidate", "reference_only", "needs_evidence", "deferred", "rejected"]
+    },
+    "withdrawal_reason": {
+      "enum": ["retention", "operator_request", "source_deleted", "policy_hidden"]
+    },
+    "contract_name": {
+      "const": "muninn-research-intake"
+    },
+    "contract_version": {
+      "description": "Any 0.1.x release or draft validates against the 0.1 schemas.",
+      "type": "string",
+      "pattern": "^0\\.1\\.[0-9]+(-draft)?$"
+    },
+    "revision_ref": {
+      "description": "Reference to a content revision: its ULID and its content_sha256.",
+      "type": "object",
+      "required": ["ref", "digest"],
+      "additionalProperties": false,
+      "properties": {
+        "ref": { "$ref": "#/$defs/ulid" },
+        "digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "assessment_ref": {
+      "description": "Reference to an assessment: its ULID and the sha256 of its canonical JSON.",
+      "type": "object",
+      "required": ["ref", "digest"],
+      "additionalProperties": false,
+      "properties": {
+        "ref": { "$ref": "#/$defs/ulid" },
+        "digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "profile_ref": {
+      "description": "Reference to an interest-profile revision: profile_id and the sha256 of the profile's canonical JSON.",
+      "type": "object",
+      "required": ["ref", "digest"],
+      "additionalProperties": false,
+      "properties": {
+        "ref": { "$ref": "#/$defs/slug" },
+        "digest": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "packet_ref": {
+      "description": "Reference to an evidence-packet revision: <packet ULID>@<revision> and the sha256 of the packet's canonical JSON.",
+      "type": "object",
+      "required": ["ref", "digest"],
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^[0-7][0-9A-HJKMNP-TV-Z]{25}@[1-9][0-9]{0,8}$"
+        },
+        "digest": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "source-item",
+    "expect": "valid",
+    "covers": [
+      "linked page later captured as blocked"
+    ],
+    "why": "valid source item"
+  },
+  "record": {
+    "record_type": "source-item",
+    "item_id": "web:09fc5f88293d378d5cd71bcf4af7c2125f9bcf83421fb67120f11e8f96963782",
+    "kind": "web_page",
+    "locator": "https://t.co/SynthB0003",
+    "title": null,
+    "published_at": null,
+    "redaction": {
+      "param_names": [],
+      "path_redacted": false,
+      "userinfo_redacted": false
+    }
+  }
+}

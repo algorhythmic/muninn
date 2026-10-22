@@ -1,0 +1,22 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "item-link",
+    "expect": "valid",
+    "covers": [
+      "URL entity resolved from unwound_url"
+    ],
+    "why": "valid link"
+  },
+  "record": {
+    "record_type": "item-link",
+    "parent_item_id": "x:post:1900000000000000001",
+    "child_item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+    "relation": "links_to",
+    "position": 0,
+    "locator_resolution": "unwound",
+    "entity_status": 200,
+    "first_seen_at": "2026-10-20T08:00:00Z"
+  }
+}

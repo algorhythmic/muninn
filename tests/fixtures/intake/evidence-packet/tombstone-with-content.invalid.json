@@ -1,0 +1,51 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "evidence-packet",
+    "expect": "invalid",
+    "covers": [
+      "tombstone shape"
+    ],
+    "why": "a tombstone carries no content",
+    "fails_at": "",
+    "fails_with": "'items' was unexpected"
+  },
+  "record": {
+    "record_type": "evidence-packet",
+    "contract": "muninn-research-intake",
+    "contract_version": "0.1.0-draft",
+    "status": "withdrawn",
+    "packet_id": "01M5CFFNW0FQ053JHJZVCQNEDA",
+    "revision": 1,
+    "digest": "8f2fd172b5573976a72eb7f1714280ee3c923e207862a91943cef27ae05af31e",
+    "withdrawn_at": "2026-10-21T08:00:00Z",
+    "withdrawal_reason": "operator_request",
+    "items": [
+      {
+        "record_type": "source-item",
+        "item_id": "x:post:1900000000000000001",
+        "kind": "x_post",
+        "locator": "https://x.com/synth_author_a/status/1900000000000000001",
+        "title": null,
+        "published_at": "2026-09-30T14:05:00Z",
+        "language": "en",
+        "author": {
+          "platform_id": "1900000000000000901",
+          "handle": "synth_author_a",
+          "display_name": "Synthetic Author A"
+        },
+        "x_post": {
+          "conversation_id": "1900000000000000001",
+          "is_long_post": true,
+          "has_media": false
+        },
+        "redaction": {
+          "param_names": [],
+          "path_redacted": false,
+          "userinfo_redacted": false
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "assessment",
+    "expect": "valid",
+    "covers": [
+      "assessment of the changed-content revision"
+    ],
+    "why": "valid assessment"
+  },
+  "record": {
+    "record_type": "assessment",
+    "assessment_id": "01M5EJE0J0YHPX52JMK7CEZVRB",
+    "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+    "content_revision": {
+      "ref": "01M5EGTQY07141HHE4EDJF59CG",
+      "digest": "bce2d570ca7682c4e49ec530422c846cbebfc889d878ecaa64d8bee75b0f40b9"
+    },
+    "coverage": "full",
+    "interest_profile": {
+      "ref": "operator-research",
+      "digest": "a468c275b1802aea59d6eaf8cb585c32e07bc9aeebd29ab4588066a3e9923b13"
+    },
+    "policy_version": "intake-policy/1",
+    "model": "synthetic-model-small",
+    "prompt_version": "suitability_v1",
+    "disposition": "needs_evidence",
+    "relevance": 64,
+    "confidence": 60,
+    "rationale": "The update weakens the headline result. The claim needs the corrected numbers.",
+    "matched_interests": [
+      "retrieval-eval"
+    ],
+    "unresolved_questions": [
+      "What did the tokenizer fix change?"
+    ],
+    "assessed_at": "2026-10-21T06:30:00Z",
+    "prior_assessment": {
+      "ref": "01M5CJXHG05GX44JEQE1R0B1J9",
+      "digest": "c688da6ee0c951abe5dff8c7b3cdcb0de2e6bfa497118be355da4ea13b1d0bee"
+    }
+  }
+}

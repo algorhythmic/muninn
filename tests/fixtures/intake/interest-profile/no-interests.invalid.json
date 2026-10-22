@@ -1,0 +1,26 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "interest-profile",
+    "expect": "invalid",
+    "covers": [
+      "interests"
+    ],
+    "why": "a profile needs at least one interest",
+    "fails_at": "interests"
+  },
+  "record": {
+    "record_type": "interest-profile",
+    "profile_id": "operator-research",
+    "label": "Synthetic research interests",
+    "version_label": "v1",
+    "interests": [],
+    "exclusions": [
+      {
+        "exclusion_id": "hype",
+        "description": "Announcements without method or data."
+      }
+    ]
+  }
+}

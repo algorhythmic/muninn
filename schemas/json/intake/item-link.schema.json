@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:item-link:0.1",
+  "title": "Item link",
+  "description": "An explicit parent/child relation between two source items (an item_links row). Parent and child must differ.",
+  "type": "object",
+  "required": ["record_type", "parent_item_id", "child_item_id", "relation", "position", "locator_resolution", "first_seen_at"],
+  "additionalProperties": false,
+  "properties": {
+    "record_type": { "const": "item-link" },
+    "parent_item_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id" },
+    "child_item_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id" },
+    "relation": {
+      "description": "links_to: a URL entity in the parent. quotes / replies_to: a referenced post. article: an X Article attached to the post.",
+      "enum": ["links_to", "quotes", "replies_to", "article"]
+    },
+    "position": {
+      "description": "0-based order of the link within the parent (URL entity index for links_to, 0 otherwise).",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count"
+    },
+    "locator_resolution": {
+      "description": "Which X URL-entity field gave the child's locator (unwound_url, expanded_url, or only the t.co url), or api_reference for a post referenced by id.",
+      "enum": ["unwound", "expanded", "short", "api_reference"]
+    },
+    "entity_status": {
+      "description": "HTTP status X reported on the URL entity, when present.",
+      "oneOf": [
+        { "type": "integer", "minimum": 100, "maximum": 599 },
+        { "type": "null" }
+      ]
+    },
+    "first_seen_at": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "relation": { "const": "links_to" } } },
+      "then": { "properties": { "locator_resolution": { "enum": ["unwound", "expanded", "short"] } } }
+    },
+    {
+      "if": { "properties": { "relation": { "enum": ["quotes", "replies_to"] } } },
+      "then": {
+        "properties": {
+          "locator_resolution": { "const": "api_reference" },
+          "child_item_id": { "pattern": "^x:post:" }
+        }
+      }
+    }
+  ]
+}

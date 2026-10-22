@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:bookmark-observation:0.1",
+  "title": "Bookmark observation",
+  "description": "When and how the operator's bookmark of an item was observed. This is the bookmark observation time, kept separate from the publication and retrieval times. 'Recently bookmarked' never implies 'newly published'.",
+  "type": "object",
+  "required": ["record_type", "item_id", "source", "observed_at", "observed_at_basis"],
+  "additionalProperties": false,
+  "properties": {
+    "record_type": { "const": "bookmark-observation" },
+    "item_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id" },
+    "source": {
+      "description": "The bookmark collection the observation came from (bookmarks.source).",
+      "enum": ["x", "bookmarks_html"]
+    },
+    "observed_at": {
+      "description": "bookmarks.captured_at. For X it is the first sync that saw the bookmark, an upper bound on when it was made.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp"
+    },
+    "observed_at_basis": {
+      "description": "source_reported: the source states the bookmark time (browser ADD_DATE). first_seen_by_sync: muninn's first observation (X).",
+      "enum": ["source_reported", "first_seen_by_sync"]
+    },
+    "last_observed_at": {
+      "description": "Most recent sync that still saw the bookmark (optional).",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp"
+    },
+    "sync_run_id": {
+      "description": "ULID of the sync run (sync_checkpoints.run_ulid) that first observed the bookmark.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid"
+    },
+    "folder_ids": {
+      "description": "OPEN (RI-02a): X bookmark-folder IDs holding the item. Folder semantics and billing are unqualified.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[0-9A-Za-z_-]{1,64}$" }
+    },
+    "list_position": {
+      "description": "OPEN (RI-02a): 0-based position in the bookmark listing at first observation. Ordering semantics are unqualified.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count"
+    }
+  }
+}

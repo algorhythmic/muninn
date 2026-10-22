@@ -1,0 +1,44 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "assessment",
+    "expect": "valid",
+    "covers": [
+      "changed-profile reassessment: same content revision, new profile digest, prior_assessment set"
+    ],
+    "why": "valid assessment"
+  },
+  "record": {
+    "record_type": "assessment",
+    "assessment_id": "01M5CJXHG05GX44JEQE1R0B1J9",
+    "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+    "content_revision": {
+      "ref": "01M5C5BWHGPNWXPZMBKNJMHZNP",
+      "digest": "e7e96498a4fd286181bd4acb29719be9cfc36a1c05fa70857fc035040018fcaf"
+    },
+    "coverage": "full",
+    "interest_profile": {
+      "ref": "operator-research",
+      "digest": "a468c275b1802aea59d6eaf8cb585c32e07bc9aeebd29ab4588066a3e9923b13"
+    },
+    "policy_version": "intake-policy/1",
+    "model": "synthetic-model-small",
+    "prompt_version": "suitability_v1",
+    "disposition": "candidate",
+    "relevance": 88,
+    "confidence": 70,
+    "rationale": "Re-assessed under profile v2 (higher retrieval weight). Same content revision.",
+    "matched_interests": [
+      "retrieval-eval"
+    ],
+    "unresolved_questions": [
+      "Is the benchmark corpus available?"
+    ],
+    "assessed_at": "2026-10-20T12:00:00Z",
+    "prior_assessment": {
+      "ref": "01M5C8KYM0YNFZ2VV6YGSP09KB",
+      "digest": "bff2e87f28c1b19830f68f3654aaa4d7fc41ee38ec57bd8d2afaa918a13429f3"
+    }
+  }
+}

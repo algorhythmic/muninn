@@ -1,0 +1,37 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "source-item",
+    "expect": "invalid",
+    "covers": [
+      "identity rules"
+    ],
+    "why": "kind x_post with a web: item_id",
+    "fails_at": "item_id"
+  },
+  "record": {
+    "record_type": "source-item",
+    "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+    "kind": "x_post",
+    "locator": "https://x.com/synth_author_a/status/1900000000000000001",
+    "title": null,
+    "published_at": "2026-09-30T14:05:00Z",
+    "language": "en",
+    "author": {
+      "platform_id": "1900000000000000901",
+      "handle": "synth_author_a",
+      "display_name": "Synthetic Author A"
+    },
+    "x_post": {
+      "conversation_id": "1900000000000000001",
+      "is_long_post": true,
+      "has_media": false
+    },
+    "redaction": {
+      "param_names": [],
+      "path_redacted": false,
+      "userinfo_redacted": false
+    }
+  }
+}

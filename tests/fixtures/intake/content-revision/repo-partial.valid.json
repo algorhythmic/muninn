@@ -1,0 +1,33 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "content-revision",
+    "expect": "valid",
+    "covers": [
+      "partial capture"
+    ],
+    "why": "valid revision"
+  },
+  "record": {
+    "record_type": "content-revision",
+    "revision_id": "01M5C5CG2GY6JXYP3FC3EFEGVY",
+    "item_id": "github:repo:synthetic-org/synthetic-repo",
+    "content_sha256": "497e05804767f2bf720d55025710393a7024e0259285a7bc82f933b4c1bd8ec0",
+    "normalization": "muninn-text/1",
+    "char_count": 77,
+    "coverage": "partial",
+    "retrieval_method": "live",
+    "freshness": "current",
+    "extractor": {
+      "name": "muninn.scrape.extract",
+      "version": "selectolax-0.4.13"
+    },
+    "http_status": 200,
+    "published_at": null,
+    "retrieved_at": "2026-10-20T08:03:30Z",
+    "observed_at": "2026-10-20T08:00:00Z",
+    "scrape_pass": "live",
+    "text": "synthetic-repo\n\nA synthetic hybrid retrieval toolkit. Installation: see docs."
+  }
+}
