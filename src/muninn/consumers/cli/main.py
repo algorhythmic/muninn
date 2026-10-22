@@ -9,8 +9,10 @@ import-time side effects.
 
 Subcommand layout matches the SPEC's pipeline order:
 
-    muninn ingest <path>
-    muninn scrape [--concurrency N]
+    muninn ingest <path>              # same as `muninn ingest html <path>`
+    muninn ingest x [--max-pages N | --all] [--full] [--resume] [--dry-run]
+    muninn x auth                     # OAuth 2.0 PKCE login for `ingest x`
+    muninn scrape [--concurrency N] [--limit N] [--source S]... [--refresh]
     muninn enrich [--dry-run] [--force] [--prompt-version per_bookmark_vN]
     muninn enrich --task suitability [--source x] [--since D] [--until D]
                   [--limit N] [--max-cost-usd 1.00] [--model M] [--profile P] [--dry-run]
@@ -41,7 +43,24 @@ from .status import status_cmd
 from .triage import triage_cmd
 
 
-@click.group()
+class MuninnGroup(click.Group):
+    """Root group: turns a schema-version mismatch from any command into a
+    one-line error instead of a traceback."""
+
+    def invoke(self, ctx: click.Context):
+        try:
+            return super().invoke(ctx)
+        except click.ClickException:
+            raise
+        except Exception as exc:
+            from muninn.db import SchemaVersionError  # lazy
+
+            if isinstance(exc, SchemaVersionError):
+                raise click.ClickException(str(exc)) from exc
+            raise
+
+
+@click.group(cls=MuninnGroup)
 @click.option(
     "--db",
     envvar="MUNINN_DB_PATH",
@@ -58,7 +77,27 @@ def cli(ctx: click.Context, db: str | None) -> None:
 # ── pipeline (lazy-imported owners) ────────────────────────────────
 
 
-@cli.command("ingest")
+class _IngestGroup(click.Group):
+    """`muninn ingest <path>` keeps working: an argument that is not a
+    subcommand name is routed to `ingest html` (a file literally named `x`
+    needs `muninn ingest html x` or `./x`)."""
+
+    def resolve_command(self, ctx: click.Context, args: list[str]):
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            return "html", self.commands["html"], args
+        return super().resolve_command(ctx, args)
+
+    def format_usage(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        formatter.write_usage(ctx.command_path, "[PATH | html PATH | x [OPTIONS]]")
+
+
+@cli.group("ingest", cls=_IngestGroup)
+@click.pass_context
+def ingest_group(ctx: click.Context) -> None:
+    """Ingest saved material: a bookmarks.html file (`ingest PATH`) or X bookmarks (`ingest x`)."""
+
+
+@ingest_group.command("html")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False))
 @click.pass_context
 def ingest_cmd(ctx: click.Context, path: str) -> None:
@@ -79,6 +118,194 @@ def ingest_cmd(ctx: click.Context, path: str) -> None:
     )
 
 
+def _x_oauth(settings, *, require_redirect: bool):
+    from muninn.ingest.x import OAuthClientConfig  # lazy (httpx)
+
+    if not settings.client_id:
+        raise click.ClickException(
+            "MUNINN_X_CLIENT_ID is not set (the X developer app's OAuth 2.0 client ID)."
+        )
+    if require_redirect and not settings.redirect_uri:
+        raise click.ClickException(
+            "MUNINN_X_REDIRECT_URI is not set (the callback URL registered on the X app)."
+        )
+    return OAuthClientConfig(
+        client_id=settings.client_id,
+        client_secret=settings.client_secret,
+        redirect_uri=settings.redirect_uri or "",
+    )
+
+
+@ingest_group.command("x")
+@click.option("--max-pages", type=click.IntRange(min=1), default=None,
+              help="Stop after N pages (default 10, about 1000 posts).")
+@click.option("--all", "all_pages", is_flag=True, help="No page bound: walk until done.")
+@click.option("--full", is_flag=True,
+              help="Walk the whole list instead of stopping at the first page of known bookmarks.")
+@click.option("--resume", is_flag=True,
+              help="Continue the newest unfinished run (paused, exhausted, failed or interrupted).")
+@click.option("--dry-run", is_flag=True, help="Print the plan and cost bound; no API call, no writes.")
+@click.option("--token-file", type=click.Path(dir_okay=False), default=None,
+              help="X token file (default: MUNINN_X_TOKEN_FILE or $MUNINN_DATA_DIR/x-tokens.json).")
+@click.pass_context
+def ingest_x_cmd(
+    ctx: click.Context,
+    max_pages: int | None,
+    all_pages: bool,
+    full: bool,
+    resume: bool,
+    dry_run: bool,
+    token_file: str | None,
+) -> None:
+    """Sync X bookmarks (posts, linked pages and repos) via the X API.
+
+    Incremental by default: starts at the newest bookmark and stops after
+    the first page whose posts are all known. Each page costs money
+    (pay-per-use), so runs are bounded by --max-pages unless --all.
+    """
+    from pathlib import Path
+
+    from muninn.config import load_x_settings  # lazy
+    from muninn.ingest.x_store import (  # lazy (httpx)
+        DEFAULT_MAX_PAGES,
+        NothingToResume,
+        SyncOptions,
+        XPricing,
+        format_usd,
+    )
+
+    if all_pages and max_pages is not None:
+        raise click.UsageError("--max-pages and --all are mutually exclusive.")
+    pages = None if all_pages else (max_pages or DEFAULT_MAX_PAGES)
+    settings = load_x_settings()
+    token_path = Path(token_file).expanduser() if token_file else settings.token_path
+    options = SyncOptions(max_pages=pages, mode="full" if full else "incremental", resume=resume)
+    pricing = XPricing()
+    per_page = 100
+    if pages is None:
+        bound = "no page bound (--all)"
+    else:
+        bound = (f"up to {pages} page(s) x {per_page} posts: about "
+                 f"{format_usd(pricing.estimate_posts(pages, per_page))} for posts")
+    click.echo(
+        f"X bookmark sync ({options.mode}{', resume' if resume else ''}): {bound}, "
+        f"estimated at {format_usd(pricing.micro_usd_per_resource)} per resource "
+        "(owned reads; expansions may add)."
+    )
+    if dry_run:
+        from muninn.db import connect  # lazy
+        from muninn.ingest.x_store import find_resumable
+
+        click.echo(f"Token file: {token_path} ({'present' if token_path.is_file() else 'missing'})")
+        if resume:
+            conn = connect(ctx.obj.get("db"))
+            try:
+                row = find_resumable(conn, account_ref=None)
+            finally:
+                conn.close()
+            if row is None:
+                click.echo("Nothing to resume.")
+            else:
+                click.echo(
+                    f"Would resume run {row['run_ulid']} ({row['status']}, "
+                    f"{row['pages_fetched']} page(s) so far)."
+                )
+        click.echo("Dry run: no API call, nothing written.")
+        return
+
+    if not token_path.is_file():
+        raise click.ClickException(f"No X tokens at {token_path}: run `muninn x auth` first.")
+    oauth = _x_oauth(settings, require_redirect=False)
+
+    from muninn.db import connect  # lazy
+    from muninn.ingest.x import JsonFileTokenStore, XClient, XError
+    from muninn.ingest.x_store import sync_bookmarks
+
+    conn = connect(ctx.obj.get("db"))
+    try:
+        with XClient(oauth, JsonFileTokenStore(token_path)) as client:
+            report = sync_bookmarks(conn, client, options=options, pricing=pricing)
+    except NothingToResume as exc:
+        raise click.ClickException(str(exc)) from exc
+    except XError as exc:
+        raise click.ClickException(f"X API: {exc}") from exc
+    finally:
+        conn.close()
+
+    click.echo(
+        f"Run {report.run_ulid}: {report.status} ({report.stop_reason}); "
+        f"pages={report.pages} posts={report.posts_seen} new={report.posts_new} "
+        f"problems={report.problems} new_revisions={report.revisions_new}; "
+        f"estimated cost {format_usd(report.cost_micro_usd)} ({report.resources} resources)."
+    )
+    if report.cap_reached:
+        click.echo("Note: reached the configured bookmark cap; older bookmarks may be invisible to the API.")
+    if report.status == "paused":
+        when = f" after epoch {report.resume_after}" if report.resume_after else ""
+        click.echo(f"Paused ({report.stop_reason}); continue{when} with `muninn ingest x --resume`.")
+    elif report.status == "exhausted":
+        click.echo("X usage cap reached; after a top-up or the next cycle, run `muninn ingest x --resume`.")
+    elif report.status == "failed":
+        raise click.ClickException(
+            f"X sync failed ({report.error_code}): {report.error_detail}. "
+            "Fix the cause, then `muninn ingest x --resume`."
+        )
+
+
+@cli.group("x")
+@click.pass_context
+def x_group(ctx: click.Context) -> None:
+    """X account access for `muninn ingest x`."""
+
+
+@x_group.command("auth")
+@click.option("--token-file", type=click.Path(dir_okay=False), default=None,
+              help="Where to save tokens (default: MUNINN_X_TOKEN_FILE or $MUNINN_DATA_DIR/x-tokens.json).")
+def x_auth_cmd(token_file: str | None) -> None:
+    """Log in to X (OAuth 2.0 PKCE) and save tokens (mode 0600).
+
+    Open the printed URL, approve access, then paste the full redirect URL
+    (or just its `code` value). Needs MUNINN_X_CLIENT_ID and
+    MUNINN_X_REDIRECT_URI (MUNINN_X_CLIENT_SECRET for a confidential app).
+    """
+    from pathlib import Path
+    from urllib.parse import parse_qs, urlsplit
+
+    from muninn.config import load_x_settings  # lazy
+    from muninn.ingest.x import JsonFileTokenStore, XError, exchange_code, start_authorization
+
+    settings = load_x_settings()
+    token_path = Path(token_file).expanduser() if token_file else settings.token_path
+    oauth = _x_oauth(settings, require_redirect=True)
+    request = start_authorization(oauth)
+    click.echo("Open this URL in a browser and approve access:\n")
+    click.echo(request.url)
+    click.echo("")
+    # Hidden: the redirect carries the authorization code, a short-lived credential.
+    pasted = click.prompt(
+        "Paste the redirect URL (or the code; input is hidden)", prompt_suffix=": ", hide_input=True
+    ).strip()
+    if "?" in pasted or "://" in pasted:
+        query = parse_qs(urlsplit(pasted).query)
+        if "error" in query:
+            raise click.ClickException(f"Authorization was not granted: {query['error'][0]}")
+        code = (query.get("code") or [""])[0]
+        state = (query.get("state") or [None])[0]
+        if state is not None and state != request.state:
+            raise click.ClickException("State mismatch: the redirect is not from this login; try again.")
+    else:
+        code = pasted
+    if not code:
+        raise click.ClickException("No authorization code found in the input.")
+    try:
+        tokens = exchange_code(oauth, code=code, code_verifier=request.pkce.verifier)
+    except XError as exc:
+        raise click.ClickException(f"Token exchange failed: {exc}") from exc
+    JsonFileTokenStore(token_path).save(tokens)
+    refresh = "with" if tokens.refresh_token else "without"
+    click.echo(f"Saved X tokens ({refresh} refresh token) to {token_path} (mode 0600).")
+
+
 @cli.command("scrape")
 @click.option(
     "--concurrency",
@@ -92,12 +319,31 @@ def ingest_cmd(ctx: click.Context, path: str) -> None:
     default=None,
     help="Scrape only the N most recently captured bookmarks (newest first).",
 )
+@click.option(
+    "--source",
+    "sources",
+    multiple=True,
+    help="Only rows from this bookmarks.source (repeatable), e.g. x_link. X posts are never scraped.",
+)
+@click.option(
+    "--refresh",
+    is_flag=True,
+    help="Bypass the live HTTP cache so changed pages are re-captured (archive snapshots stay cached).",
+)
 @click.pass_context
-def scrape_cmd(ctx: click.Context, concurrency: int, limit: int | None) -> None:
+def scrape_cmd(
+    ctx: click.Context, concurrency: int, limit: int | None, sources: tuple[str, ...], refresh: bool
+) -> None:
     """Run dual-pass scrape (live + at_capture + recent_archive fallback) for visible bookmarks."""
     from muninn.scrape.pipeline import run_scrape  # lazy
 
-    result = run_scrape(db_path=ctx.obj.get("db"), concurrency=concurrency, limit=limit)
+    result = run_scrape(
+        db_path=ctx.obj.get("db"),
+        concurrency=concurrency,
+        limit=limit,
+        refresh=refresh,
+        sources=sources or None,
+    )
     click.echo(f"Scrape complete: {result}")
 
 

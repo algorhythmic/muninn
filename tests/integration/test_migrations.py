@@ -411,7 +411,9 @@ def test_cli_behind_db_fails_until_migrated(tmp_path: Path, monkeypatch: pytest.
     runner = CliRunner()
 
     blocked = runner.invoke(cli, ["--db", str(path), "status"])
-    assert isinstance(blocked.exception, SchemaVersionError)
+    # The root group reports SchemaVersionError as a one-line error, not a traceback.
+    assert blocked.exit_code == 1 and "run `muninn db migrate`" in blocked.output
+    assert "Traceback" not in blocked.output
 
     migrated = runner.invoke(cli, ["--db", str(path), "db", "migrate"])
     assert migrated.exit_code == 0, migrated.output

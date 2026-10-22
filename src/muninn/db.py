@@ -88,6 +88,25 @@ def connect(
     return conn
 
 
+def require_current_schema(
+    db_path: Path | str | None = None, *, migrations_dir: Path | str | None = None
+) -> Path:
+    """The cheap version check of `connect()`, for readers that open the file
+    some other way (DuckDB ATTACH). Opens read-only and changes nothing.
+    Raises SchemaVersionError if the file is missing or behind; returns the path."""
+    path = _resolve(db_path)
+    if not path.exists():
+        raise SchemaVersionError(
+            f"No muninn database at {path}: run `muninn db migrate` to create it."
+        )
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
+        _check_schema(conn, len(discover_migrations(migrations_dir)))
+    finally:
+        conn.close()
+    return path
+
+
 def init_db(
     db_path: Path | str | None = None, *, migrations_dir: Path | str | None = None
 ) -> sqlite3.Connection:
@@ -278,8 +297,7 @@ def duckdb_attached(db_path: Path | str | None = None):
     `sqlite_db`. Used by analytics consumers (timeline, parquet)."""
     import duckdb
 
-    if db_path is None:
-        db_path = load_paths().db_path
+    db_path = require_current_schema(db_path)
     con = duckdb.connect()
     con.execute(f"ATTACH '{db_path}' AS sqlite_db (TYPE sqlite, READ_ONLY)")
     return con
