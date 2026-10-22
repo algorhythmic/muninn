@@ -28,7 +28,7 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn export packets --withdraw PACKET_ID@REV --reason REASON
     muninn timeline [--out p.json]
     muninn vault compile
-    muninn mcp
+    muninn mcp [--transport stdio|http] [--host H] [--port P] [--allowed-host NAME]...
     muninn db migrate [--dry-run]
     muninn db status
 """
@@ -878,12 +878,48 @@ def vault_compile_cmd(
 
 
 @cli.command("mcp")
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "http"]),
+    default="stdio",
+    show_default=True,
+    help="stdio for a local client; http for FastMCP's streamable HTTP at /mcp.",
+)
+@click.option(
+    "--host",
+    default=None,
+    help="HTTP bind address [default: 127.0.0.1]. Anything else must be a "
+    "tailnet-only address: the endpoint has no authentication.",
+)
+@click.option(
+    "--port",
+    type=click.IntRange(0, 65535),
+    default=None,
+    help="HTTP port [default: 8000].",
+)
+@click.option(
+    "--allowed-host",
+    "allowed_hosts",
+    multiple=True,
+    help="Extra Host header name to accept over HTTP, e.g. the MagicDNS name "
+    "`tailscale serve` forwards. Repeatable.",
+)
 @click.pass_context
-def mcp_cmd(ctx: click.Context) -> None:
-    """Run the FastMCP server on stdio."""
-    from muninn.consumers.mcp.server import main as mcp_main  # lazy
+def mcp_cmd(
+    ctx: click.Context,
+    transport: str,
+    host: str | None,
+    port: int | None,
+    allowed_hosts: tuple[str, ...],
+) -> None:
+    """Run the FastMCP server (stdio by default; see docs/mcp-api.md)."""
+    from muninn.consumers.mcp.server import TransportConfigError  # lazy
+    from muninn.consumers.mcp.server import main as mcp_main
 
-    mcp_main()
+    try:
+        mcp_main(transport, host=host, port=port, allowed_hosts=allowed_hosts)
+    except TransportConfigError as exc:
+        raise click.UsageError(str(exc)) from None
 
 
 # ── db (schema migrations; explicit, never implicit) ───────────────
