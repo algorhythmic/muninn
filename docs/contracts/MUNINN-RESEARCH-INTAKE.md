@@ -531,18 +531,29 @@ and a tombstone takes its place:
   cleared, `withdrawn_at` and `withdrawal_reason` set, row kept) when the
   reason removes the material itself, unless another active packet still
   references the revision:
-  - `source_deleted`: the packet's revisions of the items whose source row
-    is gone;
+  - `source_deleted`: every readable revision of the items deleted at
+    their source, including revisions this packet does not carry;
   - `retention`: every revision the packet carries.
 
   `policy_hidden` and `operator_request` keep the content revisions. The
   material is still muninn's; it is only no longer exported.
 
+An item is **deleted at its source** when its source row is gone, or when
+its current revision (section 3.2) has coverage `deleted`. That is how a
+sync records an X post the API reports as not found, or a linked page that
+now answers 404 or 410. The earlier revisions of such an item are never
+exported again. Neither is any assessment made on or citing them, nor one
+whose model call was shown them (section 6.1). Its `deleted` revision may
+still be exported, and an assessment of it may qualify a new packet
+revision.
+
 Withdrawal is automatic (**implemented**). Each export run starts by
 checking every active packet revision against muninn's current rows:
 
-- If any item in the packet no longer has a source row, the revision is
-  withdrawn with `source_deleted`.
+- If any item in the packet is deleted at its source, the revision is
+  withdrawn with `source_deleted`. For an item whose row still exists,
+  this applies only when the packet carries readable content of it, so a
+  packet that carries just the deletion is not withdrawn again.
 - Otherwise, if any item in it is hidden (`content_visible = 0`), the
   revision is withdrawn with `policy_hidden`.
 
@@ -892,7 +903,7 @@ Design questions for review:
   records names and flags only.
 - Un-bookmark detection. 0.1 records `last_observed_at` only. Whether a
   removed bookmark should withdraw packets is open. The withdrawal sweep
-  (section 7) acts only on deleted rows and hidden items.
+  (section 7) acts only on items deleted at their source and hidden items.
 - A dedicated `enrichment_source = 'x_api'` value, deferred until a
   `bookmarks` rebuild is needed for another reason (section 10).
 - Database-enforced append-only behaviour (triggers), deferred until the

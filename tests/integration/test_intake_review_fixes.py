@@ -382,3 +382,75 @@ def test_prior_assessment_is_omitted_when_its_target_is_left_out(fresh_db, tmp_p
     only["prior_assessment"] = stored["prior_assessment"]
     packet["primary_assessment"]["digest"] = record_digest(only)
     assert "assessments[0].prior_assessment is not in assessments" in packet_integrity_errors(packet)
+
+
+# ── Finding 4: content its source deleted is withdrawn, not re-exported ─
+
+DELETED_MARKER = "DELETEDMARKER"
+
+
+def test_source_deleted_post_withdraws_its_packet_and_its_text(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    post, link = _post_with_link(conn)
+    add_revision(conn, post, f"Original text {DELETED_MARKER} about retrieval eval, older.", retrieval_method="x_api",
+                 retrieved_at=T0 + 1, published_at=T0 - 100, observed_at=T0)  # an older text, never exported
+    add_revision(conn, post, f"Original text {DELETED_MARKER} about retrieval eval.", retrieval_method="x_api",
+                 retrieved_at=T0 + 2, published_at=T0 - 100, observed_at=T0)
+    profile = load_interest_profile(write_profile(tmp_path))
+    assess_suitability(conn, profile, fake_client(), model=MODEL, now=T0 + 100)
+    out = tmp_path / "out"
+    (r1,) = export_packets(conn, out, now=T0 + 150).written
+
+    # The author deletes the post: the next sync records a 'deleted' revision.
+    add_revision(conn, post, "", coverage="deleted", retrieval_method="x_api", retrieved_at=T0 + 200,
+                 published_at=T0 - 100, observed_at=T0)
+    run = export_packets(conn, out, now=T0 + 250)
+    assert [(p.ref, reason) for p, reason in run.withdrawn] == [(r1.ref, "source_deleted")]
+    assert run.written == [] and run.unchanged == []
+    texts = conn.execute(
+        "SELECT coverage, content_text, withdrawal_reason FROM scrape_history WHERE item_ref = ? ORDER BY scrape_history_id",
+        (post.item_id,),
+    ).fetchall()
+    # Every readable revision of the post is withdrawn, not only the exported one.
+    assert [(r["coverage"], r["content_text"], r["withdrawal_reason"]) for r in texts] == [
+        ("full", None, "source_deleted"), ("full", None, "source_deleted"),
+        ("full", None, "source_deleted"), ("deleted", None, None)]
+    assert run.revisions_withdrawn == 3
+    # The linked page still exists, so its content stays.
+    assert conn.execute("SELECT content_text FROM scrape_history WHERE item_ref = ?", (link.item_id,)).fetchone()[0]
+
+    # Reassessed on the deletion (the linked page is still readable): exported
+    # again without the deleted text, and not withdrawn again by the next sweep.
+    reassess = assess_suitability(conn, profile, fake_client(default=judgement("needs_evidence")), model=MODEL,
+                                  now=T0 + 300)
+    assert reassess.assessed == 1
+    (r2,) = export_packets(conn, out, dispositions=("needs_evidence",), now=T0 + 350).written
+    packet = json.loads(r2.path.read_bytes())
+    assert (r2.revision, packet["previous_revision"]["ref"]) == (2, r1.ref)
+    post_revs = [r for r in packet["content_revisions"] if r["item_id"] == post.item_id]
+    assert [r["coverage"] for r in post_revs] == ["deleted"]
+    assert [a["coverage"] for a in packet["assessments"] if a["item_id"] == post.item_id] == ["deleted"]
+    assert DELETED_MARKER not in _packet_texts(out)
+    assert export_packets(conn, out, dispositions=("needs_evidence",), now=T0 + 400).withdrawn == []
+
+
+def test_assessments_of_a_deleted_items_old_content_are_never_exported(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    post, link = _post_with_link(conn)
+    profile = load_interest_profile(write_profile(tmp_path))
+    assess_suitability(conn, profile, fake_client(default=judgement(rationale="The notes show recall doubled.")),
+                       model=MODEL, now=T0 + 100)
+    assess_suitability(conn, profile, fake_client(), model=MODEL, sources=("x_link",), now=T0 + 100)
+    # The linked page now answers 404 (never exported, so nothing withdraws its old text).
+    add_revision(conn, link, "", coverage="deleted", retrieval_method="live", retrieved_at=T0 + 200, http_status=404)
+    run = export_packets(conn, tmp_path / "out", now=T0 + 250)
+    assert run.written == [] and run.skipped == [
+        (post.item_id, "primary assessment saw an item that is now hidden or deleted; reassess")]
+
+    assess_suitability(conn, profile, fake_client(default=judgement(rationale="Post only.")), model=MODEL, now=T0 + 300)
+    (written,) = export_packets(conn, tmp_path / "out", now=T0 + 350).written
+    packet = json.loads(written.path.read_bytes())
+    assert [r["coverage"] for r in packet["content_revisions"] if r["item_id"] == link.item_id] == ["deleted"]
+    assert not any(a["item_id"] == link.item_id for a in packet["assessments"])  # made on the old text
+    assert [a["rationale"] for a in packet["assessments"]] == ["Post only."]
+    assert "Hybrid retrieval" not in json.dumps(packet)

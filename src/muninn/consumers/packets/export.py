@@ -318,13 +318,16 @@ def packet_integrity_errors(packet: dict[str, Any]) -> list[str]:
 # Withdrawal rules (contract §7; ``withdrawals_due`` / the sweep that
 # starts every non-dry-run ``export_packets``): every active packet
 # revision is checked against the current ``bookmarks`` rows. If any of
-# its items no longer has a row it is withdrawn with ``source_deleted``;
-# otherwise, if any of its items is hidden (``content_visible = 0``) it is
-# withdrawn with ``policy_hidden``. A ``source_deleted`` withdrawal also
-# withdraws the content revisions the packet carries for the deleted items,
-# and a ``retention`` withdrawal (operator-initiated) every content
-# revision it carries, in both cases unless another active packet still
-# references the revision. ``policy_hidden`` and ``operator_request`` keep
+# its items is deleted at its source (no row any more, or a current
+# ``deleted`` revision while the packet carries readable content of it) it
+# is withdrawn with ``source_deleted``; otherwise, if any of its items is
+# hidden (``content_visible = 0``) it is withdrawn with ``policy_hidden``.
+# A ``source_deleted`` withdrawal also withdraws every readable revision of
+# the deleted items, and a ``retention`` withdrawal (operator-initiated)
+# every content revision the packet carries, in both cases unless another
+# active packet still references the revision. A source-deleted item's
+# earlier revisions, and assessments made on, citing or shown them, are
+# never exported again. ``policy_hidden`` and ``operator_request`` keep
 # the content revisions: the material is still muninn's, just not exported.
 
 _VOLATILE = ("packet_id", "revision", "previous_revision", "created_at")
@@ -535,7 +538,7 @@ def build_packet(
     latest_by_item: dict[str, dict[str, Any]] = {}
     for item_id, row in item_rows.items():
         current = R.current_revision_row(conn, item_id, row["bookmark_id"])
-        if current is not None and revision_exportable(current):
+        if current is not None and revision_exportable(current) and not statuses.superseded(current):
             revision_rows.setdefault(current["scrape_history_id"], current)
         for a in _item_assessments(conn, item_id):
             rec = R.assessment_record(conn, a, cache)
@@ -545,6 +548,8 @@ def build_packet(
             cited = _cited_revisions(conn, rec, included)
             if cited is None:
                 why = "primary assessment cites content the packet cannot include; reassess"
+            elif any(statuses.superseded(r) for r in (own, *cited)):
+                why = "primary assessment was made on content its source has since deleted; reassess"
             elif not all(revision_exportable(r) for r in (own, *cited)):
                 why = "primary assessment's revision quotes a hidden item's locator; re-sync and reassess"
             elif exposes(rec["rationale"]) or exposes(rec["unresolved_questions"]) or exposes(rec.get("evidence")):
@@ -671,28 +676,48 @@ def _masked_item(record: dict[str, Any], hidden: set[str]) -> dict[str, Any]:
 
 
 class _ItemStatus:
-    """Whether what an assessment's model call saw is still exportable.
+    """Per-item state the exporter checks assessments against (cached).
 
-    ``assessments.context_json`` lists every item shown. An assessment
-    whose context included an item that has since been hidden or deleted
-    may paraphrase that item in its free text (rationale, unresolved
-    questions), so it is never exported (contract §9). A withdrawn
-    revision in the context does not exclude it: withdrawal of a revision
-    the assessment cites (evidence) or was made on already does.
+    * **Visible**: the item has a ``bookmarks`` row, and none of its rows
+      is hidden.
+    * **Deleted at its source**: its current revision has coverage
+      ``deleted`` (an X post the API reports as not found, a page that now
+      answers 404/410). Its earlier revisions are superseded: they are not
+      exported, nor is any assessment made on or citing them (contract §7).
+    * **Context**: ``assessments.context_json`` lists every item a model
+      call was shown. An assessment whose context included an item that
+      has since been hidden or deleted (its row is gone, or its source
+      deleted it) may paraphrase that item in its free text (rationale,
+      unresolved questions), so it is never exported (contract §9). A
+      withdrawn revision in the context does not exclude it: withdrawal of
+      a revision the assessment cites (evidence) or was made on already does.
     """
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
-        self._states: dict[str, list[int] | None] = {}
+        self._rows: dict[str, list[tuple[int, int]] | None] = {}
+        self._deleted: dict[str, sqlite3.Row | None] = {}
 
-    def _state(self, item_id: str) -> list[int] | None:
-        if item_id not in self._states:
-            self._states[item_id] = _item_states(self.conn, {item_id}).get(item_id)
-        return self._states[item_id]
+    def _bookmarks(self, item_id: str) -> list[tuple[int, int]] | None:
+        if item_id not in self._rows:
+            self._rows[item_id] = _item_bookmarks(self.conn, {item_id}).get(item_id)
+        return self._rows[item_id]
 
     def visible(self, item_id: str) -> bool:
-        state = self._state(item_id)
-        return state is not None and 0 not in state
+        rows = self._bookmarks(item_id)
+        return rows is not None and all(visible for _, visible in rows)
+
+    def deleted_revision(self, item_id: str) -> sqlite3.Row | None:
+        """The item's current ``deleted`` revision, if its source deleted it."""
+        if item_id not in self._deleted:
+            rows = self._bookmarks(item_id) or []
+            self._deleted[item_id] = _source_deleted_revision(self.conn, item_id, [b for b, _ in rows])
+        return self._deleted[item_id]
+
+    def superseded(self, revision: sqlite3.Row) -> bool:
+        """True for a revision of a source-deleted item other than its deletion."""
+        deleted = self.deleted_revision(revision["item_ref"])
+        return deleted is not None and revision["scrape_history_id"] != deleted["scrape_history_id"]
 
     def context_exportable(self, assessment: sqlite3.Row) -> bool:
         try:
@@ -703,6 +728,8 @@ class _ItemStatus:
             if not (isinstance(entry, list) and len(entry) == 3 and isinstance(entry[0], str)):
                 return False
             if not self.visible(entry[0]):
+                return False
+            if entry[2] != "deleted" and self.deleted_revision(entry[0]) is not None:
                 return False
         return True
 
@@ -754,12 +781,12 @@ def _materialize(out_dir: Path, row: sqlite3.Row) -> bool:
 
 # ── Withdrawal ───────────────────────────────────────────────────────
 
-def _item_states(conn: sqlite3.Connection, item_ids: set[str]) -> dict[str, list[int]]:
-    """``content_visible`` of every ``bookmarks`` row that has one of these
-    item IDs. An ID with no row is missing from the result (deleted)."""
+def _item_bookmarks(conn: sqlite3.Connection, item_ids: set[str]) -> dict[str, list[tuple[int, int]]]:
+    """``(bookmark_id, content_visible)`` of every ``bookmarks`` row that has
+    one of these item IDs. An ID with no row is missing from the result."""
     from muninn.intake_records import item_ref_for_row
 
-    states: dict[str, list[int]] = {}
+    found: dict[str, list[tuple[int, int]]] = {}
     by_source = {"x:post:": "x", "x:article:": "x_article"}
     rest = set()
     for item_id in item_ids:
@@ -767,11 +794,11 @@ def _item_states(conn: sqlite3.Connection, item_ids: set[str]) -> dict[str, list
         if prefix is None:
             rest.add(item_id)
             continue
-        for (visible,) in conn.execute(
-            "SELECT content_visible FROM bookmarks WHERE source = ? AND source_id = ?",
+        for bookmark_id, visible in conn.execute(
+            "SELECT bookmark_id, content_visible FROM bookmarks WHERE source = ? AND source_id = ?",
             (by_source[prefix], item_id.removeprefix(prefix)),
         ):
-            states.setdefault(item_id, []).append(int(visible))
+            found.setdefault(item_id, []).append((int(bookmark_id), int(visible)))
     if rest:
         for row in conn.execute(
             "SELECT bookmark_id, source, source_id, url, source_metadata, content_visible "
@@ -782,16 +809,61 @@ def _item_states(conn: sqlite3.Connection, item_ids: set[str]) -> dict[str, list
             except ValueError:
                 continue
             if item_id in rest:
-                states.setdefault(item_id, []).append(int(row["content_visible"]))
-    return states
+                found.setdefault(item_id, []).append((int(row["bookmark_id"]), int(row["content_visible"])))
+    return found
+
+
+def _item_states(conn: sqlite3.Connection, item_ids: set[str]) -> dict[str, list[int]]:
+    """``content_visible`` of every ``bookmarks`` row that has one of these
+    item IDs. An ID with no row is missing from the result (deleted)."""
+    return {i: [v for _, v in rows] for i, rows in _item_bookmarks(conn, item_ids).items()}
+
+
+def _source_deleted_revision(
+    conn: sqlite3.Connection, item_id: str, bookmark_ids: Sequence[int]
+) -> sqlite3.Row | None:
+    """The item's current revision when its coverage is ``deleted`` (the
+    source deleted it: X ``resource-not-found``, HTTP 404/410), else None."""
+    from muninn.intake_records import current_revision_row
+
+    for bookmark_id in bookmark_ids:
+        current = current_revision_row(conn, item_id, bookmark_id)
+        if current is not None and current["coverage"] == "deleted":
+            return current
+    return None
+
+
+def _deleted_items(
+    conn: sqlite3.Connection,
+    body: dict[str, Any],
+    rows: dict[str, list[tuple[int, int]]],
+    cache: dict[str, bool] | None = None,
+) -> tuple[str, ...]:
+    """The packet's items deleted at their source: no ``bookmarks`` row any
+    more, or a current ``deleted`` revision while the packet still carries
+    readable content of the item (a packet carrying only the deletion
+    itself is not withdrawn again)."""
+    cache = cache if cache is not None else {}
+    readable = {r["item_id"] for r in body["content_revisions"] if r["coverage"] in ("full", "partial")}
+    out = []
+    for item in (i["item_id"] for i in body["items"]):
+        if item not in rows:
+            out.append(item)
+        elif item in readable:
+            if item not in cache:
+                cache[item] = _source_deleted_revision(conn, item, [b for b, _ in rows[item]]) is not None
+            if cache[item]:
+                out.append(item)
+    return tuple(out)
 
 
 def withdrawals_due(conn: sqlite3.Connection) -> list[DueWithdrawal]:
     """Active packet revisions whose material is gone or hidden (contract §7).
 
     ``source_deleted`` when any of the packet's items no longer has a
-    ``bookmarks`` row, else ``policy_hidden`` when any of them is hidden
-    (``content_visible = 0``) in any row.
+    ``bookmarks`` row, or its current revision is ``deleted`` while the
+    packet carries readable content of it; else ``policy_hidden`` when any
+    of them is hidden (``content_visible = 0``) in any row.
     """
     active = conn.execute(
         "SELECT packet_ulid, revision, body_json FROM evidence_packets "
@@ -801,11 +873,13 @@ def withdrawals_due(conn: sqlite3.Connection) -> list[DueWithdrawal]:
         return []
     bodies = [(f"{r['packet_ulid']}@{r['revision']}", json.loads(r["body_json"])) for r in active]
     wanted = {i["item_id"] for _, body in bodies for i in body["items"]}
-    states = _item_states(conn, wanted)
+    rows = _item_bookmarks(conn, wanted)
+    states = {i: [v for _, v in r] for i, r in rows.items()}
+    deleted_cache: dict[str, bool] = {}
     due = []
     for ref, body in bodies:
         items = [i["item_id"] for i in body["items"]]
-        deleted = tuple(i for i in items if i not in states)
+        deleted = _deleted_items(conn, body, rows, deleted_cache)
         hidden = tuple(i for i in items if i in states and 0 in states[i])
         if deleted:
             due.append(DueWithdrawal(ref, "source_deleted", deleted, hidden))
@@ -846,10 +920,21 @@ def _withdraw_row(
     if reason in _CONTENT_WITHDRAWING:
         if reason == "source_deleted":
             if deleted_items is None:
-                states = _item_states(conn, {i["item_id"] for i in body["items"]})
-                deleted_items = [i["item_id"] for i in body["items"] if i["item_id"] not in states]
+                rows = _item_bookmarks(conn, {i["item_id"] for i in body["items"]})
+                deleted_items = _deleted_items(conn, body, rows)
             scope = set(deleted_items)
             targets = [r["revision_id"] for r in body["content_revisions"] if r["item_id"] in scope]
+            # The source deleted the material: every readable revision of
+            # those items goes, not only the ones this packet carries.
+            for item in sorted(scope):
+                for (revision_id,) in conn.execute(
+                    "SELECT revision_ulid FROM scrape_history WHERE item_ref = ? "
+                    "AND withdrawn_at IS NULL AND coverage IN ('full', 'partial') "
+                    "ORDER BY scrape_history_id",
+                    (item,),
+                ):
+                    if revision_id not in targets:
+                        targets.append(revision_id)
         else:
             targets = [r["revision_id"] for r in body["content_revisions"]]
         if targets:
