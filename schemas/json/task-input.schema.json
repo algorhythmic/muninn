@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "task-input.schema.json",
   "title": "Synthesis Task File",
-  "description": "A muninn synthesis task file (contract muninn-synthesis/1, docs/synthesis-contract.md). Self-contained: it carries the instructions, the materials and the result schema, so any harness can run it. One envelope for era_narrative, deep_pass and ad_hoc_analysis tasks.",
+  "description": "A muninn synthesis task file (contract muninn-synthesis/1, docs/synthesis-contract.md). Self-contained: it carries the instructions, the materials and the result schema, so any harness can run it. One envelope for era_narrative, deep_pass, ad_hoc_analysis and lint tasks.",
   "type": "object",
   "required": [
     "contract_version",
@@ -32,7 +32,7 @@
     },
     "task_type": {
       "type": "string",
-      "enum": ["era_narrative", "deep_pass", "ad_hoc_analysis"]
+      "enum": ["era_narrative", "deep_pass", "ad_hoc_analysis", "lint"]
     },
     "attempt": {
       "type": "integer",
@@ -72,13 +72,17 @@
     "title": {
       "type": ["string", "null"]
     },
+    "tag": {
+      "type": ["string", "null"],
+      "description": "lint: the tag the compared pages share."
+    },
     "correction_instructions": {
       "type": ["string", "null"],
       "description": "Populated on retry attempts. Contains the validation errors from the prior attempt the model must fix."
     },
     "materials": {
       "type": "object",
-      "description": "Task-specific input payload. Era passes bookmarks+neighbors; deep_pass passes source_text+known_bookmark_ids; ad_hoc passes corpus subset.",
+      "description": "Task-specific input payload. Era passes bookmarks+neighbors; deep_pass passes source_text+known_bookmark_ids; ad_hoc passes corpus subset; lint passes pages sharing a tag.",
       "additionalProperties": true
     }
   }

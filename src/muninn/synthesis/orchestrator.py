@@ -67,6 +67,7 @@ from muninn.synthesis.contract import (
 from muninn.synthesis.tasks import ad_hoc_analysis as _ad_hoc
 from muninn.synthesis.tasks import deep_pass as _deep_pass
 from muninn.synthesis.tasks import era_narrative as _era
+from muninn.synthesis.tasks import lint as _lint
 from muninn.synthesis.validation import (
     validate_against_schema,
     validate_cross_reference_targets,
@@ -76,7 +77,13 @@ from muninn.synthesis.validation import (
 
 log = logging.getLogger(__name__)
 
-TASK_ID_PREFIX = {"era_narrative": "era", "deep_pass": "deep", "ad_hoc_analysis": "adhoc"}
+TASK_ID_PREFIX = {"era_narrative": "era", "deep_pass": "deep", "ad_hoc_analysis": "adhoc", "lint": "lint"}
+# Prompt version per task type; the three original tasks share synthesis_vN.
+DEFAULT_PROMPT_VERSIONS = {"lint": _lint.PROMPT_VERSION}
+
+
+def default_prompt_version(task_type: str) -> str:
+    return DEFAULT_PROMPT_VERSIONS.get(task_type, SYNTHESIS_PROMPT_VERSION)
 
 
 @dataclass
@@ -121,6 +128,21 @@ def _ad_hoc_spec(
     return materials, {"prompt": prompt, "filter_query": filter_query, "title": title}
 
 
+def _lint_spec(conn: sqlite3.Connection, tag: str, limit: int) -> tuple[dict, dict]:
+    return _lint.prepare_input(conn, tag, limit=limit), {"tag": tag.strip()}
+
+
+def _lint_prompt_version(prompt_version: str | None) -> str:
+    from muninn.enrich.haiku import check_prompt_version  # the enrich rule: <task>_vN
+
+    version = prompt_version or _lint.PROMPT_VERSION
+    try:
+        check_prompt_version(_lint.TASK, version)
+    except ValueError as exc:
+        raise ContractError(str(exc)) from None
+    return version
+
+
 def _writer_for(task: dict[str, Any]) -> Callable[[sqlite3.Connection, dict, SynthesisRun], None]:
     """The canonical-table writer for a task, rebuilt from the task file
     alone, so a run and an ingested result write identically."""
@@ -142,6 +164,8 @@ def _writer_for(task: dict[str, Any]) -> Callable[[sqlite3.Connection, dict, Syn
             title=task.get("title"),
             materials=materials,
         )
+    if task_type == "lint":
+        return lambda c, o, r: _lint.write_output(c, o, r, tag=task["tag"], materials=materials)
     raise ContractError(f"unknown task_type {task_type!r}")
 
 
@@ -215,6 +239,36 @@ def run_ad_hoc_analysis(
             conn.close()
 
 
+def run_lint(
+    tag: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+    runner: Any = None,
+    budget: Budget | None = None,
+    limit: int = _lint.DEFAULT_LIMIT,
+    prompt_version: str | None = None,
+    task_id: str | None = None,
+) -> TaskResult:
+    """Lint the compiled bookmark pages tagged ``tag`` for contradictions
+    and superseded claims; writes lint_pair_checks + lint_findings.
+
+    Idempotent: when every pair of the selected pages was already checked
+    with the same content hashes, prompt version and model, no task is
+    built and no call is made (status ``up_to_date``)."""
+    own_conn, conn = _ensure_conn(conn)
+    try:
+        version = _lint_prompt_version(prompt_version)
+        materials, extra = _lint_spec(conn, tag, limit)
+        runner = runner if runner is not None else ApiRunner()
+        if not _lint.pending_pairs(conn, materials["pages"], prompt_version=version,
+                                   model=getattr(runner, "model", None)):
+            return _up_to_date("lint", materials)
+        return _run_task(conn, runner, budget, task_id, "lint", materials, extra, prompt_version=version)
+    finally:
+        if own_conn:
+            conn.close()
+
+
 # ── Public entry points: emit / ingest ─────────────────────────────────────
 
 
@@ -276,6 +330,31 @@ def emit_ad_hoc_analysis_task(
             conn.close()
 
 
+def emit_lint_task(
+    tag: str,
+    out_dir: Path | str,
+    *,
+    conn: sqlite3.Connection | None = None,
+    registry: Path | str | None = None,
+    limit: int = _lint.DEFAULT_LIMIT,
+    prompt_version: str | None = None,
+    task_id: str | None = None,
+) -> TaskResult:
+    """Write a lint task file to `out_dir`; run nothing. Skipped
+    (``up_to_date``, no file) when every pair was already checked with the
+    same content hashes and prompt version, by any model."""
+    own_conn, conn = _ensure_conn(conn)
+    try:
+        version = _lint_prompt_version(prompt_version)
+        materials, extra = _lint_spec(conn, tag, limit)
+        if not _lint.pending_pairs(conn, materials["pages"], prompt_version=version):
+            return _up_to_date("lint", materials)
+        return _emit(conn, "lint", materials, extra, out_dir, registry, task_id, prompt_version=version)
+    finally:
+        if own_conn:
+            conn.close()
+
+
 def ingest_result(
     path: Path | str,
     *,
@@ -308,8 +387,11 @@ def _run_task(
     task_type: str,
     materials: dict[str, Any],
     extra: dict[str, Any],
+    *,
+    prompt_version: str | None = None,
 ) -> TaskResult:
     runner = runner if runner is not None else ApiRunner()
+    prompt_version = prompt_version or default_prompt_version(task_type)
     task_id = task_id or _new_task_id(task_type)
     attempts: list[SynthesisRun] = []
     correction_instructions: str | None = None
@@ -323,7 +405,7 @@ def _run_task(
             task_id=task_id,
             task_type=task_type,
             attempt=attempt,
-            prompt_version=SYNTHESIS_PROMPT_VERSION,
+            prompt_version=prompt_version,
             materials=materials,
             extra=extra,
             correction_instructions=correction_instructions,
@@ -410,6 +492,7 @@ def _emit(
     *,
     attempt: int = 1,
     correction_instructions: str | None = None,
+    prompt_version: str | None = None,
 ) -> TaskResult:
     task_id = task_id or _new_task_id(task_type)
     registry = Path(registry or synthesis_task_registry())
@@ -420,7 +503,7 @@ def _emit(
         task_id=task_id,
         task_type=task_type,
         attempt=attempt,
-        prompt_version=SYNTHESIS_PROMPT_VERSION,
+        prompt_version=prompt_version or default_prompt_version(task_type),
         materials=materials,
         extra=extra,
         correction_instructions=correction_instructions,
@@ -474,6 +557,7 @@ def _ingest(
                 conn, task_type, task["materials"], _envelope_extra(task), retry_dir, registry,
                 task_id, attempt=2,
                 correction_instructions=_correction.build_correction_instructions(errors),
+                prompt_version=task["prompt_version"],
             )
             res.task_file = retry.task_file
         return res
@@ -489,8 +573,16 @@ def _ingest(
 
 
 def _envelope_extra(task: dict[str, Any]) -> dict[str, Any]:
-    keys = ("era_label", "bookmark_id", "prompt", "filter_query", "title")
+    keys = ("era_label", "bookmark_id", "prompt", "filter_query", "title", "tag")
     return {k: task.get(k) for k in keys}
+
+
+def _up_to_date(task_type: str, materials: dict[str, Any]) -> TaskResult:
+    pages = len(materials.get("pages") or [])
+    return TaskResult(
+        task_id="", task_type=task_type, status="up_to_date", attempts=[],
+        errors=[f"all {pages * (pages - 1) // 2} page pair(s) already checked; nothing to pay for"],
+    )
 
 
 def _new_run(task: dict[str, Any], *, model: str | None) -> SynthesisRun:
@@ -513,6 +605,8 @@ def _validate(output: dict[str, Any], task: dict[str, Any]) -> list[str]:
         return errors
 
     materials = task["materials"]
+    if task["task_type"] == "lint":
+        errors.extend(_lint.validate_output(output, materials))
     if task["task_type"] == "deep_pass":
         # Verbatim quote check
         source_text = materials.get("source_text", "") or ""

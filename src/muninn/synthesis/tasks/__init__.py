@@ -7,6 +7,6 @@ Each task module exposes:
 The orchestrator dispatches to these based on task_type.
 """
 
-from muninn.synthesis.tasks import era_narrative, deep_pass, ad_hoc_analysis
+from muninn.synthesis.tasks import era_narrative, deep_pass, ad_hoc_analysis, lint
 
-__all__ = ["era_narrative", "deep_pass", "ad_hoc_analysis"]
+__all__ = ["era_narrative", "deep_pass", "ad_hoc_analysis", "lint"]

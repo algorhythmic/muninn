@@ -19,6 +19,7 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn synthesize era <era_label> [--emit-task DIR] [--model M] [--max-cost-usd 3.00]
     muninn synthesize deep-pass <id> | --pending [--emit-task DIR] [--model M] [--max-cost-usd X]
     muninn synthesize analyze "<prompt>" [--title T] [--bookmark-id N]... [--emit-task DIR] ...
+    muninn synthesize lint --tag TAG [--limit N] [--prompt-version lint_vN] [--emit-task DIR] ...
     muninn synthesize ingest-result FILE [--retry-dir DIR]
     muninn triage [--json]
     muninn status
@@ -28,6 +29,7 @@ Subcommand layout matches the SPEC's pipeline order:
     muninn export packets --withdraw PACKET_ID@REV --reason REASON
     muninn timeline [--out p.json]
     muninn vault compile
+    muninn lint [--vault DIR] [--json] [--report FILE] [--strict]
     muninn mcp [--transport stdio|http] [--host H] [--port P] [--allowed-host NAME]...
     muninn db migrate [--dry-run]
     muninn db status
@@ -562,7 +564,7 @@ def _enrich_suitability(
 @cli.group("synthesize")
 @click.pass_context
 def synthesize_group(ctx: click.Context) -> None:
-    """Synthesis: era narratives, deep passes, ad-hoc analyses.
+    """Synthesis: era narratives, deep passes, ad-hoc analyses, lint.
 
     By default each task runs with the budgeted direct API runner. With
     --emit-task DIR the task file is written for another harness and
@@ -753,6 +755,53 @@ def synthesize_analyze_cmd(
     _echo_synthesis("Synthesize analyze", result)
 
 
+@synthesize_group.command("lint")
+@click.option("--tag", required=True, help="Compare the visible compiled bookmark pages carrying this tag.")
+@click.option("--limit", type=click.IntRange(2, 40), default=20, show_default=True,
+              help="Most recent pages to compare (every pair among them is checked).")
+@click.option("--prompt-version", default=None,
+              help="Lint prompt version, lint_vN (default lint_v1). A new version re-checks every pair.")
+@_synthesis_options
+@click.pass_context
+def synthesize_lint_cmd(
+    ctx: click.Context, tag: str, limit: int, prompt_version: str | None,
+    emit_dir: str | None, model: str | None, max_cost_usd: str | None,
+) -> None:
+    """Find contradictions and superseded claims among pages sharing a tag.
+
+    Reads only compiled bookmark pages (visible rows), never authored ones.
+    Pairs already checked with unchanged content, the same prompt version
+    and model are not paid for again. Findings render on the next
+    `muninn vault compile`. See docs/vault-lint.md.
+    """
+    from muninn.db import connect  # lazy
+    from muninn.synthesis import orchestrator  # lazy
+
+    conn = connect(ctx.obj.get("db"))
+    kwargs = {"limit": limit, "prompt_version": prompt_version}
+    try:
+        runner, budget = _synthesis_runner(emit_dir, model, max_cost_usd, conn)
+        if emit_dir is not None:
+            result = orchestrator.emit_lint_task(tag, emit_dir, conn=conn, **kwargs)
+        else:
+            result = orchestrator.run_lint(tag, conn=conn, runner=runner, budget=budget, **kwargs)
+    except _synthesis_errors() as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    if result.status == "up_to_date":
+        click.echo(f"Synthesize lint '{tag}': up to date, {result.errors[0]}.")
+        return
+    _echo_synthesis(f"Synthesize lint '{tag}'", result)
+    if result.status == "completed":
+        _lint_findings_hint(result)
+
+
+def _lint_findings_hint(result) -> None:
+    findings = len((result.output or {}).get("findings") or [])
+    click.echo(f"{findings} finding(s) recorded: run `muninn vault compile` to render them.")
+
+
 @synthesize_group.command("ingest-result")
 @click.argument("path", type=click.Path(exists=True, dir_okay=False))
 @click.option(
@@ -777,6 +826,8 @@ def synthesize_ingest_result_cmd(ctx: click.Context, path: str, retry_dir: str |
     if result.status == "completed":
         if result.task_type == "deep_pass":
             _deep_pass_reconcile_hint(1)
+        elif result.task_type == "lint":
+            _lint_findings_hint(result)
         return
     for error in result.errors[:10]:
         click.echo(f"  {error}")

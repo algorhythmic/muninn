@@ -24,6 +24,7 @@ SCHEMA_MAP: dict[str, str] = {
     "era_narrative": "era-narrative.schema.json",
     "deep_pass": "deep-pass.schema.json",
     "ad_hoc_analysis": "ad-hoc-analysis.schema.json",
+    "lint": "lint.schema.json",
     "task_input": "task-input.schema.json",
     "synthesis_result": "synthesis-result.schema.json",
 }
