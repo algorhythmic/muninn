@@ -124,6 +124,13 @@ LIVE_CACHE_TTL_SECONDS = int(os.environ.get("MUNINN_LIVE_CACHE_TTL_SECONDS", str
 RECENT_CDX_TTL_SECONDS = int(
     os.environ.get("MUNINN_RECENT_CDX_TTL_SECONDS", str(30 * 24 * 3600))
 )
+# The live pass honours robots.txt (RFC 9309). Each origin's file is cached
+# this long (default 24 hours, the RFC's upper bound); `--refresh` refetches
+# it. A file that answers 5xx or cannot be fetched is not cached: that
+# origin is skipped for the run and asked again next time.
+ROBOTS_CACHE_TTL_SECONDS = int(
+    os.environ.get("MUNINN_ROBOTS_CACHE_TTL_SECONDS", str(24 * 3600))
+)
 
 
 # ── X API (muninn ingest x / muninn x auth) ───────────────────────

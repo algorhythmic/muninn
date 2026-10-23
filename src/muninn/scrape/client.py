@@ -13,6 +13,17 @@ Pass modules (``live``, ``at_capture``, ``recent_archive``) consume the
 client via :meth:`fetch_live`, :meth:`fetch_archive`, and :meth:`cdx_lookup`.
 The client itself does not know about scrape-result rows or the DB — it's a
 pure transport/cache layer.
+
+robots.txt (RFC 9309) gates the live pass only. :meth:`fetch_live` follows
+redirects itself, one hop at a time, and before each hop checks the hop's
+origin's robots.txt for the ``Muninn`` product token (``urllib.robotparser``
+fed the fetched text). Each origin's file is fetched once, cached per run
+and on disk for ``robots_ttl`` seconds. A 4xx answer means "no rules"
+(allow); a 5xx answer or a transport error means the origin is skipped for
+the rest of the run, with nothing cached on disk, so the next run asks
+again. A caller-supplied ``stop_at`` predicate (domain policy) stops a
+redirect before a hidden origin is contacted, robots.txt included. Wayback
+fetches and CDX lookups are not subject to the target site's robots.txt.
 """
 
 from __future__ import annotations
@@ -21,8 +32,10 @@ import asyncio
 import logging
 import os
 import time
+import urllib.robotparser
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -32,6 +45,7 @@ from muninn.config import (
     LIVE_CACHE_TTL_SECONDS,
     LIVE_DOMAIN_RPS,
     RECENT_CDX_TTL_SECONDS,
+    ROBOTS_CACHE_TTL_SECONDS,
     load_paths,
 )
 from muninn.sanitize import sanitize_url
@@ -43,6 +57,13 @@ log = logging.getLogger(__name__)
 USER_AGENT = (
     f"Muninn/v1 (+{os.environ.get('MUNINN_CONTACT_URL', 'https://example.com/muninn')})"
 )
+
+# The product token robots.txt groups are matched against (RFC 9309 §2.2.1).
+ROBOTS_TOKEN = "Muninn"
+# RFC 9309 §2.5: parse at least the first 500 KiB of a robots.txt.
+ROBOTS_MAX_BYTES = 500 * 1024
+# Redirect hops the live pass follows (each one robots- and policy-checked).
+MAX_REDIRECTS = 10
 
 IA_CDX_BASE = "https://web.archive.org/cdx/search/cdx"
 IA_WEB_BASE = "https://web.archive.org/web"
@@ -69,14 +90,16 @@ class ScrapeClient:
         rate_limiter: Optional[RateLimiter] = None,
         live_cache_ttl: Optional[float] = LIVE_CACHE_TTL_SECONDS,
         recent_cdx_ttl: Optional[float] = RECENT_CDX_TTL_SECONDS,
+        robots_ttl: Optional[float] = ROBOTS_CACHE_TTL_SECONDS,
         refresh: bool = False,
         clock=time.time,
     ) -> None:
         """``live_cache_ttl``: seconds a cached live response stays usable
         (None = forever). ``recent_cdx_ttl``: the same for the
         "latest snapshot" CDX lookup of the recent_archive pass, whose answer
-        changes whenever IA archives the page again. ``refresh``: read
-        neither of those two caches (results are still written to them).
+        changes whenever IA archives the page again. ``robots_ttl``: the
+        same for a fetched robots.txt. ``refresh``: read none of those
+        three caches (results are still written to them).
         Snapshot bodies and the date-bounded at_capture CDX lookups are
         cached forever, refresh or not: a Wayback snapshot is immutable."""
         paths = load_paths()
@@ -84,6 +107,11 @@ class ScrapeClient:
         self.scrape_cache = HttpCache(scrape_cache_dir or paths.scrape_cache_dir, clock=clock)
         self.live_cache_ttl = live_cache_ttl
         self.recent_cdx_ttl = recent_cdx_ttl
+        self.robots_ttl = robots_ttl
+        # Per-run robots state: origin → parser (None: no rules), or the
+        # reason the origin is skipped this run.
+        self._robots: dict[str, urllib.robotparser.RobotFileParser | None | str] = {}
+        self._robots_locks: dict[str, asyncio.Lock] = {}
         self.refresh = refresh
         self.rate = rate_limiter or RateLimiter()
         self._client = client
@@ -123,16 +151,34 @@ class ScrapeClient:
 
     # ── Live fetch ───────────────────────────────────────────────
 
-    async def fetch_live(self, url: str) -> dict[str, Any]:
-        """Fetch ``url`` directly from the live origin.
+    async def fetch_live(
+        self, url: str, *, stop_at: Optional[Callable[[str], bool]] = None
+    ) -> dict[str, Any]:
+        """Fetch ``url`` directly from the live origin, following redirects
+        hop by hop.
 
         Returns a dict with one of two shapes:
 
         - success: ``{"http_status", "content_type", "body", "body_bytes",
           "final_url", "elapsed_ms", "from_cache"}``
         - failure: ``{"error", "error_kind", "elapsed_ms"}`` where
-          ``error_kind`` is one of ``"timeout" | "network_error"``.
+          ``error_kind`` is one of ``"timeout" | "network_error"``, or,
+          when a hop was not fetched, ``"robots_disallowed"`` (its robots.txt
+          disallows it), ``"robots_unreachable"`` (its robots.txt answered
+          5xx or could not be fetched) or ``"policy_hidden"`` (``stop_at``
+          returned True for it). A redirect hop that was not fetched adds
+          ``"final_url"`` (the sanitized hop) and ``"http_status"`` (the
+          redirect's status).
+
+        ``url`` itself is robots-checked before the cache is read, so a
+        cached copy is never served for a URL robots.txt now disallows.
         """
+        start = time.monotonic()
+        blocked = await self._live_hop_blocked(url, stop_at)
+        if blocked is not None:
+            blocked["elapsed_ms"] = int((time.monotonic() - start) * 1000)
+            return blocked
+
         cache_key = f"live:{url}"
         cached = (
             None if self.refresh else self.http_cache.get(cache_key, max_age=self.live_cache_ttl)
@@ -144,8 +190,151 @@ class ScrapeClient:
             )
             return cached
 
-        await self.rate.wait_for_domain(url, LIVE_DOMAIN_INTERVAL)
-        return await self._do_fetch(url, cache_key, kind="live")
+        client = await self._get_client()
+        current = url
+        for _hop in range(MAX_REDIRECTS + 1):
+            await self.rate.wait_for_domain(current, LIVE_DOMAIN_INTERVAL)
+            self._request_log.append({"type": "live", "url": current, "time": time.monotonic()})
+            try:
+                resp = await client.get(current, follow_redirects=False)
+            except httpx.TimeoutException:
+                return self._transport_failure("timeout", "timeout", start)
+            except httpx.HTTPError as exc:
+                return self._transport_failure("network_error", str(exc), start)
+            if resp.next_request is None:
+                return self._live_result(resp, cache_key, start)
+            current = str(resp.next_request.url)
+            blocked = await self._live_hop_blocked(current, stop_at)
+            if blocked is not None:
+                blocked.update(
+                    final_url=sanitize_url(current).sanitized_url,
+                    http_status=resp.status_code,
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                )
+                return blocked
+        return self._transport_failure(
+            "network_error", f"more than {MAX_REDIRECTS} redirects", start
+        )
+
+    def _live_result(self, resp: httpx.Response, cache_key: str, start: float) -> dict[str, Any]:
+        content = resp.content
+        result: dict[str, Any] = {
+            "http_status": resp.status_code,
+            "content_type": resp.headers.get("content-type", ""),
+            "body": content.decode("utf-8", errors="replace"),
+            "body_bytes": content,
+            "body_length": len(content),
+            "elapsed_ms": int((time.monotonic() - start) * 1000),
+            # Where redirects ended, sanitized before it reaches the
+            # on-disk cache (and, from there, scrape_results).
+            "final_url": sanitize_url(str(resp.url)).sanitized_url,
+            "from_cache": False,
+        }
+        # Cache the JSON-serializable subset (drop raw bytes).
+        self.http_cache.put(cache_key, {k: v for k, v in result.items() if k != "body_bytes"})
+        return result
+
+    @staticmethod
+    def _transport_failure(kind: str, error: str, start: float) -> dict[str, Any]:
+        return {
+            "error": error,
+            "error_kind": kind,
+            "elapsed_ms": int((time.monotonic() - start) * 1000),
+        }
+
+    async def _live_hop_blocked(
+        self, url: str, stop_at: Optional[Callable[[str], bool]]
+    ) -> Optional[dict[str, Any]]:
+        """None when the live pass may fetch ``url``; else the failure dict.
+
+        Domain policy first, so a hidden origin is never contacted (not
+        even for its robots.txt); then robots.txt."""
+        if stop_at is not None and stop_at(sanitize_url(url).sanitized_url or url):
+            return {
+                "error": "redirected to a locator hidden by domain policy; not followed",
+                "error_kind": "policy_hidden",
+            }
+        verdict = await self.robots_verdict(url)
+        if verdict is None:
+            return None
+        if verdict == "disallowed":
+            return {"error": "disallowed by robots.txt", "error_kind": "robots_disallowed"}
+        return {
+            "error": f"robots.txt unreachable ({verdict}); not fetched this run",
+            "error_kind": "robots_unreachable",
+        }
+
+    # ── robots.txt ───────────────────────────────────────────────
+
+    @staticmethod
+    def _origin(url: str) -> Optional[str]:
+        try:
+            parts = urlsplit(url)
+            port = parts.port
+        except ValueError:
+            return None
+        if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+            return None
+        host = parts.hostname.lower()
+        if ":" in host:
+            host = f"[{host}]"
+        return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port is not None else "")
+
+    async def robots_verdict(self, url: str) -> Optional[str]:
+        """None if robots.txt lets ``Muninn`` fetch ``url``; ``"disallowed"``
+        if it does not; otherwise why the origin's robots.txt could not be
+        read (a 5xx status or a transport error), in which case nothing on
+        that origin is fetched this run (RFC 9309 §2.3.1.4)."""
+        origin = self._origin(url)
+        if origin is None:
+            return None  # not an http(s) URL: nothing to ask
+        state = await self._robots_for(origin)
+        if isinstance(state, str):
+            return state
+        if state is None or state.can_fetch(ROBOTS_TOKEN, url):
+            return None
+        return "disallowed"
+
+    async def _robots_for(
+        self, origin: str
+    ) -> urllib.robotparser.RobotFileParser | None | str:
+        if origin not in self._robots:
+            lock = self._robots_locks.setdefault(origin, asyncio.Lock())
+            async with lock:
+                if origin not in self._robots:
+                    self._robots[origin] = await self._load_robots(origin)
+        return self._robots[origin]
+
+    async def _load_robots(
+        self, origin: str
+    ) -> urllib.robotparser.RobotFileParser | None | str:
+        """The origin's parsed robots.txt, None when it has none (4xx), or
+        the reason it could not be read (not cached on disk)."""
+        cache_key = f"robots:{origin}"
+        entry = None if self.refresh else self.http_cache.get(cache_key, max_age=self.robots_ttl)
+        if entry is None:
+            robots_url = f"{origin}/robots.txt"
+            await self.rate.wait_for_domain(robots_url, LIVE_DOMAIN_INTERVAL)
+            self._request_log.append({"type": "robots", "url": robots_url, "time": time.monotonic()})
+            client = await self._get_client()
+            try:
+                # RFC 9309 §2.3.1.2: follow (at least five) redirects.
+                resp = await client.get(robots_url, follow_redirects=True)
+            except httpx.HTTPError as exc:
+                log.warning("robots.txt for %s unreachable: %s", origin, exc)
+                return type(exc).__name__
+            status = resp.status_code
+            if not (200 <= status < 300 or 400 <= status < 500):
+                log.warning("robots.txt for %s answered HTTP %d", origin, status)
+                return f"HTTP {status}"
+            body = resp.content[:ROBOTS_MAX_BYTES].decode("utf-8", errors="replace")
+            entry = {"status": status, "body": body if status < 300 else ""}
+            self.http_cache.put(cache_key, entry)
+        if int(entry.get("status") or 0) >= 400:
+            return None  # "unavailable" (4xx): no rules apply
+        parser = urllib.robotparser.RobotFileParser()
+        parser.parse((entry.get("body") or "").splitlines())
+        return parser
 
     # ── Wayback archive fetch ────────────────────────────────────
 
@@ -256,6 +445,7 @@ class ScrapeClient:
     async def _do_fetch(
         self, url: str, cache_key: str, *, kind: str
     ) -> dict[str, Any]:
+        """One GET, redirects followed by httpx (Wayback snapshots)."""
         client = await self._get_client()
         start = time.monotonic()
         self._request_log.append({"type": kind, "url": url, "time": start})

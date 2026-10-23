@@ -39,6 +39,13 @@ LINK = "https://blog.example.org/posts/write-up"
 HTML_URL = "https://example.com/browser-page"
 
 
+def no_robots(router=respx):
+    """Every origin answers /robots.txt with 404: no rules (RFC 9309)."""
+    return router.get(url__regex=r"^https?://[^/]+/robots\.txt$").mock(
+        return_value=httpx.Response(404)
+    )
+
+
 def _insert(conn, source, source_id, url, *, captured_at=1790000000, meta=None) -> int:
     cur = conn.execute(
         "INSERT INTO bookmarks (source, source_id, captured_at, title, url, source_metadata) "
@@ -123,6 +130,7 @@ def test_selection_skips_x_posts_and_articles(seeded) -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_scrape_skips_x_rows_and_records_link_history(seeded, make_client) -> None:
+    no_robots()
     conn, ids = seeded
     respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
     link_route = respx.get(LINK).mock(return_value=httpx.Response(200, text=PAGE))
@@ -165,6 +173,7 @@ async def test_scrape_skips_x_rows_and_records_link_history(seeded, make_client)
 @pytest.mark.asyncio
 @respx.mock
 async def test_identical_live_and_archive_text_is_one_current_revision(seeded, make_client) -> None:
+    no_robots()
     conn, ids = seeded
     respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_HIT))
     respx.get(f"{IA_WEB_BASE}/20261001120000id_/{LINK}").mock(return_value=httpx.Response(200, text=PAGE))
@@ -205,6 +214,7 @@ async def test_identical_live_and_archive_text_is_one_current_revision(seeded, m
     ],
 )
 async def test_coverage_mapping(seeded, make_client, response, coverage) -> None:
+    no_robots()
     conn, ids = seeded
     respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
     route = respx.get(LINK)
@@ -227,6 +237,7 @@ async def test_coverage_mapping(seeded, make_client, response, coverage) -> None
 @pytest.mark.asyncio
 @respx.mock
 async def test_refresh_bypasses_the_live_cache_and_captures_a_new_revision(seeded, make_client) -> None:
+    no_robots()
     conn, ids = seeded
     respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
     route = respx.get(LINK).mock(side_effect=[httpx.Response(200, text=PAGE), httpx.Response(200, text=PAGE_V2)])
@@ -257,6 +268,7 @@ class Clock:
 @pytest.mark.asyncio
 @respx.mock
 async def test_live_cache_ttl_expires_with_an_injected_clock(tmp_path) -> None:
+    no_robots()
     route = respx.get(LINK).mock(return_value=httpx.Response(200, text=PAGE))
     import time
 
@@ -310,6 +322,7 @@ def test_http_cache_max_age(tmp_path) -> None:
 async def test_redirect_final_url_is_sanitized(seeded, make_client) -> None:
     """A redirect target carrying a token-shaped param is stored sanitized,
     in `scrape_results.final_url` as in the revision's `final_locator`."""
+    no_robots()
     conn, ids = seeded
     secret = "synthetic-redirect-token-CANARY-0002"
     landing = "https://blog.example.org/posts/landing"

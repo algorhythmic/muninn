@@ -10,12 +10,19 @@ Produces a :class:`ScrapeResult` with ``pass='live'``. Status mapping:
 - HTTP 4xx/5xx otherwise → ``failed``
 - httpx timeout → ``timeout``
 - httpx other transport errors → ``network_error``
+- robots.txt disallows the URL (or a redirect hop) → ``robots_disallowed``,
+  with no request for it
+- robots.txt answered 5xx or was unreachable → ``network_error`` ("skip
+  this run", RFC 9309 §2.3.1.4), with no request for the page
+- a redirect to a locator domain policy hides → ``failed``, not followed;
+  ``final_url`` records the hidden hop, so the row itself is then hidden
+  (see :mod:`muninn.scrape.pipeline`)
 """
 
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from muninn.models import ScrapeResult
 from muninn.scrape.auth_wall import detect_auth_wall
@@ -24,10 +31,16 @@ from muninn.scrape.extract import classify_extraction_quality, extract_text
 
 
 async def fetch_live(
-    client: ScrapeClient, bookmark_id: int, url: Optional[str]
+    client: ScrapeClient,
+    bookmark_id: int,
+    url: Optional[str],
+    *,
+    stop_at: Optional[Callable[[str], bool]] = None,
 ) -> ScrapeResult:
     """Run the live pass for one bookmark and return a populated
     :class:`ScrapeResult`. Caller persists it via :func:`muninn.db.transaction`.
+    ``stop_at``: a redirect hop it returns True for is not followed
+    (domain policy).
     """
     now = int(time.time())
 
@@ -40,14 +53,16 @@ async def fetch_live(
             error_detail="no url on bookmark",
         )
 
-    result = await client.fetch_live(url)
+    result = await client.fetch_live(url, stop_at=stop_at)
 
     if "error" in result:
         return ScrapeResult(
             bookmark_id=bookmark_id,
             **{"pass": "live"},
             fetched_at=now,
-            scrape_status=result.get("error_kind", "network_error"),
+            final_url=result.get("final_url"),
+            http_status=result.get("http_status"),
+            scrape_status=_ERROR_STATUS.get(result.get("error_kind"), "network_error"),
             error_detail=result.get("error"),
         )
 
@@ -79,6 +94,16 @@ async def fetch_live(
         raw_html_path=raw_html_path,
         error_detail=error_detail,
     )
+
+
+# ScrapeClient.fetch_live error kinds → scrape_status.
+_ERROR_STATUS = {
+    "timeout": "timeout",
+    "network_error": "network_error",
+    "robots_disallowed": "robots_disallowed",
+    "robots_unreachable": "network_error",
+    "policy_hidden": "failed",
+}
 
 
 def _classify(
