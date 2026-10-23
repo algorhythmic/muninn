@@ -32,7 +32,9 @@ from tests import x_corpus as xc
 from tests.integration.test_scrape_history import CDX_EMPTY, PAGE, NoWait
 from tests.integration.test_x_sync import API, BOOKMARKS, FakeClock, client, fx, serve
 
-HIDDEN_HOST = "www.example.com"  # the one titled web link in the fixtures
+# An untitled web link: a hidden link keeps no title, so the titled one
+# (www.example.com) stays visible and covers the title column.
+HIDDEN_HOST = "blog.example.org"
 OPTIONAL_POST_KEYS = frozenset({"conversation_id", "possibly_sensitive"})
 
 
@@ -199,7 +201,9 @@ def test_hidden_links_store_no_content(writer_db, seed_db) -> None:
         ).fetchall()
         assert hidden
         for row in hidden:
-            assert row["enrichment_source"] is None and row["title"]
+            assert row["enrichment_source"] is None
+            if conn is writer_db:
+                assert row["title"] is None  # a hidden page's own title is not kept
             for table in ("scrape_results", "scrape_history"):
                 assert not conn.execute(
                     f"SELECT 1 FROM {table} WHERE bookmark_id = ?", (row["bookmark_id"],)

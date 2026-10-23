@@ -19,7 +19,8 @@ stays light.
 - An X post's locator is always the canonical
   ``https://x.com/<handle>/status/<id>`` (``/i/web/status/<id>`` while the
   handle is unknown), whatever URL form first referenced it.
-- A hidden post's title is ``@handle`` only; a hidden article has none.
+- A hidden post's title is ``@handle`` only; a hidden article or linked
+  item (``x_link``: the page's own title) has none.
 - A hidden child's locator is masked as ``[hidden link]`` in its parent's
   stored text, by patterns built from the child row (:func:`mask_text`),
   so masking is the same whichever writer applies it.
@@ -260,6 +261,14 @@ def hidden_post_title(handle: str | None) -> str | None:
     return f"@{handle}" if handle else None
 
 
+def link_fallback_title(meta: dict[str, Any]) -> str | None:
+    """A linked GitHub repository's title when X gave none: ``owner/name``."""
+    repo = meta.get("repository") if meta.get("kind") == "github_repo" else None
+    if isinstance(repo, dict) and repo.get("owner") and repo.get("name"):
+        return f"{repo['owner']}/{repo['name']}"
+    return None
+
+
 # ── Masking hidden children in parent text ──────────────────────────────
 
 def child_mask_patterns(
@@ -428,6 +437,16 @@ def _apply(
                 title = None
             elif not was and title is None:
                 title = _article_title(conn, meta, row["source_id"])
+        elif source == SOURCE_X_LINK:
+            # The page's own title: a hidden link keeps none. Revived, a
+            # repository gets `owner/name`; a page's title returns with
+            # the next sync that sees the link.
+            if not visible:
+                title = None
+            elif not was and title is None:
+                title = link_fallback_title(meta)
+        if visible != was:
+            touched.add(bid)  # its keyword-index row goes (or comes back)
         if (url, visible, title) != (row["url"], was, row["title"]):
             conn.execute(
                 "UPDATE bookmarks SET url = ?, domain = ?, content_visible = ?, title = ? "
@@ -523,13 +542,21 @@ def _remask_post(
 
 def _refresh_fts(conn: sqlite3.Connection, bid: int, report: PolicyApplyReport) -> None:
     """Rewrite the row's keyword-index entry with its current title and the
-    hidden children's locators masked (summary and indexed text). The
-    ``enriched`` row and the Qdrant point are not touched: the changed text
-    makes the next ``muninn enrich`` redo them."""
+    hidden children's locators masked (summary and indexed text); a hidden
+    row loses its entry, as the bulk pipeline never indexes hidden rows.
+    The ``enriched`` row and the Qdrant point are not touched: the changed
+    text makes the next ``muninn enrich`` redo them."""
     old = conn.execute(
         "SELECT title, summary, content_text, tags FROM fts_bookmarks WHERE rowid = ?", (bid,)
     ).fetchone()
     if old is None:
+        return
+    visible = conn.execute(
+        "SELECT content_visible FROM bookmarks WHERE bookmark_id = ?", (bid,)
+    ).fetchone()
+    if not visible or not visible[0]:
+        conn.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bid,))
+        report.fts_refreshed += 1
         return
     title = conn.execute("SELECT title FROM bookmarks WHERE bookmark_id = ?", (bid,)).fetchone()[0]
     patterns = hidden_child_patterns(conn, bid)
@@ -565,6 +592,7 @@ __all__ = [
     "handle_from_locator",
     "hidden_child_patterns",
     "hidden_post_title",
+    "link_fallback_title",
     "locator_hidden",
     "mask_text",
     "meta_handle",

@@ -72,6 +72,7 @@ from muninn.ingest.policy import (
     handle_from_locator,
     hidden_child_patterns,
     hidden_post_title,
+    link_fallback_title,
     mask_text,
     meta_handle,
     policy_hides,
@@ -639,15 +640,25 @@ class XPageWriter:
         row = self._find(SOURCE_X_LINK, source_id)
         if row is not None:
             bookmark_id = int(row["bookmark_id"])
-            if link.title and not row["title"]:
-                self.conn.execute(
-                    "UPDATE bookmarks SET title = ? WHERE bookmark_id = ?", (link.title, bookmark_id)
-                )
             self._apply_policy(bookmark_id, row["url"])
+            # A hidden linked item keeps no title: it is the hidden page's
+            # own (its <title>, as X reports it). Visible again, it gets
+            # the title back from the link.
+            if self._hidden(bookmark_id):
+                if row["title"] is not None:
+                    self.conn.execute(
+                        "UPDATE bookmarks SET title = NULL WHERE bookmark_id = ?", (bookmark_id,)
+                    )
+            elif not row["title"]:
+                title = link.title or link_fallback_title(meta)
+                if title:
+                    self.conn.execute(
+                        "UPDATE bookmarks SET title = ? WHERE bookmark_id = ?", (title, bookmark_id)
+                    )
             return bookmark_id, item_id
         bookmark_id = self._insert(
             source=SOURCE_X_LINK, source_id=source_id, captured_at=seen_at,
-            title=link.title or (item_id.removeprefix("github:repo:") if "repository" in meta else None),
+            title=(link.title or link_fallback_title(meta)) if _visible(self.policy, locator) else None,
             url=locator, meta=meta, redacted=link.redacted_param_names,
             path_redacted=link.path_redacted,
         )

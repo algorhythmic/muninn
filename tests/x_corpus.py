@@ -316,6 +316,9 @@ def seed_x_corpus(conn: sqlite3.Connection, *, hidden_at_ingest: bool = True) ->
     for key, url, domain, title, content in (
         ("web", WEB_URL, "example.com", "Synthetic notes on retrieval evaluation", WEB_TEXT),
         ("repo", REPO_URL, "github.com", "synthetic-org/synthetic-repo", REPO_TEXT),
+        # The writer stores no title for a hidden link (and policy apply
+        # clears one); this one models a row titled before it was hidden,
+        # so consumers are checked against a stored title too.
         ("hidden", HIDDEN_URL, "intranet.example", "Private roadmap", None),
     ):
         item_id = link_item_id(url)

@@ -729,7 +729,10 @@ Conventions the writer implements:
   just `@username` when the post has no text, and the text alone when the
   author is unknown. Titles make handles keyword-searchable. A post that
   domain policy hides is titled `@username` only, with no title when the
-  handle is unknown. A hidden X Article has no title.
+  handle is unknown. A hidden X Article has no title, and neither has a
+  hidden linked item (the title X reports for a link is the page's own);
+  a repository gets `owner/name` back when it is visible again, a page
+  its title with the next sync that sees the link.
 - **Post locator.** `https://x.com/<username>/status/<id>`, or
   `https://x.com/i/web/status/<id>` when the handle is unknown. It is
   always this canonical form, whatever form of URL first referenced the

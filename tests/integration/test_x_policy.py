@@ -334,3 +334,69 @@ def test_cli_policy_apply(db_path, tmp_path) -> None:
     assert missing.exit_code == 1 and "not found" in missing.output
     help_text = " ".join(runner.invoke(cli, ["policy", "apply", "--help"]).output.split())
     assert "restored only by re-reading it from X: `muninn ingest x --full`" in help_text
+
+
+# ── a hidden linked item keeps no title (the page's own) ────────────────
+
+PAGE_TITLE = "SECRET PAGE TITLE"
+TITLED = {"id": P2, "author_id": "501", "text": "read https://t.co/AAAAAAAAAA",
+          "entities": {"urls": [{"url": "https://t.co/AAAAAAAAAA", "title": PAGE_TITLE,
+                                 "unwound_url": "https://secret.example.com/my/case"}]}}
+REPO = {"id": P9, "author_id": "501", "text": "code https://t.co/BBBBBBBBBB",
+        "entities": {"urls": [{"url": "https://t.co/BBBBBBBBBB",
+                               "expanded_url": "https://github.com/secret-org/tool"}]}}
+
+
+def _link_row(conn, host: str) -> sqlite3.Row:
+    return conn.execute("SELECT * FROM bookmarks WHERE source = 'x_link' AND domain = ?", (host,)).fetchone()
+
+
+def test_writer_stores_no_title_for_a_hidden_link(fresh_db) -> None:
+    write(fresh_db, SECRET_SITE, page([TITLED]))
+    link = _link_row(fresh_db, "secret.example.com")
+    assert (link["title"], link["content_visible"]) == (None, 0)
+    # Visible on a later sighting: the title comes back from the link.
+    write(fresh_db, DomainPolicy.empty(), page([TITLED], observed_at=BASE + 60), run="01JA0000000000000000000001")
+    assert _link_row(fresh_db, "secret.example.com")["title"] == PAGE_TITLE
+    # Hidden again: dropped again.
+    write(fresh_db, SECRET_SITE, page([TITLED], observed_at=BASE + 120), run="01JA0000000000000000000002")
+    assert _link_row(fresh_db, "secret.example.com")["title"] is None
+
+
+def test_apply_policy_drops_a_hidden_links_title_and_index_row(fresh_db, tmp_path) -> None:
+    import json
+
+    import duckdb
+
+    from muninn.consumers.parquet.export import export_parquet
+
+    write(fresh_db, DomainPolicy.empty(), page([TITLED, REPO]))
+    link, repo = _link_row(fresh_db, "secret.example.com"), _link_row(fresh_db, "github.com")
+    assert (link["title"], repo["title"]) == (PAGE_TITLE, "secret-org/tool")
+    _seed_fts(fresh_db, link["bookmark_id"], summary="A page.", content="Body.")
+    hide = DomainPolicy(domain_patterns=("secret.example.com",), path_patterns=("github.com/secret-org/*",))
+
+    report = apply_policy(fresh_db, hide)
+
+    assert report.newly_hidden == 2
+    for host in ("secret.example.com", "github.com"):
+        assert (_link_row(fresh_db, host)["title"], _link_row(fresh_db, host)["content_visible"]) == (None, 0)
+    assert fresh_db.execute("SELECT COUNT(*) FROM fts_bookmarks WHERE rowid = ?",
+                            (link["bookmark_id"],)).fetchone()[0] == 0
+    titles = json.dumps([r[0] for r in fresh_db.execute("SELECT title FROM bookmarks")])
+    assert PAGE_TITLE not in titles and "secret-org/tool" not in titles
+
+    # The full-table Parquet export carries no hidden page title either.
+    db_file = fresh_db.execute("PRAGMA database_list").fetchone()[2]
+    out = tmp_path / "all.parquet"
+    export_parquet(out, db_path=db_file)
+    exported = duckdb.connect().execute(f"SELECT title FROM read_parquet('{out}')").fetchall()
+    assert PAGE_TITLE not in json.dumps(exported)
+
+    # Visible again: a repository gets `owner/name` back at once; a page's
+    # title waits for the next sync that sees the link.
+    apply_policy(fresh_db, DomainPolicy.empty())
+    assert _link_row(fresh_db, "github.com")["title"] == "secret-org/tool"
+    assert _link_row(fresh_db, "secret.example.com")["title"] is None
+    write(fresh_db, DomainPolicy.empty(), page([TITLED], observed_at=BASE + 60), run="01JA0000000000000000000001")
+    assert _link_row(fresh_db, "secret.example.com")["title"] == PAGE_TITLE
