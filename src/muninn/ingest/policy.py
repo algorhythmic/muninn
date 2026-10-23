@@ -411,6 +411,7 @@ def _apply(
     touched: set[int] = set()
     revived_posts: set[int] = set()
     fetched = fetched_locators(conn)
+    flipped: set[int] = set()
     for row in rows:
         report.checked += 1
         bid, source = int(row["bookmark_id"]), row["source"]
@@ -447,6 +448,7 @@ def _apply(
                 title = link_fallback_title(meta)
         if visible != was:
             touched.add(bid)  # its keyword-index row goes (or comes back)
+            flipped.add(bid)
         if (url, visible, title) != (row["url"], was, row["title"]):
             conn.execute(
                 "UPDATE bookmarks SET url = ?, domain = ?, content_visible = ?, title = ? "
@@ -470,7 +472,19 @@ def _apply(
         }
         for bid in sorted(parents | revived_posts):
             _remask_post(conn, bid, now, report, touched)
-    for bid in sorted(touched | parents):
+    # The items linking a row whose visibility flipped: what their index
+    # entry may show (a withheld summary) depends on it.
+    linking: set[int] = set()
+    flipped_ids = sorted(flipped)
+    for start in range(0, len(flipped_ids), 500):
+        chunk = flipped_ids[start:start + 500]
+        linking.update(int(r[0]) for r in conn.execute(
+            "SELECT DISTINCT parent_bookmark_id FROM item_links "
+            f"WHERE child_bookmark_id IN ({','.join('?' * len(chunk))}) "
+            "AND parent_bookmark_id IS NOT NULL",
+            chunk,
+        ))
+    for bid in sorted(touched | parents | linking):
         _refresh_fts(conn, bid, report)
 
 
@@ -540,33 +554,79 @@ def _remask_post(
         touched.add(bid)
 
 
+# The scrape pass a bookmark's enrichment_source names (as in muninn.db's
+# keyword-index refill).
+_SOURCE_PASS = {"at_capture": "at_capture", "recent_archive": "recent_archive",
+                "live_fallback": "live"}
+
+
 def _refresh_fts(conn: sqlite3.Connection, bid: int, report: PolicyApplyReport) -> None:
-    """Rewrite the row's keyword-index entry with its current title and the
-    hidden children's locators masked (summary and indexed text); a hidden
-    row loses its entry, as the bulk pipeline never indexes hidden rows.
+    """Rewrite the row's keyword-index entry to match what the vault and MCP
+    show for it now.
+
+    - A hidden row has no entry (the bulk pipeline never indexes one).
+    - A visible row that links hidden items has their locators masked in
+      its title, summary, indexed text and tags. When its enrichment
+      (summary, key quotes or entities) quotes such a locator, the summary
+      is withheld (``""``): it was written before the link was hidden and
+      can paraphrase the hidden page, exactly as
+      :func:`muninn.consumers.vault.x_pages.withhold_enrichment` decides
+      for the vault and MCP.
+    - A visible, enriched row without an entry (it was hidden) gets one
+      back, from its enrichment and its canonical scrape text.
+
     The ``enriched`` row and the Qdrant point are not touched: the changed
-    text makes the next ``muninn enrich`` redo them."""
+    text makes the next ``muninn enrich`` redo them, and
+    ``scripts/reconcile-vector-index.py`` re-upserts the now-stale point
+    with the same masking."""
+    from muninn.consumers.vault.x_pages import enrichment_quotes_hidden  # stdlib-only
+    from muninn.intake_records import hidden_child_locators, mask_locators, mask_title
+
     old = conn.execute(
         "SELECT title, summary, content_text, tags FROM fts_bookmarks WHERE rowid = ?", (bid,)
     ).fetchone()
-    if old is None:
-        return
-    visible = conn.execute(
-        "SELECT content_visible FROM bookmarks WHERE bookmark_id = ?", (bid,)
+    row = conn.execute(
+        "SELECT b.title, b.content_visible, b.enrichment_source, e.bookmark_id AS enriched, "
+        "       e.summary, e.tags, e.key_quotes, e.entities "
+        "FROM bookmarks b LEFT JOIN enriched e ON e.bookmark_id = b.bookmark_id "
+        "WHERE b.bookmark_id = ?",
+        (bid,),
     ).fetchone()
-    if not visible or not visible[0]:
-        conn.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bid,))
-        report.fts_refreshed += 1
+    if row is None or not row["content_visible"]:
+        if old is not None:
+            conn.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bid,))
+            report.fts_refreshed += 1
         return
-    title = conn.execute("SELECT title FROM bookmarks WHERE bookmark_id = ?", (bid,)).fetchone()[0]
+    if old is None and row["enriched"] is None:
+        return  # never indexed
+    if old is not None:
+        content = old["content_text"] or ""
+    else:
+        found = conn.execute(
+            "SELECT content_text FROM scrape_results WHERE bookmark_id = ? AND pass = ?",
+            (bid, _SOURCE_PASS.get(row["enrichment_source"] or "", "live")),
+        ).fetchone()
+        content = (found[0] if found else None) or ""
+    enriched = row["enriched"] is not None
+    summary = (row["summary"] if enriched else old["summary"]) or ""
+    tags = (row["tags"] if enriched else old["tags"]) or "[]"
+
     patterns = hidden_child_patterns(conn, bid)
-    new = (
-        title or "",
-        mask_text(old[1] or "", patterns),
-        mask_text(old[2] or "", patterns),
-        old[3],
+    urls = hidden_child_locators(conn, [bid]).get(bid, set())
+
+    def mask(text: str) -> str:
+        return mask_locators(mask_text(text, patterns), urls)
+
+    withheld = enrichment_quotes_hidden(
+        urls, summary, row["key_quotes"] if enriched else None, row["entities"] if enriched else None
     )
-    if new == tuple(old):
+    new = (
+        mask_title(row["title"], urls) if row["title"] else "",
+        "" if withheld else mask(summary),
+        mask(content),
+        mask_locators(tags, urls),
+    )
+    if old is not None and new == tuple(old):
         return
     conn.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bid,))
     conn.execute(

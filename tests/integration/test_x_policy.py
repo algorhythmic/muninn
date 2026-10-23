@@ -219,7 +219,9 @@ def test_apply_policy_hides_and_masks_rows_no_sync_touched(fresh_db) -> None:
     assert tuple(newest) == ("x_api", BASE + 600, BASE, "full")
     fts = fresh_db.execute("SELECT title, summary, content_text FROM fts_bookmarks WHERE rowid = ?",
                            (parent["bookmark_id"],)).fetchone()
-    assert tuple(fts) == ("@pub: read [hidden link]", "About [hidden link]", "read [hidden link]")
+    # A summary that quotes the hidden locator is withheld whole, as the
+    # vault and MCP withhold it (it can paraphrase the hidden page).
+    assert tuple(fts) == ("@pub: read [hidden link]", "", "read [hidden link]")
 
     # Idempotent; and the writer derives the same text on the next sighting.
     again = apply_policy(fresh_db, SECRET_SITE, now=BASE + 700)
