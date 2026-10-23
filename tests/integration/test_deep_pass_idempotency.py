@@ -13,7 +13,7 @@ import sqlite3
 import time
 from unittest.mock import MagicMock, patch
 
-from muninn.config import HAIKU_MODEL, OPUS_MODEL, PER_BOOKMARK_PROMPT_VERSION
+from muninn.config import HAIKU_MODEL, PER_BOOKMARK_PROMPT_VERSION
 from muninn.enrich.haiku import EnrichmentResult
 from muninn.enrich.idempotency import compute_content_hash
 from muninn.enrich.pipeline import enrich_all
@@ -36,6 +36,10 @@ class _OneShotLauncher:
         return RunnerResult(output_json=self._output, runner_ref="mock")
 
 
+# The synthesis model the stand-in runner reports in its output metadata.
+SYNTHESIS_MODEL = "claude-opus-4-6"
+
+
 def _deep_pass_output() -> dict:
     return {
         "bookmark_id": 1,
@@ -48,7 +52,7 @@ def _deep_pass_output() -> dict:
         "key_quotes": ["A verbatim quote from source"],
         "cross_references": [],
         "synthesis_metadata": {
-            "model": "claude-opus-4-6",
+            "model": SYNTHESIS_MODEL,
             "prompt_version": "synthesis_v1",
             "input_token_count": 1000,
             "output_token_count": 200,
@@ -149,6 +153,6 @@ def test_deep_pass_without_prior_enrichment_records_its_own_provenance(fresh_db)
     result = run_deep_pass(1, conn=fresh_db, runner=launcher, candidate_neighbor_ids=[])
     assert result.status == "completed"
     model, prompt_version, content_hash, _ = _triple(fresh_db)
-    assert model == OPUS_MODEL
+    assert model == SYNTHESIS_MODEL
     assert prompt_version == "synthesis_v1"
     assert content_hash == compute_content_hash(SOURCE_TEXT)

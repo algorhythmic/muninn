@@ -74,7 +74,6 @@ def load_paths() -> Paths:
 
 # ── Model IDs ─────────────────────────────────────────────────────
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
-OPUS_MODEL = "claude-opus-4-6"
 
 # ── Prompt versions ───────────────────────────────────────────────
 PER_BOOKMARK_PROMPT_VERSION = "per_bookmark_v1"
