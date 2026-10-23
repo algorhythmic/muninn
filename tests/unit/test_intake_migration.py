@@ -138,13 +138,14 @@ def test_002_does_not_apply_twice() -> None:
 
 def test_duckdb_attach_reads_the_new_tables(tmp_path: Path) -> None:
     pytest.importorskip("duckdb")
-    from muninn.db import duckdb_attached
+    from muninn.db import duckdb_attached, migrate
 
     path = tmp_path / "m.db"
     conn = db_001(str(path))
     seed_001(conn)
     apply_002(conn)
     conn.close()
+    migrate(path)  # any later migrations, so the reader's version check passes
     con = duckdb_attached(path)
     try:
         assert con.execute("SELECT count(*) FROM sqlite_db.bookmarks").fetchone()[0] == 1

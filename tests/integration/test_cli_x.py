@@ -20,7 +20,7 @@ import respx
 from click.testing import CliRunner
 
 from muninn.consumers.cli.main import cli
-from muninn.db import SchemaVersionError
+from muninn.db import SchemaVersionError, discover_migrations
 from muninn.ingest.x import JsonFileTokenStore, XTokens
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -215,7 +215,8 @@ def behind_db(db_path) -> Path:
 def test_behind_db_is_a_friendly_error_for_every_command(behind_db, args) -> None:
     result = invoke(behind_db, *args)
     assert result.exit_code == 1, result.output
-    assert "Error: Database schema is v1 but this muninn needs v2: run `muninn db migrate`." in result.output
+    head = len(discover_migrations())
+    assert f"Error: Database schema is v1 but this muninn needs v{head}: run `muninn db migrate`." in result.output
     assert "Traceback" not in result.output
 
 
