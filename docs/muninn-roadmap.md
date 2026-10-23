@@ -97,11 +97,11 @@ This phase comes after the X slice. Synthesis (era narratives, deep passes, ad-h
 
 This is Karpathy's "Lint" operation: periodic vault hygiene.
 
-- [ ] **Contradiction detection.** A synthesis-tier pass over pages that share tags flags contradictions inline with `<!-- contradiction: {other_page} -->` comments.
-- [ ] **Orphan detection.** Pages with zero inbound links get flagged for review or concept extraction.
-- [ ] **Stale claim supersession.** When a new ingest contradicts an existing page, the older claim gets a `superseded_at:` frontmatter field. Both versions remain, and git history preserves the original.
-- [ ] **Missing cross-reference suggestion.** When a page mentions an entity that exists elsewhere in the vault but isn't linked, the lint pass suggests the link.
-- [ ] **Cadence.** Weekly, or on demand from the CLI.
+- [x] **Contradiction detection.** A synthesis-tier pass over pages that share tags flags contradictions inline with `<!-- contradiction: {other_page} -->` comments. *Done 2026-10-23 on `x-slice`:* `muninn synthesize lint --tag TAG` (a `muninn-synthesis/1` task, budgeted like the others); findings live in SQLite (migration 003) and the compiler renders them only into compiled `wiki/bookmarks/` pages. See [`vault-lint.md`](vault-lint.md).
+- [x] **Orphan detection.** Pages with zero inbound links get flagged for review or concept extraction. *Done 2026-10-23:* `muninn lint` (deterministic, read-only), which also reports unresolved links.
+- [x] **Stale claim supersession.** When a new ingest contradicts an existing page, the older claim gets a `superseded_at:` frontmatter field. Both versions remain, and git history preserves the original. *Done 2026-10-23:* the same lint task's `supersedes` relation; the compiler adds `superseded_at:` and `superseded_by:` to the older compiled page. Authored pages are never edited.
+- [x] **Missing cross-reference suggestion.** When a page mentions an entity that exists elsewhere in the vault but isn't linked, the lint pass suggests the link. *Done 2026-10-23:* `muninn lint` suggests links to concepts/infra/people/projects pages (report-only).
+- [x] **Cadence.** Weekly, or on demand from the CLI. *Done 2026-10-23:* on demand via the CLI; an example weekly systemd user timer for the deterministic lint is in `deploy/systemd/` (not installed; the model tier stays manual because it spends money). Remaining (operator): install the timer on the homelab host.
 
 ## Post-X
 
