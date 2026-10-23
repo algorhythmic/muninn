@@ -459,6 +459,18 @@ def _apply(
                 report.titles_changed += 1
                 touched.add(bid)
 
+    # A hidden row that still has a keyword-index entry (hidden by some
+    # other writer, such as a scrape that ended on a hidden locator, that
+    # left the entry): refresh it as if it had just flipped, so the entry
+    # goes and the items linking it are rechecked.
+    for (bid,) in conn.execute(
+        "SELECT b.bookmark_id FROM bookmarks b JOIN fts_bookmarks f ON f.rowid = b.bookmark_id "
+        f"WHERE b.content_visible = 0 AND b.source IN ({marks})",
+        sources,
+    ):
+        touched.add(int(bid))
+        flipped.add(int(bid))
+
     parents: set[int] = set()
     if SOURCE_X_POST in sources:
         parents = {

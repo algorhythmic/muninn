@@ -265,3 +265,68 @@ def test_browser_reingest_keeps_a_redirect_hidden_row_hidden(fresh_db, tmp_path)
     assert stats.hidden_by_policy == 1 and _visible(fresh_db, bid) == 0
     assert ingest_html(html, fresh_db, policy=DomainPolicy()).hidden_by_policy == 0
     assert _visible(fresh_db, bid) == 1  # the policy no longer hides the target
+
+
+def _seed_indexed_browser_row(conn: sqlite3.Connection, *, visible: int = 1) -> int:
+    """A browser bookmark on the shortener, enriched and in the keyword index."""
+    bid = int(conn.execute(
+        "INSERT INTO bookmarks (source, source_id, captured_at, title, url, domain, content_visible) "
+        "VALUES ('bookmarks_html', 'h1', ?, 'Short', ?, 'short.example.net', ?)",
+        (T0, SHORT, visible),
+    ).lastrowid)
+    conn.execute(
+        "INSERT INTO enriched (bookmark_id, summary, tags, enrichment_model, "
+        "enrichment_prompt_version, content_hash, enriched_at) VALUES (?, ?, '[]', 'm', 'v', 'h', 1)",
+        (bid, f"Describes the {SECRET_WORDS}."),
+    )
+    conn.execute(
+        "INSERT INTO fts_bookmarks (rowid, title, summary, content_text, tags) VALUES (?, 'Short', ?, ?, '[]')",
+        (bid, f"Describes the {SECRET_WORDS}.", f"The {SECRET_WORDS} is here."),
+    )
+    conn.commit()
+    return bid
+
+
+def _fts(conn, bid: int):
+    return conn.execute("SELECT * FROM fts_bookmarks WHERE rowid = ?", (bid,)).fetchone()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_browser_row_hidden_by_its_scrape_leaves_the_keyword_index(db_path, tmp_path) -> None:
+    """The scrape hides the row before apply_policy runs, so apply_policy
+    saw no flip and left the row's own keyword-index entry behind."""
+    conn = connect(db_path)
+    bid = _seed_indexed_browser_row(conn)
+    _no_robots()
+    respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
+    respx.get(SHORT).mock(return_value=httpx.Response(302, headers={"location": TARGET}))
+    client = _client(tmp_path)
+    try:
+        stats = await scrape_all(conn, client=client, policy=POLICY)
+    finally:
+        await client.close()
+
+    assert stats["hidden_by_policy"] == 1 and _visible(conn, bid) == 0
+    assert _fts(conn, bid) is None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM fts_bookmarks WHERE fts_bookmarks MATCH ?", (f'"{SECRET_WORDS}"',)
+    ).fetchone()[0] == 0
+
+
+def test_policy_apply_drops_the_entry_of_a_row_already_hidden(db_path) -> None:
+    """Whoever hid the row, apply_policy removes an entry it left."""
+    conn = connect(db_path)
+    bid = _seed_indexed_browser_row(conn, visible=0)
+    conn.execute(
+        "INSERT INTO scrape_results (bookmark_id, pass, fetched_at, final_url, http_status, scrape_status) "
+        "VALUES (?, 'live', ?, ?, 302, 'failed')",
+        (bid, T0, TARGET),
+    )
+    conn.commit()
+
+    report = apply_policy(conn, POLICY)
+
+    assert report.newly_hidden == 0 and report.fts_refreshed == 1
+    assert _fts(conn, bid) is None
+    assert not apply_policy(conn, POLICY).changed  # idempotent

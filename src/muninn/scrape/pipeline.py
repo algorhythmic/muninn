@@ -157,6 +157,10 @@ async def scrape_one(
             conn.execute(
                 "UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = ?", (bookmark_id,)
             )
+            # A hidden row has no keyword-index entry. apply_policy, later,
+            # sees the row already hidden and would not flip it, so the
+            # entry goes here, in the same transaction.
+            conn.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bookmark_id,))
             log.info("bookmark %d hidden: a fetch ended on a policy-hidden locator", bookmark_id)
 
     log.info(
