@@ -753,6 +753,13 @@ Conventions the writer implements:
     also covers browser rows.
   - **X hosts.** `x.com` and `twitter.com`, with or without `www.`,
     `mobile.` or `m.`, are aliases, and handle paths match ignoring case.
+  - **Redirects.** A fetched row (a linked page, a browser bookmark) is
+    also hidden when a fetch of it ended on a locator domain policy
+    hides: a redirect's final URL, or the original inside a Wayback
+    snapshot URL. Its content is the hidden site's, so it is treated
+    exactly as if its own locator were hidden. The live fetch never
+    follows a redirect to a hidden locator, and a fetch that ended on one
+    keeps no content.
   - **Masking.** When a visible post's linked item becomes hidden, the
     post's current text is masked and recorded as a new `x_api` revision
     whose `retrieved_at` is the time of the pass. Nothing is refetched,

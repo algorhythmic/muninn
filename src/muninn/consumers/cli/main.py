@@ -342,7 +342,8 @@ def policy_apply_cmd(ctx: click.Context, dry_run: bool, policy_file: str | None)
     """Re-apply domain policy to every stored row, with no API call or fetch.
 
     Recomputes content_visible from each row's stored url (browser and X
-    rows), canonicalizes X post locators, titles hidden X posts with the
+    rows) and, for scraped rows, from where their fetches ended (a redirect
+    to a hidden locator hides the row), canonicalizes X post locators, titles hidden X posts with the
     handle only (hidden articles: none), and masks a hidden item's locator
     as [hidden link] in the current text and title of the visible X posts
     that link it (a new content revision; earlier revisions are kept).

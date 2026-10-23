@@ -77,6 +77,7 @@ from muninn.ingest.policy import (
     policy_hides,
     post_locator,
     post_title_for,
+    row_visible_flag,
     visible_flag,
 )
 from muninn.intake_records import SOURCE_X_ARTICLE, SOURCE_X_LINK, SOURCE_X_POST, X_SOURCES
@@ -420,9 +421,12 @@ class XPageWriter:
         return bookmark_id, newly
 
     def _apply_policy(self, bookmark_id: int, url: str | None) -> None:
+        """Recompute visibility as `muninn policy apply` does: a linked
+        page whose scrape ended on a hidden locator stays hidden."""
+        visible = row_visible_flag(self.conn, self.policy, bookmark_id, url)
         self.conn.execute(
             "UPDATE bookmarks SET content_visible = ? WHERE bookmark_id = ? AND content_visible <> ?",
-            (_visible(self.policy, url), bookmark_id, _visible(self.policy, url)),
+            (visible, bookmark_id, visible),
         )
 
     def _observed_at(self, bookmark_id: int) -> int | None:

@@ -8,6 +8,14 @@ stays light.
   ``x.com`` and ``twitter.com`` (and their ``www.``/``mobile.``/``m.``
   forms) are one site whose handle paths are case-insensitive, so a rule
   for ``x.com/someone/*`` also hides ``twitter.com/SomeOne/status/…``.
+- **A row is hidden when its own locator is hidden, or when a fetch of it
+  ended on a hidden locator** (:func:`row_hidden`): a redirect's final URL
+  in ``scrape_results.final_url`` (any pass), or the ``final_locator`` of
+  any of its non-withdrawn ``scrape_history`` revisions, with a Wayback
+  snapshot URL read as the original it archives. Such a fetch's content
+  is the hidden site's, so the row is treated exactly as if its own URL
+  were hidden. Only rows ``muninn scrape`` fetches count; an X post's or
+  article's stored locator is its own.
 - An X post's locator is always the canonical
   ``https://x.com/<handle>/status/<id>`` (``/i/web/status/<id>`` while the
   handle is unknown), whatever URL form first referenced it.
@@ -33,7 +41,13 @@ from typing import Any, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
 from muninn.consumers.packets.canonical import x_post_item_id
-from muninn.intake_records import SOURCE_X_ARTICLE, SOURCE_X_LINK, SOURCE_X_POST, X_SOURCES
+from muninn.intake_records import (
+    API_CONTENT_SOURCES,
+    SOURCE_X_ARTICLE,
+    SOURCE_X_LINK,
+    SOURCE_X_POST,
+    X_SOURCES,
+)
 from muninn.revisions import record_revision
 from muninn.sanitize import sanitize_url
 from muninn.scrape.domain_policy import DomainPolicy
@@ -83,6 +97,90 @@ def policy_hides(policy: DomainPolicy, url: str | None) -> bool:
 
 def visible_flag(policy: DomainPolicy, url: str | None) -> int:
     return 0 if policy_hides(policy, url) else 1
+
+
+# A Wayback snapshot URL (``/web/<timestamp><modifier>/<original>``).
+_WAYBACK_RE = re.compile(
+    r"^https?://(?:web\.)?archive\.org/web/[0-9]{1,14}(?:[a-z]{2}_)?/(.+)$", re.IGNORECASE
+)
+
+
+def archived_original(url: str | None) -> str | None:
+    """The original URL a Wayback snapshot URL archives, else None."""
+    m = _WAYBACK_RE.match(url or "")
+    if m is None:
+        return None
+    original = m.group(1)
+    if not re.match(r"^https?://", original, re.IGNORECASE):
+        original = "http://" + original.removeprefix("//")
+    return sanitize_url(original).sanitized_url
+
+
+def locator_hidden(policy: DomainPolicy, url: str | None) -> bool:
+    """:func:`policy_hides`, also for the original inside a Wayback URL."""
+    return policy_hides(policy, url) or policy_hides(policy, archived_original(url))
+
+
+def fetched_locators(
+    conn: sqlite3.Connection, bookmark_ids: Iterable[int] | None = None
+) -> dict[int, set[str]]:
+    """``{bookmark_id: every locator a fetch of the row ended on}``: the
+    ``final_url`` of each ``scrape_results`` pass and the ``final_locator``
+    of each non-withdrawn ``scrape_history`` revision (all rows, or these)."""
+    ids = None if bookmark_ids is None else sorted({int(b) for b in bookmark_ids})
+    out: dict[int, set[str]] = {}
+    queries = [
+        "SELECT bookmark_id, final_url FROM scrape_results WHERE final_url IS NOT NULL",
+    ]
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'scrape_history'"
+    ).fetchone() is not None:
+        queries.append(
+            "SELECT bookmark_id, final_locator FROM scrape_history "
+            "WHERE final_locator IS NOT NULL AND withdrawn_at IS NULL"
+        )
+    for sql in queries:
+        if ids is None:
+            rows = conn.execute(sql).fetchall()
+        else:
+            rows = []
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                rows += conn.execute(
+                    f"{sql} AND bookmark_id IN ({','.join('?' * len(chunk))})", chunk
+                ).fetchall()
+        for bid, locator in rows:
+            if bid is not None and locator:
+                out.setdefault(int(bid), set()).add(locator)
+    return out
+
+
+def row_hidden(
+    policy: DomainPolicy, source: str | None, url: str | None, fetched: Iterable[str] = ()
+) -> bool:
+    """True when domain policy hides the row: its own locator, or (for a
+    row ``muninn scrape`` fetches) any locator a fetch of it ended on."""
+    if policy_hides(policy, url):
+        return True
+    if source in API_CONTENT_SOURCES:
+        return False
+    return any(locator_hidden(policy, loc) for loc in fetched)
+
+
+def row_visible_flag(
+    conn: sqlite3.Connection, policy: DomainPolicy, bookmark_id: int,
+    url: str | None, source: str | None = None,
+) -> int:
+    """``content_visible`` for a stored row under :func:`row_hidden`."""
+    if source is None:
+        found = conn.execute(
+            "SELECT source FROM bookmarks WHERE bookmark_id = ?", (bookmark_id,)
+        ).fetchone()
+        source = found[0] if found else None
+    fetched = () if source in API_CONTENT_SOURCES else fetched_locators(conn, [bookmark_id]).get(
+        int(bookmark_id), ()
+    )
+    return 0 if row_hidden(policy, source, url, fetched) else 1
 
 
 def domain_of(url: str | None) -> str | None:
@@ -260,7 +358,8 @@ def apply_policy(
     """Re-apply domain policy to stored rows (no API call, no fetch).
 
     For every row of ``sources``: canonicalize X post locators, recompute
-    ``content_visible`` from the stored ``url`` (as re-ingest does), and set
+    ``content_visible`` from the stored ``url`` and the locators its
+    fetches ended on (:func:`row_hidden`, as re-ingest and scrape do), and set
     hidden posts' titles to ``@handle`` (hidden articles: no title). Then,
     for every visible X post that links a hidden item, mask the hidden
     locator in its current text (the ``scrape_results`` live row, plus a
@@ -302,6 +401,7 @@ def _apply(
     ).fetchall()
     touched: set[int] = set()
     revived_posts: set[int] = set()
+    fetched = fetched_locators(conn)
     for row in rows:
         report.checked += 1
         bid, source = int(row["bookmark_id"]), row["source"]
@@ -312,7 +412,7 @@ def _apply(
             if canonical and canonical != url:
                 url = canonical
                 report.locators_canonicalized += 1
-        visible = visible_flag(policy, url)
+        visible = 0 if row_hidden(policy, source, url, fetched.get(bid, ())) else 1
         if visible != was:
             if visible:
                 report.newly_visible += 1
@@ -457,17 +557,22 @@ __all__ = [
     "X_HOSTS",
     "X_TEXT_EXTRACTOR",
     "apply_policy",
+    "archived_original",
     "canonical_post_locator",
     "child_mask_patterns",
     "domain_of",
+    "fetched_locators",
     "handle_from_locator",
     "hidden_child_patterns",
     "hidden_post_title",
+    "locator_hidden",
     "mask_text",
     "meta_handle",
     "policy_hides",
     "post_locator",
     "post_title_for",
+    "row_hidden",
+    "row_visible_flag",
     "title_from_text",
     "visible_flag",
 ]

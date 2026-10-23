@@ -33,16 +33,28 @@ prefers the live pass, because research selection uses current captures
 ``scrape_all`` may interleave many bookmarks concurrently with a bounded
 semaphore; politeness is enforced by the shared :class:`RateLimiter` (one
 RPS per live origin, 0.5 RPS global to IA), not by the concurrency limit.
+
+Domain policy also applies to where a fetch *ends*
+(:func:`muninn.ingest.policy.row_hidden`). The live pass never follows a
+redirect to a hidden locator; a fetch that nonetheless ended on one (a
+Wayback snapshot of a redirect target, a cached response from before a
+policy change) keeps no content. Either way the hidden locator is kept in
+``final_url`` and the row is hidden (``content_visible = 0``) in the same
+transaction, exactly as if its own URL were hidden; once the run is over,
+:func:`muninn.ingest.policy.apply_policy` propagates that (masks in
+parent posts, titles, keyword index).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 from typing import Iterable, Optional
 
 from muninn.db import connect, transaction
+from muninn.ingest.policy import apply_policy, locator_hidden, row_visible_flag
 from muninn.intake_records import API_CONTENT_SOURCES, SOURCE_X_LINK, item_ref_for, row_metadata
 from muninn.models import ScrapeResult
 from muninn.revisions import record_revision
@@ -51,6 +63,7 @@ from muninn.scrape.at_capture import fetch_at_capture
 from muninn.scrape.client import ScrapeClient
 from muninn.scrape.extract import EXTRACTOR_NAME, EXTRACTOR_VERSION
 from muninn.scrape.live import fetch_live
+from muninn.scrape.domain_policy import DomainPolicy, load_domain_policy
 from muninn.scrape.recent_archive import fetch_recent_archive
 
 log = logging.getLogger(__name__)
@@ -75,13 +88,18 @@ async def scrape_one(
     conn: sqlite3.Connection,
     client: ScrapeClient,
     bookmark_row: dict,
+    *,
+    policy: Optional[DomainPolicy] = None,
 ) -> dict:
     """Run all passes for one bookmark, persist results, update
-    ``enrichment_source``. Returns a small per-bookmark stats dict.
+    ``enrichment_source``. Returns a small per-bookmark stats dict
+    (``hidden``: the row is now hidden because a fetch ended on a
+    locator ``policy`` hides; no policy, no such check).
     """
     bookmark_id = int(bookmark_row["bookmark_id"])
     url = bookmark_row.get("url")
     captured_at = bookmark_row.get("captured_at")
+    stop_at = (lambda u: locator_hidden(policy, u)) if policy is not None else None
 
     results: list[ScrapeResult] = []
 
@@ -96,8 +114,11 @@ async def scrape_one(
 
     # Pass 3: live (always — even if archives succeeded, we want a fresh
     # comparison snapshot, and stream-2's tests assert the row exists).
-    live_result = await fetch_live(client, bookmark_id, url)
+    live_result = await fetch_live(client, bookmark_id, url, stop_at=stop_at)
     results.append(live_result)
+
+    if stop_at is not None:
+        results = [_withhold_hidden_fetch(r, stop_at) for r in results]
 
     # Persist + route enrichment_source atomically per bookmark.
     identity = _identity(conn, bookmark_row)
@@ -112,6 +133,14 @@ async def scrape_one(
         for r in sorted(results, key=lambda r: r.pass_ != "live"):
             _record_history(conn, r, identity)
         _update_enrichment_source(conn, bookmark_id, enrichment_source)
+        hidden = policy is not None and not row_visible_flag(
+            conn, policy, bookmark_id, url, identity["source"]
+        )
+        if hidden:
+            conn.execute(
+                "UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = ?", (bookmark_id,)
+            )
+            log.info("bookmark %d hidden: a fetch ended on a policy-hidden locator", bookmark_id)
 
     log.info(
         "bookmark %d → enrichment_source=%s (%d passes)",
@@ -121,7 +150,29 @@ async def scrape_one(
         "bookmark_id": bookmark_id,
         "enrichment_source": enrichment_source,
         "passes": {r.pass_: r.scrape_status for r in results},
+        "hidden": hidden,
     }
+
+
+def _withhold_hidden_fetch(r: ScrapeResult, hidden) -> ScrapeResult:
+    """A fetch that ended on a hidden locator keeps none of its content
+    (its ``final_url`` stays, so the row is hidden by it)."""
+    if not r.final_url or not hidden(_sanitized_locator(r.final_url) or r.final_url):
+        return r
+    if r.raw_html_path:
+        try:
+            os.unlink(r.raw_html_path)
+        except OSError:
+            pass
+    return r.model_copy(update={
+        "scrape_status": "failed",
+        "extraction_quality": None,
+        "content_text": None,
+        "content_html": None,
+        "raw_html_path": None,
+        "error_detail": r.error_detail if r.scrape_status == "failed"
+        else "fetch ended on a locator hidden by domain policy",
+    })
 
 
 async def scrape_all(
@@ -131,6 +182,7 @@ async def scrape_all(
     concurrency: int = 4,
     limit: Optional[int] = None,
     sources: Optional[Iterable[str]] = None,
+    policy: Optional[DomainPolicy] = None,
 ) -> dict:
     """Run dual-pass scrape for every ``content_visible=1`` bookmark.
 
@@ -139,9 +191,15 @@ async def scrape_all(
     smoke-test workflow. Default: all visible bookmarks.
     ``sources``: only rows whose ``bookmarks.source`` is listed. X post and
     article rows are always skipped (their content comes from the X API).
+    ``policy``: the domain policy (default: ``domain_policy.yml``); a row
+    whose fetch ends on a locator it hides is hidden, and the policy is
+    then re-applied to every stored row (:func:`apply_policy`).
 
-    Returns aggregated stats: ``{processed, errors, by_source: {…}}``.
+    Returns aggregated stats: ``{processed, errors, hidden_by_policy,
+    by_source: {…}}``.
     """
+    if policy is None:
+        policy = load_domain_policy()
     bookmarks = _list_visible_bookmarks(conn, limit=limit, sources=sources)
     log.info("scraping %d visible bookmarks", len(bookmarks))
 
@@ -150,13 +208,14 @@ async def scrape_all(
         client = ScrapeClient()
 
     sem = asyncio.Semaphore(max(1, concurrency))
-    stats = {"processed": 0, "errors": 0, "by_source": {}}
+    stats = {"processed": 0, "errors": 0, "hidden_by_policy": 0, "by_source": {}}
 
     async def _one(bm: dict) -> None:
         async with sem:
             try:
-                result = await scrape_one(conn, client, bm)
+                result = await scrape_one(conn, client, bm, policy=policy)
                 stats["processed"] += 1
+                stats["hidden_by_policy"] += result["hidden"]
                 src = result["enrichment_source"]
                 stats["by_source"][src] = stats["by_source"].get(src, 0) + 1
             except Exception:
@@ -169,6 +228,11 @@ async def scrape_all(
         if own_client:
             await client.close()
 
+    if stats["hidden_by_policy"]:
+        # Newly hidden rows: mask their locators in the posts that link
+        # them, fix titles and keyword-index rows (as `muninn policy apply`).
+        report = apply_policy(conn, policy)
+        log.info("domain policy re-applied after scrape: %s", report.summary())
     return stats
 
 

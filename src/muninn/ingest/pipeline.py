@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from muninn.ingest.bookmarks_html import ParsedBookmark, parse_bookmarks_html
-from muninn.ingest.policy import policy_hides
+from muninn.ingest.policy import policy_hides, row_visible_flag
 from muninn.sanitize import sanitize_url
 from muninn.scrape.domain_policy import DomainPolicy, load_domain_policy
 
@@ -150,6 +150,13 @@ def ingest_html(
         ).fetchone()
         if row is not None:
             stats.bookmark_ids.append(row[0])
+            # A known row whose earlier scrape ended on a hidden locator (a
+            # redirect) stays hidden, as `muninn policy apply` decides.
+            if not hidden and not row_visible_flag(conn, policy, row[0], url, SOURCE_NAME):
+                conn.execute(
+                    "UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = ?", (row[0],)
+                )
+                stats.hidden_by_policy += 1
 
     conn.commit()
     return stats
