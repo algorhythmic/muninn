@@ -11,9 +11,11 @@ Produces a :class:`ScrapeResult` with ``pass='live'``. Status mapping:
 - httpx timeout → ``timeout``
 - httpx other transport errors → ``network_error``
 - robots.txt disallows the URL (or a redirect hop) → ``robots_disallowed``,
-  with no request for it
-- robots.txt answered 5xx or was unreachable → ``network_error`` ("skip
-  this run", RFC 9309 §2.3.1.4), with no request for the page
+  with no request for it (Muninn chose not to fetch: the pipeline records
+  no revision for it and keeps an earlier capture)
+- robots.txt answered 5xx or was unreachable → no result at all (None):
+  "skip this run" (RFC 9309 §2.3.1.4), with no request for the page, and
+  the pipeline leaves the stored live row as it is
 - a redirect to a locator domain policy hides → ``failed``, not followed;
   ``final_url`` records the hidden hop, so the row itself is then hidden
   (see :mod:`muninn.scrape.pipeline`)
@@ -36,11 +38,12 @@ async def fetch_live(
     url: Optional[str],
     *,
     stop_at: Optional[Callable[[str], bool]] = None,
-) -> ScrapeResult:
+) -> Optional[ScrapeResult]:
     """Run the live pass for one bookmark and return a populated
     :class:`ScrapeResult`. Caller persists it via :func:`muninn.db.transaction`.
     ``stop_at``: a redirect hop it returns True for is not followed
-    (domain policy).
+    (domain policy). None: the live pass is skipped this run (a robots.txt
+    on the way could not be read), and nothing is to be persisted.
     """
     now = int(time.time())
 
@@ -55,6 +58,8 @@ async def fetch_live(
 
     result = await client.fetch_live(url, stop_at=stop_at)
 
+    if result.get("error_kind") == "robots_unreachable":
+        return None
     if "error" in result:
         return ScrapeResult(
             bookmark_id=bookmark_id,
@@ -101,7 +106,6 @@ _ERROR_STATUS = {
     "timeout": "timeout",
     "network_error": "network_error",
     "robots_disallowed": "robots_disallowed",
-    "robots_unreachable": "network_error",
     "policy_hidden": "failed",
 }
 

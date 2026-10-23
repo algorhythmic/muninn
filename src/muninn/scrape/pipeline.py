@@ -7,7 +7,10 @@ Per-bookmark control flow (serial within a bookmark):
    didn't yield ``ok``.
 3. ``live`` — always run (for completeness/freshness comparison even when
    archives succeeded). Becomes the canonical content only as a last-resort
-   fallback.
+   fallback. robots.txt can stop it: an unreachable robots.txt skips the
+   pass this run (the stored live row is left as it is), and a disallow
+   writes a ``robots_disallowed`` row only when no earlier capture exists.
+   Neither adds a ``scrape_history`` revision.
 
 After all passes, ``bookmarks.enrichment_source`` is set per priority:
 ``at_capture > recent_archive > live_fallback > none`` (where the chosen
@@ -114,20 +117,34 @@ async def scrape_one(
 
     # Pass 3: live (always — even if archives succeeded, we want a fresh
     # comparison snapshot, and stream-2's tests assert the row exists).
+    # robots.txt outcomes are not observations of the page: an unreachable
+    # robots.txt skips the live pass this run (None), and a disallow keeps
+    # an earlier capture (see _keeps_stored_live).
     live_result = await fetch_live(client, bookmark_id, url, stop_at=stop_at)
-    results.append(live_result)
+    stored_live = _stored_live(conn, bookmark_id)
+    keep_stored_live = live_result is None or _keeps_stored_live(live_result, stored_live)
+    if not keep_stored_live:
+        results.append(live_result)
 
     if stop_at is not None:
         results = [_withhold_hidden_fetch(r, stop_at) for r in results]
 
-    # Persist + route enrichment_source atomically per bookmark.
+    # Persist + route enrichment_source atomically per bookmark. A kept
+    # live row still counts for routing: it is the current live capture.
     identity = _identity(conn, bookmark_row)
+    routed = (results + [stored_live]) if keep_stored_live and stored_live is not None else results
     enrichment_source = _pick_enrichment_source(
-        results, prefer_live=identity["source"] == SOURCE_X_LINK
+        routed, prefer_live=identity["source"] == SOURCE_X_LINK
     )
     with transaction(conn):
         for r in results:
             _upsert_scrape_result(conn, r)
+        if live_result is not None and keep_stored_live:
+            conn.execute(
+                "UPDATE scrape_results SET error_detail = ? WHERE bookmark_id = ? AND pass = 'live'",
+                (f"{live_result.error_detail} at {live_result.fetched_at}; "
+                 "kept the earlier capture", bookmark_id),
+            )
         # Live first: when a live and an archive capture have identical text,
         # the one revision the unique key keeps is the current (live) one.
         for r in sorted(results, key=lambda r: r.pass_ != "live"):
@@ -149,9 +166,44 @@ async def scrape_one(
     return {
         "bookmark_id": bookmark_id,
         "enrichment_source": enrichment_source,
-        "passes": {r.pass_: r.scrape_status for r in results},
+        "passes": {
+            **{r.pass_: r.scrape_status for r in results},
+            **({"live": "skipped"} if live_result is None else {}),
+        },
         "hidden": hidden,
     }
+
+
+# Live-row states that hold a capture of the page.
+_CAPTURE_STATUSES = frozenset({"ok", "partial"})
+
+
+def _robots_refusal(r: ScrapeResult) -> bool:
+    """True when Muninn itself declined the fetch because robots.txt
+    disallows it (no request was made). An HTTP 451 answer, which the live
+    pass also records as ``robots_disallowed``, is the site refusing."""
+    return r.scrape_status == "robots_disallowed" and r.http_status != 451
+
+
+def _keeps_stored_live(r: ScrapeResult, stored: Optional[ScrapeResult]) -> bool:
+    """A robots.txt disallow does not replace a stored live capture.
+
+    The earlier capture was fetched while robots.txt allowed it; robots.txt
+    governs fetching, not what was already fetched, so the row keeps its
+    status, content and ``fetched_at`` (only ``error_detail`` notes the
+    disallow). With no earlier capture the ``robots_disallowed`` row is
+    written, so the reason the page has no live content is on record."""
+    return _robots_refusal(r) and stored is not None and stored.scrape_status in _CAPTURE_STATUSES
+
+
+def _stored_live(conn: sqlite3.Connection, bookmark_id: int) -> Optional[ScrapeResult]:
+    row = conn.execute(
+        "SELECT bookmark_id, pass, fetched_at, final_url, http_status, scrape_status, "
+        "extraction_quality, error_detail FROM scrape_results "
+        "WHERE bookmark_id = ? AND pass = 'live'",
+        (bookmark_id,),
+    ).fetchone()
+    return ScrapeResult(**dict(row)) if row is not None else None
 
 
 def _withhold_hidden_fetch(r: ScrapeResult, hidden) -> ScrapeResult:
@@ -345,12 +397,17 @@ def _identity(conn: sqlite3.Connection, bookmark_row: dict) -> dict:
 
 def _coverage(r: ScrapeResult) -> Optional[str]:
     """Contract coverage of one fetch, or None when it observed no content
-    state (no URL, no archive, timeout, network error, other HTTP errors)."""
+    state (no URL, no archive, timeout, network error, other HTTP errors,
+    a fetch robots.txt kept Muninn from making)."""
     status = r.scrape_status
     if status in ("ok", "partial"):
         if not (r.content_text or "").strip():
             return "empty"
         return "full" if status == "ok" and r.extraction_quality == "ok" else "partial"
+    if _robots_refusal(r):
+        # Muninn chose not to fetch: nothing about the page was observed.
+        # Contract `blocked` means the source refused (an HTTP 451 does).
+        return None
     if status in _BLOCKED_STATUSES:
         return "blocked"
     if status == "failed" and r.http_status in _DELETED_HTTP:

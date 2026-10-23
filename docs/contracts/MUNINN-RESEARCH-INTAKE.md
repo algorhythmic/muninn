@@ -305,6 +305,11 @@ One distinct captured content state of an item. Rules:
   is 0 and the digest is the empty-string digest. An auth-wall or error
   page is not the item's content. Coverage is part of the revision key, so
   the three empty states stay distinct.
+- **`blocked` means the source refused** (for example an auth wall,
+  HTTP 401, 403 or 451, or an X `not-authorized-for-resource` error). A
+  fetch the producer chose not to make (the site's robots.txt disallows it, or robots.txt
+  could not be read) observed nothing: it creates no revision, and the
+  item's earlier revisions stay current.
 - **Retrieval method** is `x_api` (the X API response), `live` (an HTTP
   fetch at sync time) or `archive` (a web-archive capture).
 - **Freshness** is `current` for `x_api` and `live`, and `historical` for

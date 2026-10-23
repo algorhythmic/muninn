@@ -11,6 +11,7 @@ import httpx
 import pytest
 import respx
 
+from muninn.intake_records import current_revision_row
 from muninn.scrape.client import IA_CDX_BASE, IA_WEB_BASE, ScrapeClient
 from muninn.scrape.pipeline import scrape_all
 from tests.integration.test_scrape_history import CDX_EMPTY, CDX_HIT, PAGE, Clock, NoWait
@@ -80,10 +81,11 @@ async def test_disallowed_url_is_not_fetched(fresh_db, make_client) -> None:
     assert _live(fresh_db, ok_id)["scrape_status"] == "ok"
     row = _live(fresh_db, blocked_id)
     assert row["scrape_status"] == "robots_disallowed" and row["content_text"] is None
-    (rev,) = fresh_db.execute(
-        "SELECT coverage, content_text FROM scrape_history WHERE bookmark_id = ?", (blocked_id,)
-    ).fetchall()
-    assert rev["coverage"] == "blocked" and rev["content_text"] is None
+    # Muninn chose not to fetch: no content state was observed, so there is
+    # no revision (contract `blocked` means the site refused).
+    assert fresh_db.execute(
+        "SELECT COUNT(*) FROM scrape_history WHERE bookmark_id = ?", (blocked_id,)
+    ).fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
@@ -110,7 +112,8 @@ async def test_robots_4xx_means_no_rules(fresh_db, make_client, status) -> None:
 @respx.mock
 async def test_unreachable_robots_skips_the_origin_this_run(fresh_db, make_client, answer) -> None:
     """5xx or a transport error: nothing on the origin is fetched this run,
-    and nothing is cached, so the next run asks again."""
+    nothing is persisted for the live pass, and nothing is cached, so the
+    next run asks again."""
     respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
     robots = respx.get(ROBOTS)
     robots.side_effect = [answer, httpx.Response(404)]
@@ -121,9 +124,7 @@ async def test_unreachable_robots_skips_the_origin_this_run(fresh_db, make_clien
 
     assert robots.call_count == 1 and page.call_count == 0
     for bid in (first, second):
-        row = _live(fresh_db, bid)
-        assert row["scrape_status"] == "network_error"
-        assert "robots.txt unreachable" in row["error_detail"]
+        assert _live(fresh_db, bid) is None  # skipped: no live row written
     assert fresh_db.execute("SELECT COUNT(*) FROM scrape_history").fetchone()[0] == 0
 
     respx.get(f"{SITE}/other").mock(return_value=httpx.Response(200, text=PAGE))
@@ -250,3 +251,90 @@ async def test_the_client_matches_robots_per_rfc_9309(make_client, rules, verdic
     finally:
         await client.close()
     assert got == verdicts
+
+
+# ── A robots outcome never replaces a stored capture ──────────────
+
+def _state(conn, bid: int):
+    live = _live(conn, bid)
+    source, item_ref = conn.execute(
+        "SELECT b.enrichment_source, h.item_ref FROM bookmarks b "
+        "JOIN scrape_history h USING (bookmark_id) WHERE b.bookmark_id = ? LIMIT 1", (bid,)
+    ).fetchone()
+    revisions = conn.execute(
+        "SELECT coverage, retrieval_method FROM scrape_history WHERE bookmark_id = ? "
+        "ORDER BY scrape_history_id", (bid,)
+    ).fetchall()
+    current = current_revision_row(conn, item_ref, bid)
+    return live, source, [tuple(r) for r in revisions], current["coverage"]
+
+
+async def _scrape_with_robots(conn, make_client, answer) -> None:
+    with respx.mock:
+        respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
+        respx.get(ROBOTS).mock(side_effect=[answer])
+        respx.get(PRIVATE).mock(return_value=httpx.Response(200, text=PAGE))
+        await _scrape(conn, make_client(refresh=True))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [httpx.Response(503), httpx.ConnectError("refused")],
+    ids=["503", "connect-error"],
+)
+async def test_unreachable_robots_keeps_the_stored_capture(fresh_db, make_client, answer) -> None:
+    bid = _insert(fresh_db, PRIVATE, "p")
+    await _scrape_with_robots(fresh_db, make_client, httpx.Response(404))
+    before = _state(fresh_db, bid)
+    assert before[0]["scrape_status"] == "ok" and before[0]["content_text"]
+    assert before[1] == "live_fallback" and before[3] == "full"
+
+    await _scrape_with_robots(fresh_db, make_client, answer)
+
+    after = _state(fresh_db, bid)
+    assert tuple(after[0]) == tuple(before[0])  # the live row is untouched
+    assert after[1:] == before[1:]
+
+
+@pytest.mark.asyncio
+async def test_a_robots_disallow_keeps_the_stored_capture_and_adds_no_revision(
+    fresh_db, make_client
+) -> None:
+    bid = _insert(fresh_db, PRIVATE, "p")
+    await _scrape_with_robots(fresh_db, make_client, httpx.Response(404))
+    before = _state(fresh_db, bid)
+    fetched_at = fresh_db.execute(
+        "SELECT fetched_at FROM scrape_results WHERE bookmark_id = ? AND pass = 'live'", (bid,)
+    ).fetchone()[0]
+
+    # Longest match: /private/ disallows despite the earlier Allow: /.
+    rules = "User-agent: *\nAllow: /\nDisallow: /private/\n"
+    await _scrape_with_robots(fresh_db, make_client, httpx.Response(200, text=rules))
+
+    after = _state(fresh_db, bid)
+    live = after[0]
+    assert (live["scrape_status"], live["content_text"]) == ("ok", before[0]["content_text"])
+    assert "disallowed by robots.txt" in live["error_detail"]
+    assert fresh_db.execute(
+        "SELECT fetched_at FROM scrape_results WHERE bookmark_id = ? AND pass = 'live'", (bid,)
+    ).fetchone()[0] == fetched_at
+    # Same enrichment source, no `blocked` revision, still current and full.
+    assert after[1:] == before[1:] == ("live_fallback", [("full", "live")], "full")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_http_451_is_still_a_blocked_revision(fresh_db, make_client) -> None:
+    """451 is the site refusing, unlike a robots.txt disallow."""
+    respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
+    respx.get(ROBOTS).mock(return_value=httpx.Response(404))
+    respx.get(PRIVATE).mock(return_value=httpx.Response(451))
+    bid = _insert(fresh_db, PRIVATE, "p")
+
+    await _scrape(fresh_db, make_client())
+
+    assert _live(fresh_db, bid)["scrape_status"] == "robots_disallowed"
+    assert [r[0] for r in fresh_db.execute(
+        "SELECT coverage FROM scrape_history WHERE bookmark_id = ?", (bid,)
+    )] == ["blocked"]
