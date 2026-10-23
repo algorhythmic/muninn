@@ -395,7 +395,7 @@ def policy_apply_cmd(ctx: click.Context, dry_run: bool, policy_file: str | None)
 @click.option(
     "--refresh",
     is_flag=True,
-    help="Bypass the live HTTP cache and the latest-snapshot lookup so changed pages are re-captured (archive snapshots stay cached).",
+    help="Bypass the live HTTP and robots.txt caches and every Wayback lookup that can still change, so changed pages are re-captured (archive snapshots stay cached).",
 )
 @click.pass_context
 def scrape_cmd(

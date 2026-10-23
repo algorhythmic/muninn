@@ -119,8 +119,10 @@ HTTP_TIMEOUT_SECONDS = 30
 LIVE_CACHE_TTL_SECONDS = int(os.environ.get("MUNINN_LIVE_CACHE_TTL_SECONDS", str(24 * 3600)))
 # The recent_archive pass asks the IA CDX API for the *latest* snapshot,
 # which changes as IA archives the page again, so that lookup is cached for
-# this long (default 30 days); `--refresh` bypasses it too. The date-bounded
-# at_capture lookups and the snapshot bodies stay cached forever.
+# this long (default 30 days); `--refresh` bypasses it too. So is an
+# at_capture lookup answered while its ±365d window was still open (a recent
+# bookmark's window ends in the future); one answered after the window
+# closed stays cached forever, as do the snapshot bodies.
 RECENT_CDX_TTL_SECONDS = int(
     os.environ.get("MUNINN_RECENT_CDX_TTL_SECONDS", str(30 * 24 * 3600))
 )

@@ -99,10 +99,13 @@ class ScrapeClient:
         (None = forever). ``recent_cdx_ttl``: the same for the
         "latest snapshot" CDX lookup of the recent_archive pass, whose answer
         changes whenever IA archives the page again. ``robots_ttl``: the
-        same for a fetched robots.txt. ``refresh``: read none of those
-        three caches (results are still written to them).
-        Snapshot bodies and the date-bounded at_capture CDX lookups are
-        cached forever, refresh or not: a Wayback snapshot is immutable."""
+        same for a fetched robots.txt, and for an at_capture CDX lookup
+        whose ±365d window had not closed when it was answered (snapshots
+        can still land in it). ``refresh``: read none of those caches
+        (results are still written to them).
+        Snapshot bodies, and at_capture CDX lookups answered after their
+        window closed, are cached forever, refresh or not: a Wayback
+        snapshot is immutable, and so is the set inside a past window."""
         paths = load_paths()
         self.http_cache = HttpCache(http_cache_dir or paths.http_cache_dir, clock=clock)
         self.scrape_cache = HttpCache(scrape_cache_dir or paths.scrape_cache_dir, clock=clock)
@@ -370,6 +373,7 @@ class ScrapeClient:
         cache_key: Optional[str] = None,
         max_age: Optional[float] = None,
         bypass_cache: bool = False,
+        settled_at: Optional[float] = None,
     ) -> Optional[str]:
         """Query the IA CDX API for a snapshot timestamp.
 
@@ -382,7 +386,9 @@ class ScrapeClient:
 
         The answer is memoized in the scrape cache: forever by default,
         for ``max_age`` seconds when given. ``bypass_cache`` skips the read
-        (the fresh answer is still written).
+        (the fresh answer is still written). ``settled_at`` (epoch): the
+        answer cannot change after this time, so one cached at or after it
+        is kept forever, ``max_age`` and ``bypass_cache`` notwithstanding.
         """
         params: dict[str, str] = {
             "url": url,
@@ -399,7 +405,11 @@ class ScrapeClient:
 
         # Cache CDX results in the scrape_cache to memoize across runs.
         ck = cache_key or f"cdx:{url}:{closest}:{from_ts}:{to_ts}:{limit}"
-        cached = None if bypass_cache else self.scrape_cache.get(ck, max_age=max_age)
+        written = self.scrape_cache.written_at(ck) if settled_at is not None else None
+        if written is not None and written >= settled_at:
+            cached = self.scrape_cache.get(ck)
+        else:
+            cached = None if bypass_cache else self.scrape_cache.get(ck, max_age=max_age)
         if cached is not None:
             return cached.get("timestamp")
 

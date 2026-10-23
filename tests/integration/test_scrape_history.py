@@ -388,7 +388,11 @@ async def test_recent_snapshot_lookup_expires_and_refresh_bypasses_it(tmp_path) 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_at_capture_lookup_is_cached_forever_even_under_refresh(tmp_path) -> None:
+async def test_a_closed_window_at_capture_lookup_is_cached_forever_even_under_refresh(
+    tmp_path,
+) -> None:
+    """Bookmarked in 2023: the ±365d window closed in 2024, so the set of
+    snapshots in it cannot change."""
     import time
 
     from muninn.scrape.at_capture import fetch_at_capture
@@ -404,9 +408,85 @@ async def test_at_capture_lookup_is_cached_forever_even_under_refresh(tmp_path) 
 
     for client in (make(), make(refresh=True)):
         try:
-            result = await fetch_at_capture(client, 1, LINK, SNAPSHOT_EPOCH)
+            result = await fetch_at_capture(client, 1, LINK, CLOSED_WINDOW_CAPTURE)
         finally:
             await client.close()
         assert result.actual_snapshot_at == SNAPSHOT_EPOCH
         clock.now += 10**7
     assert cdx.call_count == 1 and archive.call_count == 1
+
+
+CLOSED_WINDOW_CAPTURE = 1_700_000_000  # 2023-11-14: window closed 2024-11
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_an_open_window_at_capture_miss_ages_out_and_refresh_asks_again(tmp_path) -> None:
+    """Bookmarked five days ago: the window ends ~360 days from now, so a
+    miss today can be a hit once IA archives the page. It is reused for
+    MUNINN_RECENT_CDX_TTL_SECONDS, then asked again; --refresh asks at once."""
+    import time
+
+    from muninn.scrape.at_capture import fetch_at_capture
+
+    answers = iter([httpx.Response(200, text=CDX_EMPTY), httpx.Response(200, text=CDX_EMPTY),
+                    _cdx_hit("20261001120000")])
+    cdx = respx.get(IA_CDX_BASE).mock(side_effect=lambda request: next(answers))
+    respx.get(url__startswith=IA_WEB_BASE).mock(return_value=httpx.Response(200, text=PAGE))
+    clock = Clock(time.time())
+    captured_at = int(time.time()) - 5 * 86400
+
+    def make(**kw) -> ScrapeClient:
+        return ScrapeClient(http_cache_dir=tmp_path / "h", scrape_cache_dir=tmp_path / "s",
+                            recent_cdx_ttl=3600, clock=clock, rate_limiter=NoWait(), **kw)
+
+    async def status(client: ScrapeClient) -> str:
+        try:
+            return (await fetch_at_capture(client, 1, LINK, captured_at)).scrape_status
+        finally:
+            await client.close()
+
+    assert await status(make()) == "no_archive"
+    clock.now += 3599
+    assert await status(make()) == "no_archive"
+    assert cdx.call_count == 1  # within the TTL: cached
+    clock.now += 2
+    assert await status(make()) == "no_archive"
+    assert cdx.call_count == 2  # past the TTL: asked again
+    assert await status(make(refresh=True)) == "ok"
+    assert cdx.call_count == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_an_answer_cached_before_the_window_closed_is_not_final(tmp_path) -> None:
+    """A miss cached while the window was open ages out even after the
+    window closes; the answer cached after that is kept forever."""
+    import os
+    import time
+
+    from muninn.scrape.at_capture import fetch_at_capture
+
+    cdx = respx.get(IA_CDX_BASE).mock(return_value=_cdx_hit("20261001120000"))
+    respx.get(url__startswith=IA_WEB_BASE).mock(return_value=httpx.Response(200, text=PAGE))
+    clock = Clock(time.time())
+    key = f"cdx:at_capture:{LINK}:{CLOSED_WINDOW_CAPTURE}"
+    cache = HttpCache(tmp_path / "s")
+    cache.put(key, {"timestamp": None})
+    before_close = CLOSED_WINDOW_CAPTURE + 300 * 86400
+    path = next((tmp_path / "s").glob("*.json"))
+    os.utime(path, (before_close, before_close))
+
+    def make(**kw) -> ScrapeClient:
+        return ScrapeClient(http_cache_dir=tmp_path / "h", scrape_cache_dir=tmp_path / "s",
+                            recent_cdx_ttl=3600, clock=clock, rate_limiter=NoWait(), **kw)
+
+    async def status(client: ScrapeClient) -> str:
+        try:
+            return (await fetch_at_capture(client, 1, LINK, CLOSED_WINDOW_CAPTURE)).scrape_status
+        finally:
+            await client.close()
+
+    assert await status(make()) == "ok" and cdx.call_count == 1
+    clock.now += 10**7
+    assert await status(make(refresh=True)) == "ok" and cdx.call_count == 1

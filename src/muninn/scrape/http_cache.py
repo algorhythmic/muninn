@@ -13,8 +13,8 @@ filename is ``sha256(key).json``; for raw HTML, it's ``sha256(key).html.gz``.
 
 Entries never expire unless the caller passes ``max_age`` to :meth:`get`:
 the live pass does (RI-01 D9), and so does the recent_archive "latest
-snapshot" CDX lookup; Wayback snapshot bodies and the date-bounded
-at_capture CDX lookups don't. Age is the
+snapshot" CDX lookup, and an at_capture CDX lookup whose window was still
+open when it was answered; Wayback snapshot bodies don't. Age is the
 entry file's mtime against the injected ``clock``.
 """
 
@@ -64,6 +64,17 @@ class HttpCache:
         """Store ``data`` (must be JSON-serializable) under ``key``."""
         p = self._key_path(key)
         p.write_text(json.dumps(data, default=str))
+
+    def written_at(self, key: str) -> Optional[float]:
+        """When the entry for ``key`` was written (its mtime), or None."""
+        try:
+            return self._key_path(key).stat().st_mtime
+        except OSError:
+            return None
+
+    def delete(self, key: str) -> None:
+        """Remove the JSON entry for ``key`` (absent is fine)."""
+        self._key_path(key).unlink(missing_ok=True)
 
     def has(self, key: str) -> bool:
         return self._key_path(key).exists()
