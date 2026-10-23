@@ -10,6 +10,10 @@ compiled pages it did not write (a row hidden since the last run, or a
 moved slug). Pruning only touches files carrying the compiler's
 frontmatter marker, never hand-written ones.
 
+Current findings of the model-tier lint (``lint_findings``: contradictions
+and superseded claims) are added to the pages they concern; see
+:mod:`muninn.consumers.vault.lint_notes`. A page without one is unchanged.
+
 X-lane rows (`source` in `x`, `x_article`, `x_link`) compile into the same
 namespace through `templates/x_item_page.md.j2`, with bidirectional links
 from `item_links`; see :mod:`muninn.consumers.vault.x_pages`. Browser
@@ -33,6 +37,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from muninn.config import load_paths
 from muninn.consumers.vault import x_pages
+from muninn.consumers.vault.lint_notes import apply_lint_notes, load_lint_notes
 from muninn.db import connect
 
 
@@ -292,6 +297,7 @@ def compile_vault_report(
         slug_by_id = _build_slugs(bookmarks)
         rows_by_id = {r["bookmark_id"]: r for r in bookmarks}
         graph = x_pages.load_link_graph(conn, set(rows_by_id))
+        lint_notes = load_lint_notes(conn, set(rows_by_id))
 
         written: set[str] = set()
         for bm in bookmarks:
@@ -350,6 +356,10 @@ def compile_vault_report(
                     key_quotes=key_quotes,
                     cross_refs=cross_refs,
                 )
+
+            notes = lint_notes.get(bm["bookmark_id"])
+            if notes:
+                content = apply_lint_notes(content, notes, slug_by_id)
 
             name = f"{slug_by_id[bm['bookmark_id']]}.md"
             (pages_dir / name).write_text(content)
