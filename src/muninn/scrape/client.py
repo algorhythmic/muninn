@@ -16,8 +16,9 @@ pure transport/cache layer.
 
 robots.txt (RFC 9309) gates the live pass only. :meth:`fetch_live` follows
 redirects itself, one hop at a time, and before each hop checks the hop's
-origin's robots.txt for the ``Muninn`` product token (``urllib.robotparser``
-fed the fetched text). Each origin's file is fetched once, cached per run
+origin's robots.txt for the ``Muninn`` product token
+(:mod:`muninn.scrape.robots`, an RFC 9309 matcher: ``urllib.robotparser``
+is not one). Each origin's file is fetched once, cached per run
 and on disk for ``robots_ttl`` seconds. A 4xx answer means "no rules"
 (allow); a 5xx answer or a transport error means the origin is skipped for
 the rest of the run, with nothing cached on disk, so the next run asks
@@ -32,7 +33,6 @@ import asyncio
 import logging
 import os
 import time
-import urllib.robotparser
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
@@ -51,6 +51,7 @@ from muninn.config import (
 from muninn.sanitize import sanitize_url
 from muninn.scrape.http_cache import HttpCache
 from muninn.scrape.rate_limiter import RateLimiter
+from muninn.scrape.robots import RobotsRules, parse as parse_robots
 
 log = logging.getLogger(__name__)
 
@@ -108,9 +109,9 @@ class ScrapeClient:
         self.live_cache_ttl = live_cache_ttl
         self.recent_cdx_ttl = recent_cdx_ttl
         self.robots_ttl = robots_ttl
-        # Per-run robots state: origin → parser (None: no rules), or the
+        # Per-run robots state: origin → parsed rules (None: no rules), or the
         # reason the origin is skipped this run.
-        self._robots: dict[str, urllib.robotparser.RobotFileParser | None | str] = {}
+        self._robots: dict[str, RobotsRules | None | str] = {}
         self._robots_locks: dict[str, asyncio.Lock] = {}
         self.refresh = refresh
         self.rate = rate_limiter or RateLimiter()
@@ -297,7 +298,7 @@ class ScrapeClient:
 
     async def _robots_for(
         self, origin: str
-    ) -> urllib.robotparser.RobotFileParser | None | str:
+    ) -> RobotsRules | None | str:
         if origin not in self._robots:
             lock = self._robots_locks.setdefault(origin, asyncio.Lock())
             async with lock:
@@ -307,7 +308,7 @@ class ScrapeClient:
 
     async def _load_robots(
         self, origin: str
-    ) -> urllib.robotparser.RobotFileParser | None | str:
+    ) -> RobotsRules | None | str:
         """The origin's parsed robots.txt, None when it has none (4xx), or
         the reason it could not be read (not cached on disk)."""
         cache_key = f"robots:{origin}"
@@ -332,9 +333,7 @@ class ScrapeClient:
             self.http_cache.put(cache_key, entry)
         if int(entry.get("status") or 0) >= 400:
             return None  # "unavailable" (4xx): no rules apply
-        parser = urllib.robotparser.RobotFileParser()
-        parser.parse((entry.get("body") or "").splitlines())
-        return parser
+        return parse_robots(entry.get("body") or "")
 
     # ── Wayback archive fetch ────────────────────────────────────
 

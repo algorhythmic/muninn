@@ -220,3 +220,33 @@ async def test_archive_passes_ignore_the_sites_robots(fresh_db, make_client) -> 
     ).fetchone()[0] == "at_capture"
     # The robots request is the only one made to the site itself.
     assert [str(c.request.url) for c in respx.calls if c.request.url.host == "blog.example.org"] == [ROBOTS]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rules, verdicts",
+    [
+        # Longest match wins, not file order.
+        ("User-agent: *\nAllow: /\nDisallow: /private\n", ("ok", "disallowed")),
+        # Wildcards.
+        ("User-agent: *\nDisallow: /*/notes$\n", ("ok", "disallowed")),
+        # Every group naming the agent is merged.
+        ("User-agent: muninn\nDisallow: /posts/\n\nUser-agent: Muninn\nDisallow: /private/\n",
+         ("disallowed", "disallowed")),
+        # A group for "mun" is not Muninn's.
+        ("User-agent: mun\nDisallow: /\n", ("ok", "ok")),
+    ],
+    ids=["longest-match", "wildcard", "merged-groups", "token-not-substring"],
+)
+@respx.mock
+async def test_the_client_matches_robots_per_rfc_9309(make_client, rules, verdicts) -> None:
+    respx.get(ROBOTS).mock(return_value=httpx.Response(200, text=rules))
+    client = make_client()
+    try:
+        got = tuple([
+            "disallowed" if await client.robots_verdict(url) == "disallowed" else "ok"
+            for url in (PUBLIC, PRIVATE)
+        ])
+    finally:
+        await client.close()
+    assert got == verdicts
