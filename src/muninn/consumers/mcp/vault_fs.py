@@ -235,9 +235,28 @@ def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
     return meta, text[m.end():]
 
 
-def bookmark_id_of(meta: dict[str, str]) -> int | None:
+def bookmark_id_of(meta: dict[str, object]) -> int | None:
     raw = meta.get("bookmark_id")
-    return int(raw) if raw is not None and raw.isdigit() else None
+    return int(raw) if isinstance(raw, str) and raw.isdigit() else None
+
+
+def page_visible(
+    namespace: str | None, bookmark_id: int | None, row_visible: Callable[[int], bool]
+) -> bool:
+    """Whether a vault page may be shown, by the rule the MCP server and
+    ``muninn lint`` share:
+
+    - a page with a frontmatter ``bookmark_id`` only while that row is
+      visible (a stale compiled page for a now-hidden row is withheld);
+    - a page in ``wiki/bookmarks/`` without one is not a compiled page,
+      and is withheld;
+    - any other page (the authored lane) always.
+
+    ``row_visible`` answers for a bookmark id; it must return False when it
+    can't tell (no database), so the rule fails closed."""
+    if bookmark_id is not None:
+        return row_visible(bookmark_id)
+    return namespace != CAPTURED_NAMESPACE
 
 
 def one_line(text: str, limit: int = SUMMARY_CHARS) -> str:
@@ -455,6 +474,7 @@ __all__ = [
     "one_line",
     "page_info",
     "page_parts",
+    "page_visible",
     "read_page",
     "resolve_wiki_dir",
     "resolve_page",

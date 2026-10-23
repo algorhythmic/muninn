@@ -199,9 +199,9 @@ class _Visibility:
         return self._rows[bookmark_id]
 
     def __call__(self, info: vault_fs.PageInfo) -> bool:
-        if info.bookmark_id is not None:
-            return self.row(info.bookmark_id) is not None
-        return info.namespace != vault_fs.CAPTURED_NAMESPACE
+        return vault_fs.page_visible(
+            info.namespace, info.bookmark_id, lambda bid: self.row(bid) is not None
+        )
 
     def close(self) -> None:
         if self._conn is not None:

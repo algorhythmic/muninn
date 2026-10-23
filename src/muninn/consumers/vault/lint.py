@@ -23,6 +23,17 @@ Checks:
 * **Unresolved links**: ``[[wikilinks]]`` (and relative ``.md`` links)
   that resolve to no page.
 
+Visibility: the report must not name what the vault no longer shows. A
+page whose frontmatter ``bookmark_id`` is not visible in SQLite (hidden by
+policy since the last ``vault compile``, or gone), and a ``wiki/bookmarks/``
+page without a ``bookmark_id``, is *withheld*, by the MCP server's rule
+(:func:`muninn.consumers.mcp.vault_fs.page_visible`): it is not scanned,
+listed or counted as a link source, and a link to it is reported as
+unresolved with its target replaced by :data:`HIDDEN_TARGET`. Only the
+number of withheld pages is reported. Without a readable database lint
+refuses to run (:class:`LintDatabaseError`): it can't tell which pages
+are withheld, so it fails closed.
+
 Links resolve the way Obsidian does: ``[[target]]``, ``[[target|display]]``,
 ``[[target#heading]]``, ``[[target#^block]]``, ``![[embed]]``, a path
 (``[[concepts/foo]]``, ``[[wiki/concepts/foo]]``) or a file name,
@@ -47,11 +58,23 @@ from urllib.parse import unquote
 from muninn.consumers.mcp.vault_fs import (
     AUTHORED_NAMESPACES,
     CAPTURED_NAMESPACE,
+    HEAD_BYTES,
     MAX_PAGE_BYTES,
+    bookmark_id_of,
     iter_page_paths,
+    namespace_of,
+    page_visible,
 )
 
 REPORT_VERSION = "muninn-vault-lint/1"
+#: Stands in for the target of a link to a withheld page (the vault's
+#: placeholder for a hidden link).
+HIDDEN_TARGET = "[hidden link]"
+
+
+class LintDatabaseError(RuntimeError):
+    """The muninn database can't be read, so lint can't tell which compiled
+    pages are hidden: it refuses rather than name them."""
 
 #: Pages named like this (any directory, case-insensitive) are hubs or
 #: indexes: they are entry points, so having no inbound link is expected.
@@ -115,6 +138,7 @@ class Page:
     prose: str  # body with frontmatter, code, comments, links and URLs blanked
     body_line: int  # 1-based line number of the body's first line
     links: list[Link] = field(default_factory=list)
+    bookmark_id: int | None = None  # frontmatter bookmark_id (compiled pages)
 
     @property
     def key(self) -> str:
@@ -254,6 +278,7 @@ def build_page(rel: str, text: str) -> Page:
         prose=prose,
         body_line=body_line,
         links=links,
+        bookmark_id=bookmark_id_of(meta),
     )
 
 
@@ -404,6 +429,7 @@ class LintReport:
     suggestions: list[dict[str, Any]]
     unresolved: list[dict[str, Any]]
     skipped: list[dict[str, str]]
+    withheld: int = 0
 
     @property
     def finding_count(self) -> int:
@@ -421,6 +447,7 @@ class LintReport:
                 "suggestions": len(self.suggestions),
                 "unresolved_links": len(self.unresolved),
                 "skipped": len(self.skipped),
+                "withheld": self.withheld,
             },
             "orphans": self.orphans,
             "suggestions": self.suggestions,
@@ -436,9 +463,22 @@ class LintReport:
         }
 
 
-def lint_pages(pages: list[Page], *, vault: str = "", skipped: list[dict[str, str]] | None = None) -> LintReport:
-    """Run every check over already-loaded pages (pure; no I/O)."""
+def lint_pages(
+    pages: list[Page],
+    *,
+    vault: str = "",
+    skipped: list[dict[str, str]] | None = None,
+    hidden: list[Page] | None = None,
+    withheld: int | None = None,
+) -> LintReport:
+    """Run every check over already-loaded pages (pure; no I/O).
+
+    ``pages`` are the pages that may be shown. ``hidden`` are withheld
+    pages: never checked or named, but a link that would resolve to one is
+    reported as unresolved with :data:`HIDDEN_TARGET` for its target.
+    ``withheld`` is the count to report (default ``len(hidden)``)."""
     resolver = Resolver(pages)
+    hidden_resolver = Resolver(hidden) if hidden else None
     inbound: dict[str, set[str]] = {p.rel: set() for p in pages}
     linked: dict[str, set[str]] = {p.rel: set() for p in pages}
     unresolved: list[dict[str, Any]] = []
@@ -446,9 +486,12 @@ def lint_pages(pages: list[Page], *, vault: str = "", skipped: list[dict[str, st
         for link in page.links:
             target = resolver.resolve(link.target, page, link.kind)
             if target is None:
-                unresolved.append({
+                entry: dict[str, Any] = {
                     "page": page.rel, "lane": page.lane, "line": link.line, "target": link.target,
-                })
+                }
+                if hidden_resolver is not None and hidden_resolver.resolve(link.target, page, link.kind):
+                    entry.update(target=HIDDEN_TARGET, withheld=True)  # never name a hidden page
+                unresolved.append(entry)
                 continue
             linked[page.rel].add(target.rel)
             if target.rel != page.rel:
@@ -498,14 +541,65 @@ def lint_pages(pages: list[Page], *, vault: str = "", skipped: list[dict[str, st
         suggestions=sorted(suggestions, key=lambda s: (s["page"], s["line"], s["target"])),
         unresolved=sorted(unresolved, key=lambda u: (u["page"], u["line"], u["target"])),
         skipped=skipped or [],
+        withheld=len(hidden or []) if withheld is None else withheld,
     )
 
 
-def lint_vault(vault_dir: Path | str | None = None, personal_dir: Path | str | None = None) -> LintReport:
+def _head_bookmark_id(wiki: Path, rel: str) -> int | None:
+    """The frontmatter ``bookmark_id`` of a page lint skipped (too large or
+    unreadable); None when it can't be read."""
+    try:
+        with wiki.joinpath(*rel.split("/")[1:]).open("rb") as fh:
+            head = fh.read(HEAD_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    return bookmark_id_of(parse_frontmatter(head)[0])
+
+
+def visible_bookmark_ids(conn: Any, bookmark_ids: set[int]) -> set[int]:
+    """The ids among ``bookmark_ids`` whose row is visible (``content_visible = 1``)."""
+    ids = sorted(bookmark_ids)
+    out: set[int] = set()
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        out.update(
+            r[0] for r in conn.execute(
+                "SELECT bookmark_id FROM bookmarks WHERE content_visible = 1 "
+                f"AND bookmark_id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            )
+        )
+    return out
+
+
+def _open_db(db_path: Path | str | None) -> Any:
+    import sqlite3
+
+    from muninn.db import SchemaVersionError, connect_readonly
+
+    try:
+        return connect_readonly(db_path)
+    except (SchemaVersionError, sqlite3.Error) as exc:
+        raise LintDatabaseError(
+            "muninn lint needs the muninn database to withhold pages of hidden bookmarks, "
+            f"and refuses without it: {exc}"
+        ) from None
+
+
+def lint_vault(
+    vault_dir: Path | str | None = None,
+    personal_dir: Path | str | None = None,
+    *,
+    db_path: Path | str | None = None,
+    conn: Any = None,
+) -> LintReport:
     """Lint ``<vault_dir>/wiki`` (default ``MUNINN_VAULT_DIR``) read-only.
 
     Refuses (``VaultAccessError``) a vault that overlaps the personal vault
-    (default ``MUNINN_PERSONAL_VAULT_DIR``), with the compiler's guard."""
+    (default ``MUNINN_PERSONAL_VAULT_DIR``), with the compiler's guard.
+    Pages are checked against SQLite visibility, through ``conn`` or a
+    read-only connection to ``db_path`` (default ``MUNINN_DB_PATH``);
+    without a readable database it raises :class:`LintDatabaseError`."""
     from muninn.config import load_paths
     from muninn.consumers.mcp.vault_fs import resolve_wiki_dir
 
@@ -514,7 +608,33 @@ def lint_vault(vault_dir: Path | str | None = None, personal_dir: Path | str | N
     personal = Path(personal_dir) if personal_dir is not None else paths.personal_vault_dir
     wiki = resolve_wiki_dir(vault, personal, action="lint")
     pages, skipped = load_pages(wiki)
-    return lint_pages(pages, vault=str(Path(vault).expanduser().resolve()), skipped=skipped)
+    skipped_ids = {s["page"]: _head_bookmark_id(wiki, s["page"]) for s in skipped}
+
+    own = conn is None
+    if own:
+        conn = _open_db(db_path)
+    try:
+        wanted = {p.bookmark_id for p in pages if p.bookmark_id is not None}
+        wanted |= {bid for bid in skipped_ids.values() if bid is not None}
+        visible = visible_bookmark_ids(conn, wanted)
+    except Exception as exc:  # e.g. no bookmarks table: fail closed
+        raise LintDatabaseError(f"muninn lint could not read bookmark visibility: {exc}") from None
+    finally:
+        if own:
+            conn.close()
+
+    def shown(namespace: str | None, bookmark_id: int | None) -> bool:
+        return page_visible(namespace, bookmark_id, visible.__contains__)
+
+    named_skips = [s for s in skipped if shown(namespace_of(s["page"]), skipped_ids[s["page"]])]
+    hidden = [p for p in pages if not shown(p.namespace, p.bookmark_id)]
+    return lint_pages(
+        [p for p in pages if shown(p.namespace, p.bookmark_id)],
+        vault=str(Path(vault).expanduser().resolve()),
+        skipped=named_skips,
+        hidden=hidden,
+        withheld=len(hidden) + len(skipped) - len(named_skips),
+    )
 
 
 # ── output ─────────────────────────────────────────────────────────
@@ -536,10 +656,20 @@ def render_text(report: LintReport) -> str:
         for s in report.suggestions
     ] or ["  none"]
     out += ["", f"Unresolved links ({len(report.unresolved)}): resolve to no page"]
-    out += [f"  {u['page']}:{u['line']} [{u['lane']}] [[{u['target']}]]" for u in report.unresolved] or ["  none"]
+    out += [
+        f"  {u['page']}:{u['line']} [{u['lane']}] "
+        + (f"{HIDDEN_TARGET} (a withheld page)" if u.get("withheld") else f"[[{u['target']}]]")
+        for u in report.unresolved
+    ] or ["  none"]
     if report.skipped:
         out += ["", f"Skipped ({len(report.skipped)}):"]
         out += [f"  {s['page']}: {s['reason']}" for s in report.skipped]
+    if report.withheld:
+        out += [
+            "",
+            f"Withheld {report.withheld} compiled page(s): their bookmark is hidden or not in the "
+            "database. They are not named here; `muninn vault compile` removes them.",
+        ]
     out += [
         "",
         "Not orphan-checked: hub pages named " + ", ".join(HUB_STEMS)
@@ -556,8 +686,10 @@ def render_json(report: LintReport) -> str:
 
 __all__ = [
     "COMMON_WORDS",
+    "HIDDEN_TARGET",
     "HUB_STEMS",
     "IGNORE_KEY",
+    "LintDatabaseError",
     "LintReport",
     "MIN_TERM_CHARS",
     "Page",
@@ -571,4 +703,5 @@ __all__ = [
     "parse_frontmatter",
     "render_json",
     "render_text",
+    "visible_bookmark_ids",
 ]

@@ -90,6 +90,30 @@ def connect(
     return conn
 
 
+def connect_readonly(
+    db_path: Path | str | None = None, *, migrations_dir: Path | str | None = None
+) -> sqlite3.Connection:
+    """Open an existing muninn DB read-only (``mode=ro``): no PRAGMA that
+    writes, no directory created, no journal-mode change. The same schema
+    checks as :func:`connect`. For readers that must never write the
+    database (``muninn lint``). SQLite may still create the ``-shm``/``-wal``
+    side files of a WAL database, so the directory must be writable."""
+    path = _resolve(db_path).expanduser().resolve()
+    if not path.is_file():
+        raise SchemaVersionError(
+            f"No muninn database at {path}: run `muninn db migrate` to create it."
+        )
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        _check_schema(conn, len(discover_migrations(migrations_dir)))
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
 def require_current_schema(
     db_path: Path | str | None = None, *, migrations_dir: Path | str | None = None
 ) -> Path:

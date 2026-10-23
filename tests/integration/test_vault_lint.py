@@ -3,8 +3,10 @@
 Synthetic vaults under tmp_path only. Covers orphan detection with explicit
 hub exclusions, Obsidian-style link resolution (aliases, |display, #heading,
 paths, embeds, Markdown links), missing-link suggestions and their
-false-positive guards, the personal-vault guard, and the guarantee that
-lint never changes a vault file.
+false-positive guards, the personal-vault guard, the guarantee that
+lint never changes a vault file or the database, and visibility: pages of
+hidden bookmarks are withheld and never named, and lint refuses to run
+without a database.
 """
 
 from __future__ import annotations
@@ -19,12 +21,15 @@ from click.testing import CliRunner
 from muninn.consumers.cli.main import cli
 from muninn.consumers.mcp.vault_fs import VaultAccessError
 from muninn.consumers.vault.lint import (
+    LintDatabaseError,
     build_page,
     lint_pages,
     lint_vault,
     parse_frontmatter,
+    render_json,
     render_text,
 )
+from muninn.db import connect
 
 CONCEPT = """---
 title: Prompt Caching
@@ -91,10 +96,27 @@ def vault(tmp_path: Path) -> Path:
     return root
 
 
+def _add_bookmark(db: Path, bookmark_id: int, title: str, *, visible: bool = True) -> None:
+    conn = connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO bookmarks (bookmark_id, source, source_id, captured_at, title, url, domain, "
+            "  content_visible) VALUES (?, 'bookmarks_html', ?, 1700000000, ?, ?, 'example.org', ?)",
+            (bookmark_id, str(bookmark_id), title, f"https://example.org/{bookmark_id}", int(visible)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @pytest.fixture(autouse=True)
-def _env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _env(monkeypatch: pytest.MonkeyPatch, db_path: Path) -> Path:
+    """A database where the vault's one compiled page (bookmark 1) is visible."""
     monkeypatch.delenv("MUNINN_VAULT_DIR", raising=False)
     monkeypatch.delenv("MUNINN_PERSONAL_VAULT_DIR", raising=False)
+    monkeypatch.setenv("MUNINN_DB_PATH", str(db_path))
+    _add_bookmark(db_path, 1, "A post about KV reuse")
+    return db_path
 
 
 def _tree_digest(root: Path) -> dict[str, str]:
@@ -307,7 +329,7 @@ def test_text_and_json_output(vault: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
     data = json.loads(runner.invoke(cli, ["lint", "--json"]).output)
     assert data["report_version"] == "muninn-vault-lint/1"
-    assert data["counts"] == {"orphans": 2, "suggestions": 2, "unresolved_links": 1, "skipped": 0}
+    assert data["counts"] == {"orphans": 2, "suggestions": 2, "unresolved_links": 1, "skipped": 0, "withheld": 0}
     assert data["pages_by_lane"] == {"captured": 1, "authored": 7}
     assert data["exclusions"]["orphan_hub_names"] == ["index", "_index", "readme", "home", "log"]
 
@@ -330,7 +352,7 @@ def test_report_flag_writes_file_and_prints_summary(vault: Path, tmp_path: Path)
     result = CliRunner().invoke(cli, ["lint", "--vault", str(vault), "--report", str(out)])
     assert result.exit_code == 0
     assert result.output.strip() == (
-        f"Vault lint: 2 orphan(s), 2 suggested link(s), 1 unresolved link(s); report: {out}"
+        f"Vault lint: 2 orphan(s), 2 suggested link(s), 1 unresolved link(s), 0 withheld page(s); report: {out}"
     )
     assert out.read_text().startswith("Vault lint (muninn-vault-lint/1)")
 
@@ -341,3 +363,80 @@ def test_oversized_pages_are_skipped_not_read(vault: Path) -> None:
     _write(vault, "wiki/concepts/huge.md", "# Huge\n" + "x" * (MAX_PAGE_BYTES + 1))
     report = lint_vault(vault)
     assert report.skipped == [{"page": "wiki/concepts/huge.md", "reason": f"larger than {MAX_PAGE_BYTES} bytes"}]
+
+
+# ── visibility ────────────────────────────────────────────────────
+
+HIDDEN_PAGE = """---
+page_type: bookmark
+bookmark_id: 2
+title: "Secret plan for the merger"
+---
+
+# Secret plan for the merger
+
+Links [[lonely]] and mentions prompt caching.
+"""
+
+
+def test_pages_of_hidden_bookmarks_are_withheld_and_never_named(vault: Path, _env: Path) -> None:
+    # Bookmark 2 was hidden by a policy apply after the last vault compile,
+    # so its title-derived page is still on disk.
+    from muninn.consumers.mcp.vault_fs import MAX_PAGE_BYTES
+
+    _add_bookmark(_env, 2, "Secret plan for the merger", visible=False)
+    _add_bookmark(_env, 3, "Secret huge dossier", visible=False)
+    _write(vault, "wiki/bookmarks/secret-plan-for-the-merger-2.md", HIDDEN_PAGE)
+    _write(vault, "wiki/bookmarks/secret-huge-dossier-3.md",
+           "---\nbookmark_id: 3\n---\n# Secret huge dossier\n" + "x" * MAX_PAGE_BYTES)
+    _write(vault, "wiki/bookmarks/secret-stray.md", "# Secret stray page with no bookmark_id\n")
+    _write(vault, "wiki/bookmarks/secret-gone-9.md", "---\nbookmark_id: 9\n---\n# Secret gone\n")
+    # Authored and compiled pages that link the hidden page, by name and by path.
+    _write(vault, "wiki/people/ada-lovelace.md",
+           PERSON + "\nSee [[secret-plan-for-the-merger-2|the plan]] and "
+           "[[bookmarks/secret-plan-for-the-merger-2]].\n")
+
+    report = lint_vault(vault)
+    text, data = render_text(report), render_json(report)
+    for out in (text, data):
+        assert "secret" not in out.casefold() and "merger" not in out.casefold()
+    assert report.withheld == 4  # hidden, hidden and oversized, no bookmark_id, no row
+    assert json.loads(data)["counts"]["withheld"] == 4
+    assert "Withheld 4 compiled page(s)" in text
+    # The hidden page's link to lonely.md is not an inbound link.
+    assert {o["page"] for o in report.orphans} == {"wiki/infra/lonely.md", "wiki/bookmarks/x-synthetic-1.md"}
+    hidden_links = [u for u in report.unresolved if u.get("withheld")]
+    assert [(u["page"], u["line"], u["target"]) for u in hidden_links] == [
+        ("wiki/people/ada-lovelace.md", 5, "[hidden link]"),
+        ("wiki/people/ada-lovelace.md", 5, "[hidden link]"),
+    ]
+    assert "wiki/people/ada-lovelace.md:5 [authored] [hidden link] (a withheld page)" in text
+    assert report.skipped == []  # the oversized hidden page is withheld, not named
+    assert report.pages == 8
+
+
+def test_lint_refuses_without_a_database(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = tmp_path / "nowhere" / "muninn.db"
+    with pytest.raises(LintDatabaseError, match="refuses without it"):
+        lint_vault(vault, db_path=missing)
+    monkeypatch.setenv("MUNINN_DB_PATH", str(missing))
+    result = CliRunner().invoke(cli, ["lint", "--vault", str(vault)])
+    assert result.exit_code == 1 and "needs the muninn database" in result.output
+    assert not missing.parent.exists()  # nothing created
+    result = CliRunner().invoke(cli, ["--db", str(missing), "lint", "--vault", str(vault)])
+    assert result.exit_code == 1 and "refuses without it" in result.output
+
+
+def test_lint_opens_the_database_read_only(vault: Path, _env: Path) -> None:
+    import hashlib as _h
+    import os
+
+    before = _h.sha256(_env.read_bytes()).hexdigest()
+    os.chmod(_env, 0o444)
+    try:
+        result = CliRunner().invoke(cli, ["--db", str(_env), "lint", "--vault", str(vault), "--json"])
+    finally:
+        os.chmod(_env, 0o644)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["counts"]["withheld"] == 0
+    assert _h.sha256(_env.read_bytes()).hexdigest() == before

@@ -1012,11 +1012,16 @@ def vault_compile_cmd(
     help="Write the report to FILE (outside the vault) and print a one-line summary.",
 )
 @click.option("--strict", is_flag=True, help="Exit 1 when there is any finding.")
-def lint_cmd(vault_dir: str | None, as_json: bool, report_path: str | None, strict: bool) -> None:
+@click.pass_context
+def lint_cmd(
+    ctx: click.Context, vault_dir: str | None, as_json: bool, report_path: str | None, strict: bool
+) -> None:
     """Lint the compiled vault: orphans, missing links, broken links.
 
     Model-free and read-only: it never edits a vault file, authored or
-    compiled. Refuses a vault that overlaps MUNINN_PERSONAL_VAULT_DIR.
+    compiled, and opens the database read-only. Pages of hidden bookmarks
+    are withheld from the report, so it refuses to run without a readable
+    database. Refuses a vault that overlaps MUNINN_PERSONAL_VAULT_DIR.
     See docs/vault-lint.md. (Contradictions and superseded claims are the
     model tier: `muninn synthesize lint --tag TAG`.)
     """
@@ -1024,11 +1029,16 @@ def lint_cmd(vault_dir: str | None, as_json: bool, report_path: str | None, stri
 
     from muninn.config import load_paths  # lazy
     from muninn.consumers.mcp.vault_fs import VaultAccessError  # lazy
-    from muninn.consumers.vault.lint import lint_vault, render_json, render_text  # lazy
+    from muninn.consumers.vault.lint import (  # lazy
+        LintDatabaseError,
+        lint_vault,
+        render_json,
+        render_text,
+    )
 
     try:
-        report = lint_vault(vault_dir)
-    except VaultAccessError as exc:
+        report = lint_vault(vault_dir, db_path=ctx.obj.get("db"))
+    except (VaultAccessError, LintDatabaseError) as exc:
         raise click.ClickException(str(exc)) from exc
     output = render_json(report) if as_json else render_text(report)
     if report_path is None:
@@ -1047,7 +1057,8 @@ def lint_cmd(vault_dir: str | None, as_json: bool, report_path: str | None, stri
         tmp.replace(target)
         click.echo(
             f"Vault lint: {len(report.orphans)} orphan(s), {len(report.suggestions)} suggested "
-            f"link(s), {len(report.unresolved)} unresolved link(s); report: {report_path}"
+            f"link(s), {len(report.unresolved)} unresolved link(s), {report.withheld} withheld "
+            f"page(s); report: {report_path}"
         )
     if strict and report.finding_count:
         sys.exit(1)

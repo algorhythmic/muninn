@@ -177,9 +177,26 @@ def test_deterministic_lint_reads_a_compiled_vault_without_changing_it(db_file: 
     out = tmp_path / "vault"
     _compile(db_file, out)
     before = {p: p.read_bytes() for p in sorted(out.rglob("*.md"))}
-    report = lint_vault(out)
+    report = lint_vault(out, db_path=db_file)
     assert {p: p.read_bytes() for p in sorted(out.rglob("*.md"))} == before
     assert report.lanes == {"captured": 4, "authored": 0}
     assert report.unresolved == []
     # v2 is linked from v1's superseded_by property; only the unrelated page is an orphan.
     assert [o["page"] for o in report.orphans] == ["wiki/bookmarks/unrelated-5.md"]
+
+    # A policy apply hides v2 before the next compile: its title-derived
+    # page is still on disk, but the report neither lists it nor names it
+    # as the target of v1's link.
+    from muninn.consumers.vault.lint import render_json, render_text
+
+    conn = connect(db_file)
+    conn.execute("UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = 2")
+    conn.commit()
+    conn.close()
+    report = lint_vault(out, db_path=db_file)
+    assert report.withheld == 1 and report.lanes == {"captured": 3, "authored": 0}
+    for text in (render_text(report), render_json(report)):
+        assert "caching-in-v2" not in text and "Caching in v2" not in text
+    assert {(u["page"], u["target"]) for u in report.unresolved} == {
+        ("wiki/bookmarks/caching-in-v1-1.md", "[hidden link]")
+    }

@@ -15,7 +15,7 @@ ADR-008 splits the vault into two lanes. `wiki/bookmarks/` is compiled from SQLi
 
 Lint keeps to that:
 
-- **`muninn lint` never writes, renames or deletes any vault file**, in either lane. Every finding is report-only, and the report goes to stdout or to a file outside the vault (`--report` refuses a path inside the vault or the personal vault). The tests hash the whole vault before and after.
+- **`muninn lint` never writes, renames or deletes any vault file**, in either lane. Every finding is report-only, and the report goes to stdout or to a file outside the vault (`--report` refuses a path inside the vault or the personal vault). The tests hash the whole vault before and after. It opens the database read-only (SQLite `mode=ro`), only to check visibility.
 - **The model tier writes only SQLite** (`lint_pair_checks`, `lint_findings`, `synthesis_runs`, `usage_records`). It reads only compiled bookmark pages, as rows from SQLite, and never an authored page.
 - **Findings reach the vault only through the compiler**, and only in the compiled `wiki/bookmarks/` pages it writes anyway. A page without a current finding compiles byte-for-byte as before.
 
@@ -24,21 +24,34 @@ Both tiers refuse a vault that equals, contains or sits inside `MUNINN_PERSONAL_
 ## `muninn lint`
 
 ```
-muninn lint [--vault DIR] [--json] [--report FILE] [--strict]
+muninn [--db PATH] lint [--vault DIR] [--json] [--report FILE] [--strict]
 ```
 
+- `--db PATH`: the muninn database (the global option). Default: `MUNINN_DB_PATH`. Lint needs it; see [Visibility](#visibility).
 - `--vault DIR`: the compiled vault root (the directory that holds `wiki/`). Default: `MUNINN_VAULT_DIR`.
 - `--json`: print the report as JSON instead of text.
 - `--report FILE`: write the report (text, or JSON with `--json`) to `FILE`, and print a one-line summary. `FILE` must be outside the vault and the personal vault.
 - `--strict`: exit 1 when there is any finding. Without it, lint exits 0 whatever it finds, so a scheduled run doesn't show as failed.
 
-Errors (no vault configured, no `wiki/`, an overlap with the personal vault, a report path inside the vault) exit 1 with a one-line message and read nothing further.
+Errors (no vault configured, no `wiki/`, an overlap with the personal vault, no readable database, a report path inside the vault) exit 1 with a one-line message and write nothing.
 
 ### What is scanned
 
 Every `.md` page under `wiki/`: the pages at its root and in every directory below it. Symlinks and dot-prefixed entries are skipped, as the MCP server skips them. A page larger than 1 MiB is skipped and listed under `skipped`. Files are opened read-only.
 
 Each page is in one lane: `captured` for `wiki/bookmarks/`, `authored` for everything else.
+
+### Visibility
+
+The report never names a page the vault no longer shows. Pages are served by the MCP server's rule (`vault_fs.page_visible`), checked against SQLite:
+
+- a page whose frontmatter `bookmark_id` is not visible (`content_visible = 0`, or no such row) is **withheld**. This is the window between a `muninn policy apply` that hides rows and the next `muninn vault compile`, which removes the pages;
+- a page in `wiki/bookmarks/` without a `bookmark_id` is not a compiled page, and is withheld too;
+- any other page is linted.
+
+A withheld page is not scanned, listed, suggested or counted as an inbound link (a page linked only from a withheld page is an orphan). A link to a withheld page is reported as an unresolved link with `[hidden link]` in place of its target, since compiled slugs come from titles. An oversized or unreadable page is listed under `skipped` only if it would not be withheld. The report gives only the number of withheld pages (`counts.withheld`).
+
+**Without a database lint refuses to run** (exit 1, "needs the muninn database"). It cannot tell which pages are withheld, so it fails closed rather than name them. There is no flag to lint without one.
 
 ### Link resolution
 
@@ -96,8 +109,11 @@ Orphans (2): no inbound link from another page
 Suggested links (1): mentions another page without linking it
   wiki/concepts/retrieval.md:9 [authored] "prompt caching" -> [[prompt-caching|prompt caching]] (wiki/concepts/prompt-caching.md)
 
-Unresolved links (1): resolve to no page
+Unresolved links (2): resolve to no page
   wiki/concepts/retrieval.md:7 [authored] [[missing-page]]
+  wiki/people/someone.md:4 [authored] [hidden link] (a withheld page)
+
+Withheld 1 compiled page(s): their bookmark is hidden or not in the database. They are not named here; `muninn vault compile` removes them.
 …
 ```
 
@@ -106,10 +122,10 @@ JSON (`--json`) has the same content, with `report_version: "muninn-vault-lint/1
 | Key | Content |
 |---|---|
 | `vault`, `pages_scanned`, `pages_by_lane` | what was read |
-| `counts` | `orphans`, `suggestions`, `unresolved_links`, `skipped` |
+| `counts` | `orphans`, `suggestions`, `unresolved_links`, `skipped`, `withheld` |
 | `orphans[]` | `page`, `lane`, `namespace` |
 | `suggestions[]` | `page`, `lane`, `line`, `mention`, `target`, `link` |
-| `unresolved_links[]` | `page`, `lane`, `line`, `target` |
+| `unresolved_links[]` | `page`, `lane`, `line`, `target`; a link to a withheld page has `target: "[hidden link]"` and `withheld: true` |
 | `skipped[]` | `page`, `reason` |
 | `exclusions` | the hub names, opt-out key, suggestion targets and minimum term length in force |
 
@@ -179,7 +195,7 @@ The callouts go under the page's `# ` heading. Both pages stay, and the older cl
 ## Cadence
 
 - **On demand:** run `muninn lint` at any time. It is free and read-only.
-- **Weekly:** `deploy/systemd/` has an example systemd user service and timer, `muninn-lint.service` and `muninn-lint.timer`. Nothing installs them. They run the deterministic lint only, writing `~/.local/state/muninn/lint/latest.txt` and `latest.json` every Monday at 07:00, and catch up after downtime. The unit's file system is read-only except its state directory. To install, edit the paths marked `ADJUST`, then:
+- **Weekly:** `deploy/systemd/` has an example systemd user service and timer, `muninn-lint.service` and `muninn-lint.timer`. Nothing installs them. They run the deterministic lint only, writing `~/.local/state/muninn/lint/latest.txt` and `latest.json` every Monday at 07:00, and catch up after downtime. Lint needs the database, so the unit's `.env` must point at it. The unit's file system is read-only except its state directory and the database's directory: lint opens the database read-only, but SQLite has to be able to create its WAL side files there. To install, edit the paths marked `ADJUST`, then:
 
   ```
   cp deploy/systemd/muninn-lint.{service,timer} ~/.config/systemd/user/
