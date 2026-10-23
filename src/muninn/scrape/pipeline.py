@@ -127,7 +127,7 @@ async def scrape_one(
         results.append(live_result)
 
     if stop_at is not None:
-        results = [_withhold_hidden_fetch(r, stop_at) for r in results]
+        results = [_withhold_hidden_fetch(r, stop_at, client, url) for r in results]
 
     # Persist + route enrichment_source atomically per bookmark. A kept
     # live row still counts for routing: it is the current live capture.
@@ -210,9 +210,14 @@ def _stored_live(conn: sqlite3.Connection, bookmark_id: int) -> Optional[ScrapeR
     return ScrapeResult(**dict(row)) if row is not None else None
 
 
-def _withhold_hidden_fetch(r: ScrapeResult, hidden) -> ScrapeResult:
+def _withhold_hidden_fetch(
+    r: ScrapeResult, hidden, client: ScrapeClient, url: Optional[str]
+) -> ScrapeResult:
     """A fetch that ended on a hidden locator keeps none of its content
-    (its ``final_url`` stays, so the row is hidden by it)."""
+    (its ``final_url`` stays, so the row is hidden by it): not in the row,
+    not in a spilled raw-HTML file, and not in the HTTP cache entry the
+    response was stored under (``live:`` keyed by the requested URL,
+    ``ia:`` by the snapshot URL), which would otherwise serve it again."""
     if not r.final_url or not hidden(_sanitized_locator(r.final_url) or r.final_url):
         return r
     if r.raw_html_path:
@@ -220,6 +225,10 @@ def _withhold_hidden_fetch(r: ScrapeResult, hidden) -> ScrapeResult:
             os.unlink(r.raw_html_path)
         except OSError:
             pass
+    if r.pass_ == "live" and url:
+        client.http_cache.delete(f"live:{url}")
+    elif r.archive_url:
+        client.http_cache.delete(f"ia:{r.archive_url}")
     return r.model_copy(update={
         "scrape_status": "failed",
         "extraction_quality": None,

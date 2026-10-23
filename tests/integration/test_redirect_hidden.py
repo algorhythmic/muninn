@@ -330,3 +330,49 @@ def test_policy_apply_drops_the_entry_of_a_row_already_hidden(db_path) -> None:
     assert report.newly_hidden == 0 and report.fts_refreshed == 1
     assert _fts(conn, bid) is None
     assert not apply_policy(conn, POLICY).changed  # idempotent
+
+
+def _cache_text(tmp_path) -> str:
+    return _everything(tmp_path, tmp_path / "http", tmp_path / "scrape")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_withheld_wayback_fetch_leaves_no_body_in_the_http_cache(fresh_db, tmp_path) -> None:
+    conn = fresh_db
+    _post, link = _seed(conn)
+    _no_robots()
+    respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_HIT))
+    respx.get(f"{IA_WEB_BASE}/20261001120000id_/{SHORT}").mock(return_value=httpx.Response(
+        302, headers={"location": f"{IA_WEB_BASE}/20261001120000id_/{TARGET}"}))
+    snapshot = respx.get(f"{IA_WEB_BASE}/20261001120000id_/{TARGET}").mock(
+        return_value=httpx.Response(200, text=HIDDEN_PAGE))
+    respx.get(SHORT).mock(return_value=httpx.Response(200, text=PAGE))
+
+    await _scrape(conn, _client(tmp_path), policy=POLICY)
+
+    assert snapshot.call_count == 1 and _visible(conn, link) == 0
+    assert SECRET_WORDS not in _cache_text(tmp_path)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_cached_live_response_that_ended_on_a_now_hidden_host_is_purged(
+    fresh_db, tmp_path
+) -> None:
+    """Fetched (and cached) before the policy hid the target; withheld
+    after, and the cached body goes with it."""
+    conn = fresh_db
+    _post, link = _seed(conn)
+    _no_robots()
+    respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
+    respx.get(SHORT).mock(return_value=httpx.Response(302, headers={"location": TARGET}))
+    respx.get(TARGET).mock(return_value=httpx.Response(200, text=HIDDEN_PAGE))
+
+    await _scrape(conn, _client(tmp_path), policy=DomainPolicy())
+    assert SECRET_WORDS in _cache_text(tmp_path)  # cached under live:SHORT
+
+    await _scrape(conn, _client(tmp_path), policy=POLICY)
+
+    assert _visible(conn, link) == 0
+    assert SECRET_WORDS not in _cache_text(tmp_path)
