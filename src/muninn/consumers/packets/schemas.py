@@ -1,6 +1,7 @@
 """Validate records against the contract's JSON Schemas.
 
-The schemas live in ``schemas/json/intake/`` and reference each other by
+The schemas live in ``schemas/json/intake/`` (packaged in a wheel as
+``muninn/_schemas/json/intake/``) and reference each other by
 ``$id``, so all nine are loaded into one registry. ``jsonschema`` is
 imported on first use, which keeps ``import muninn.consumers.packets``
 stdlib-only.
@@ -13,7 +14,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-SCHEMA_DIR = Path(__file__).resolve().parents[4] / "schemas" / "json" / "intake"
+from muninn._resources import schemas_dir
+
+SCHEMA_DIR: Path = schemas_dir() / "json" / "intake"
 
 RECORD_TYPES: tuple[str, ...] = (
     "source-item",

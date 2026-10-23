@@ -52,6 +52,12 @@ embeddings = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/muninn"]
 
+# The migrations and JSON Schemas live at the repo root; a wheel carries
+# them inside the package (muninn._resources finds either copy).
+[tool.hatch.build.targets.wheel.force-include]
+"schemas/sql" = "muninn/_schemas/sql"
+"schemas/json" = "muninn/_schemas/json"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

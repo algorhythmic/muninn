@@ -18,10 +18,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from muninn._resources import schemas_dir
 from muninn.config import load_paths
 
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "schemas" / "sql"
+# `<repo>/schemas/sql` in a checkout, `muninn/_schemas/sql` in a wheel.
+MIGRATIONS_DIR = schemas_dir() / "sql"
 _MIGRATION_NAME = re.compile(r"^(\d{3})_[\w-]+\.sql$")
 
 

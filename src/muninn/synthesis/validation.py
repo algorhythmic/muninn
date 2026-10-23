@@ -13,9 +13,11 @@ from typing import Any, Iterable
 
 import jsonschema
 
+from muninn._resources import schemas_dir
 
-# Schema directory: the checked-in I/O schemas of the synthesis contract.
-SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schemas" / "json"
+# Schema directory: the checked-in I/O schemas of the synthesis contract
+# (`<repo>/schemas/json` in a checkout, `muninn/_schemas/json` in a wheel).
+SCHEMA_DIR = schemas_dir() / "json"
 
 
 # Map canonical task_type -> schema filename. We use the canonical names
