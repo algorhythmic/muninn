@@ -1,0 +1,34 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "content-revision",
+    "expect": "valid",
+    "covers": [
+      "blocked capture: empty-content digest, char_count 0",
+      "final_locator sanitized after a t.co redirect (canary dropped)"
+    ],
+    "why": "valid revision"
+  },
+  "record": {
+    "record_type": "content-revision",
+    "revision_id": "01M5C5D3KGD3VR4MR4CE9M2KFC",
+    "item_id": "web:09fc5f88293d378d5cd71bcf4af7c2125f9bcf83421fb67120f11e8f96963782",
+    "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "normalization": "muninn-text/1",
+    "char_count": 0,
+    "coverage": "blocked",
+    "retrieval_method": "live",
+    "freshness": "current",
+    "extractor": {
+      "name": "muninn.scrape.extract",
+      "version": "selectolax-0.4.13"
+    },
+    "published_at": null,
+    "retrieved_at": "2026-10-20T08:03:50Z",
+    "observed_at": "2026-10-20T08:00:00Z",
+    "http_status": 403,
+    "scrape_pass": "live",
+    "final_locator": "https://paywalled.example.net/story/42"
+  }
+}

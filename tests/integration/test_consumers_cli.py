@@ -171,3 +171,34 @@ def test_synthesize_deep_pass_requires_id_or_pending():
     result = runner.invoke(cli, ["synthesize", "deep-pass"])
     assert result.exit_code != 0
     assert "BOOKMARK_ID" in result.output or "--pending" in result.output
+
+
+def test_synthesize_deep_pass_hints_at_vector_reconcile(db_path: Path, monkeypatch):
+    """A completed deep pass leaves Qdrant stale: the command says how to
+    refresh it. A pass that changed nothing prints no hint."""
+    from types import SimpleNamespace
+
+    import muninn.synthesis.orchestrator as orchestrator
+
+    _seed(db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE enriched SET deep_pass_requested = 1")
+    conn.commit()
+    conn.close()
+    statuses = {}
+    monkeypatch.setattr(orchestrator, "run_deep_pass",
+                        lambda bid, conn, **_: SimpleNamespace(status=statuses.get(bid, "cap_hit")))
+    runner = CliRunner()
+    hint = "scripts/reconcile-vector-index.py"
+
+    failed = runner.invoke(cli, ["--db", str(db_path), "synthesize", "deep-pass", "1"])
+    assert failed.exit_code == 0 and hint not in failed.output
+
+    statuses[1] = "completed"
+    one = runner.invoke(cli, ["--db", str(db_path), "synthesize", "deep-pass", "1"])
+    assert one.exit_code == 0, one.output
+    assert f"Deep pass rewrote 1 summary(ies): run `python {hint}`" in one.output
+
+    pending = runner.invoke(cli, ["--db", str(db_path), "synthesize", "deep-pass", "--pending"])
+    assert pending.exit_code == 0, pending.output
+    assert "bookmark_id=1: completed" in pending.output and hint in pending.output

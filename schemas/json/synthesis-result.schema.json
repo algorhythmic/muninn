@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "synthesis-result.schema.json",
+  "title": "Synthesis Result File",
+  "description": "A muninn synthesis result file (contract muninn-synthesis/1, docs/synthesis-contract.md). It names the emitted task it answers by task_id, attempt and task_digest; output is validated separately against the task's result_schema.",
+  "type": "object",
+  "required": ["contract_version", "task_id", "task_digest", "attempt", "output"],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": {
+      "const": "muninn-synthesis/1"
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "task_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "runner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Free-text name of the harness that ran the task, e.g. 'claude-code-local'. Recorded for audit."
+    },
+    "output": {
+      "type": "object"
+    }
+  }
+}

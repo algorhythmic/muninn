@@ -104,6 +104,21 @@ TRACKING_PARAM_NAMES: frozenset[str] = frozenset(
 )
 
 
+# ── Rule 1c — Host-scoped tracking parameter names ─────────────────────
+# Stripped silently like Rule 1b, but only on the matching hosts: the names
+# are too short or too generic to strip everywhere. Each entry is
+# (host_regex, names); the host is already lowercased and punycoded.
+#
+# X / Twitter share links carry `?s=<share surface>&t=<per-share token>`
+# (the `t` value ties the link to the sharer), and embedded posts carry
+# `?ref_src=twsrc^tfw` / `ref_url=<embedding page>`. None of them selects
+# content: `x.com/<user>/status/<id>` is the same post without them.
+HOST_TRACKING_PARAMS: list[tuple[re.Pattern[str], frozenset[str]]] = [
+    (re.compile(r"^(?:(?:www|mobile|m)\.)?(?:x|twitter)\.com$"),
+     frozenset({"s", "t", "ref_src", "ref_url"})),
+]
+
+
 # ── Rule 4 — Path-as-credential domain patterns ─────────────────────────
 # Each entry: (host_regex, path_regex, replacement_path).
 # A `replacement_path` of None means: replace just the matched token

@@ -17,7 +17,7 @@ from muninn.db import init_db  # noqa: E402
 
 @pytest.fixture
 def fresh_db(tmp_path: Path) -> sqlite3.Connection:
-    """A fresh muninn DB with the canonical schema applied."""
+    """A fresh muninn DB, created by the migrator at head (init_db)."""
     conn = init_db(tmp_path / "muninn.db")
     yield conn
     conn.close()
@@ -25,7 +25,7 @@ def fresh_db(tmp_path: Path) -> sqlite3.Connection:
 
 @pytest.fixture
 def db_path(tmp_path: Path) -> Path:
-    """A path to a fresh, schema-applied muninn DB. Closed before yield."""
+    """A path to a fresh muninn DB migrated to head. Closed before yield."""
     path = tmp_path / "muninn.db"
     conn = init_db(path)
     conn.close()

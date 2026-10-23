@@ -1,0 +1,9 @@
+{
+  "client_id": "1000000002",
+  "detail": "When authenticating requests to the API v2 endpoints, you must use keys and tokens from a developer App that is attached to a Project.",
+  "registration_url": "https://developer.example.com/projects/overview",
+  "title": "Client Forbidden",
+  "required_enrollment": "Appropriate Level of API Access",
+  "reason": "client-not-enrolled",
+  "type": "https://api.twitter.com/2/problems/client-forbidden"
+}

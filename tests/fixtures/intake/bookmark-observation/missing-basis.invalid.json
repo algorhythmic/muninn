@@ -1,0 +1,22 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "bookmark-observation",
+    "expect": "invalid",
+    "covers": [
+      "observation basis"
+    ],
+    "why": "the basis of the observation time is required",
+    "fails_at": "",
+    "fails_with": "observed_at_basis"
+  },
+  "record": {
+    "record_type": "bookmark-observation",
+    "item_id": "x:post:1900000000000000001",
+    "source": "x",
+    "observed_at": "2026-10-20T08:00:00Z",
+    "last_observed_at": "2026-10-21T06:00:00Z",
+    "sync_run_id": "01M5C56300PP7M76TABV7SH8FC"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "lint.schema.json",
+  "title": "Vault Lint Findings",
+  "description": "Output of the lint synthesis task (prompt lint_v2): contradictions and superseded claims among compiled bookmark pages that share a tag. Page ids are bookmark ids from materials.pages, and every finding's pair must be one of materials.pairs. For 'supersedes', bookmark_id is the newer page, whose claim supersedes other_bookmark_id's older claim. Every evidence quote is checked against the quoted page's text after validation. An empty findings list is a valid answer.",
+  "type": "object",
+  "required": ["findings", "synthesis_metadata"],
+  "additionalProperties": false,
+  "properties": {
+    "findings": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "required": ["relation", "bookmark_id", "other_bookmark_id", "rationale", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "relation": { "type": "string", "enum": ["contradicts", "supersedes"] },
+          "bookmark_id": { "type": "integer" },
+          "other_bookmark_id": { "type": "integer" },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "evidence": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "required": ["bookmark_id", "quote"],
+              "additionalProperties": false,
+              "properties": {
+                "bookmark_id": { "type": "integer" },
+                "quote": { "type": "string", "minLength": 1, "maxLength": 300 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "synthesis_metadata": {
+      "type": "object",
+      "required": ["model", "prompt_version", "input_token_count", "output_token_count"],
+      "additionalProperties": false,
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "input_token_count": { "type": "integer", "minimum": 0 },
+        "output_token_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -37,6 +37,7 @@ from muninn.enrich.haiku import (
     EnrichmentResult,
     _load_system_prompt,
     build_embedding_text,
+    check_prompt_version,
     enrich_bookmark,
 )
 from muninn.enrich.idempotency import (
@@ -256,6 +257,7 @@ def enrich_all(
     stats = EnrichmentStats()
     now_ts = now if now is not None else int(time.time())
     pv = prompt_version or PER_BOOKMARK_PROMPT_VERSION
+    check_prompt_version("per_bookmark", pv)  # never another task's prompt
     # Fail fast on an unknown prompt version instead of erroring every row.
     _load_system_prompt(pv)
 

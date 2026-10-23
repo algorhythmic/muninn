@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "source-item",
+    "expect": "valid",
+    "covers": [
+      "proposed x:article identity (OPEN: RI-02a article body)"
+    ],
+    "why": "valid source item"
+  },
+  "record": {
+    "record_type": "source-item",
+    "item_id": "x:article:1900000000000000501",
+    "kind": "x_article",
+    "locator": "https://x.com/i/article/1900000000000000501",
+    "title": "A synthetic long-form article",
+    "published_at": "2026-09-30T14:00:00Z",
+    "author": {
+      "platform_id": "1900000000000000901",
+      "handle": "synth_author_a"
+    },
+    "redaction": {
+      "param_names": [],
+      "path_redacted": false,
+      "userinfo_redacted": false
+    }
+  }
+}

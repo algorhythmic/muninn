@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:content-revision:0.1",
+  "title": "Content revision",
+  "description": "One distinct captured content state of an item (a scrape_history row). Identity is (item_id, content_sha256, coverage); unchanged content never creates a new revision. References use {ref: revision_id, digest: content_sha256}.",
+  "type": "object",
+  "required": [
+    "record_type", "revision_id", "item_id", "content_sha256", "normalization", "char_count",
+    "coverage", "retrieval_method", "freshness", "extractor", "published_at", "retrieved_at", "observed_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "record_type": { "const": "content-revision" },
+    "revision_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid" },
+    "item_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id" },
+    "content_sha256": {
+      "description": "sha256 of the normalized extracted text (UTF-8). The empty-string digest when there is no readable content.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/sha256"
+    },
+    "normalization": {
+      "description": "Text normalization rule the digest is computed under.",
+      "const": "muninn-text/1"
+    },
+    "char_count": {
+      "description": "Length of the normalized text in Unicode code points.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/count"
+    },
+    "text": {
+      "description": "The normalized text, when the export includes it. If present, sha256(text) equals content_sha256.",
+      "type": "string"
+    },
+    "coverage": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/coverage" },
+    "retrieval_method": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/retrieval_method" },
+    "freshness": {
+      "description": "current: the X API response or a live fetch at sync time (research selection uses these). historical: an archive capture, comparison only.",
+      "enum": ["current", "historical"]
+    },
+    "scrape_pass": {
+      "description": "The scrape_results pass this revision came from, when it came from muninn scrape.",
+      "enum": ["live", "at_capture", "recent_archive", "playwright", "manual"]
+    },
+    "extractor": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+        "version": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" }
+      }
+    },
+    "http_status": {
+      "description": "HTTP status of the fetch. Omitted when there was none (X API revisions).",
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
+    },
+    "final_locator": {
+      "description": "Sanitized locator after redirects. Omitted when it is the item's own locator.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/locator"
+    },
+    "archive_snapshot_at": {
+      "description": "Archive snapshot time (retrieval_method archive only).",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp"
+    },
+    "published_at": {
+      "description": "Source publication time, when known.",
+      "oneOf": [
+        { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "retrieved_at": {
+      "description": "When muninn first retrieved this content state.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp"
+    },
+    "observed_at": {
+      "description": "The bookmark observation time of the item, when known.",
+      "oneOf": [
+        { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "retrieval_method": { "const": "archive" } } },
+      "then": {
+        "required": ["archive_snapshot_at"],
+        "properties": { "freshness": { "const": "historical" } }
+      },
+      "else": {
+        "not": { "required": ["archive_snapshot_at"] },
+        "properties": { "freshness": { "const": "current" } }
+      }
+    },
+    {
+      "if": { "properties": { "coverage": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/no_content_coverage" } } },
+      "then": {
+        "properties": {
+          "char_count": { "const": 0 },
+          "content_sha256": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/empty_sha256" },
+          "text": { "const": "" }
+        }
+      },
+      "else": {
+        "properties": {
+          "char_count": { "minimum": 1 },
+          "text": { "minLength": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "retrieval_method": { "const": "x_api" } } },
+      "then": {
+        "not": { "required": ["scrape_pass"] },
+        "properties": { "item_id": { "pattern": "^x:" } }
+      }
+    }
+  ]
+}

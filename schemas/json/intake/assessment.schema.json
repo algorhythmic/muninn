@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:assessment:0.1",
+  "title": "Suitability assessment",
+  "description": "One append-only suitability assessment (an assessments row). Key: content revision + context digest + profile revision + policy version + model + prompt version. A changed context, profile or policy creates a new assessment and leaves earlier ones in place. Disposition is a judgement, never a retrieval state; coverage shows how much content the judgement saw.",
+  "type": "object",
+  "required": [
+    "record_type", "assessment_id", "item_id", "content_revision", "coverage", "context_digest", "interest_profile",
+    "policy_version", "model", "prompt_version", "disposition", "relevance", "confidence",
+    "rationale", "matched_interests", "unresolved_questions", "assessed_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "record_type": { "const": "assessment" },
+    "assessment_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid" },
+    "item_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id" },
+    "content_revision": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/revision_ref" },
+    "coverage": {
+      "description": "Coverage of the assessed content revision, copied so it is visible with the judgement.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/coverage"
+    },
+    "context_digest": {
+      "description": "What the model was shown: sha256 over the canonical JSON of the array of [item_id, content_sha256, coverage] triples of every item in the call, the assessed item first and then its linked items in the order shown ([item_id, null, null] for an item shown without a content revision). Part of the idempotency key, so hiding, unlinking or recapturing a linked item leads to a new assessment.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/sha256"
+    },
+    "interest_profile": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/profile_ref" },
+    "policy_version": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+    "model": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+    "prompt_version": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+    "disposition": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/disposition" },
+    "relevance": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/percent" },
+    "confidence": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/percent" },
+    "rationale": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "matched_interests": {
+      "description": "interest_id values from the referenced profile revision.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/slug" }
+    },
+    "unresolved_questions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    },
+    "evidence": {
+      "description": "Model-cited evidence: short verbatim excerpts from the content revisions this assessment saw (its own revision or a linked item's current revision). Muninn checks every excerpt against the cited revision's stored text before storing it and fills in the revision reference itself; a citation that fails is dropped. Absent when no citation survived.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["stance", "item_id", "source", "excerpt", "note"],
+        "additionalProperties": false,
+        "properties": {
+          "stance": {
+            "description": "supports: the passage backs the item's claim or its relevance. contradicts: it undercuts them (a correction, a weaker result, a caveat).",
+            "enum": ["supports", "contradicts"]
+          },
+          "item_id": {
+            "description": "The cited item: the assessed item or one of its linked items.",
+            "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id"
+          },
+          "source": {
+            "description": "The cited content revision of item_id.",
+            "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/revision_ref"
+          },
+          "excerpt": {
+            "description": "Verbatim excerpt from the cited revision's normalized text.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "note": {
+            "description": "What the excerpt shows, in the model's words.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      }
+    },
+    "prior_assessment": {
+      "description": "The earlier assessment of the same item this one re-evaluates, if any.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/assessment_ref"
+    },
+    "assessed_at": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "coverage": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/no_content_coverage" } } },
+      "then": { "properties": { "disposition": { "not": { "const": "candidate" } } } }
+    }
+  ]
+}

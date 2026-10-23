@@ -1,0 +1,19 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "bookmark-observation",
+    "expect": "valid",
+    "covers": [
+      "browser ADD_DATE is source-reported"
+    ],
+    "why": "valid observation"
+  },
+  "record": {
+    "record_type": "bookmark-observation",
+    "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+    "source": "bookmarks_html",
+    "observed_at": "2019-03-04T21:15:00Z",
+    "observed_at_basis": "source_reported"
+  }
+}

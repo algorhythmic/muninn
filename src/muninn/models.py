@@ -18,7 +18,7 @@ ExtractionQuality = Literal["ok", "partial", "failed"]
 SynthesisStatus = Literal[
     "running", "completed", "validation_failed", "container_failed", "cap_hit",
 ]
-SynthesisTaskType = Literal["era_narrative", "deep_pass", "ad_hoc_analysis"]
+SynthesisTaskType = Literal["era_narrative", "deep_pass", "ad_hoc_analysis", "lint"]
 
 
 class Bookmark(BaseModel):

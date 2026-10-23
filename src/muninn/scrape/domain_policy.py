@@ -50,7 +50,10 @@ class DomainPolicy:
         except ValueError:
             return False
         host = (parts.hostname or "").lower()
-        path = parts.path or ""
+        # Lowercase the path too: patterns are lowercased, so a mixed-case
+        # path (github.com/Private-Org/x) would otherwise escape its rule.
+        # Erring toward hiding is the safe direction for a privacy gate.
+        path = (parts.path or "").lower()
         host_path = f"{host}{path}"
 
         for pattern in self.domain_patterns:

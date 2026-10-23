@@ -1,8 +1,8 @@
 """JSON Schema validation + verbatim quote / cross-reference target checks.
 
-Inputs come from `/workspace/output/<task-id>.json` produced by the synthesis
-container. Errors are returned as a list of human-readable strings; an empty
-list means valid.
+Validates task files, result-file envelopes and task outputs (from the API
+runner or from a result file; docs/synthesis-contract.md). Errors are
+returned as a list of human-readable strings; an empty list means valid.
 """
 
 from __future__ import annotations
@@ -13,10 +13,11 @@ from typing import Any, Iterable
 
 import jsonschema
 
+from muninn._resources import schemas_dir
 
-# Schema directory — baked into container at /workspace/schemas/, also
-# checked into the repo at schemas/json/ for host-side validation.
-SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schemas" / "json"
+# Schema directory: the checked-in I/O schemas of the synthesis contract
+# (`<repo>/schemas/json` in a checkout, `muninn/_schemas/json` in a wheel).
+SCHEMA_DIR = schemas_dir() / "json"
 
 
 # Map canonical task_type -> schema filename. We use the canonical names
@@ -25,7 +26,9 @@ SCHEMA_MAP: dict[str, str] = {
     "era_narrative": "era-narrative.schema.json",
     "deep_pass": "deep-pass.schema.json",
     "ad_hoc_analysis": "ad-hoc-analysis.schema.json",
+    "lint": "lint.schema.json",
     "task_input": "task-input.schema.json",
+    "synthesis_result": "synthesis-result.schema.json",
 }
 
 
@@ -48,9 +51,14 @@ def validate_output(
     schema_dir: Path | None = None,
 ) -> list[str]:
     """Validate synthesis output against its JSON Schema. Returns errors."""
-    schema = load_schema(task_type, schema_dir)
+    return validate_against_schema(output, load_schema(task_type, schema_dir))
+
+
+def validate_against_schema(value: Any, schema: dict[str, Any]) -> list[str]:
+    """Validate against an already-loaded schema (e.g. a task file's
+    embedded ``result_schema``). Returns errors."""
     validator = jsonschema.Draft7Validator(schema)
-    errors = sorted(validator.iter_errors(output), key=lambda e: list(e.path))
+    errors = sorted(validator.iter_errors(value), key=lambda e: list(e.path))
     return [_format_error(e) for e in errors]
 
 
@@ -58,7 +66,7 @@ def validate_task_input(
     task_input: dict[str, Any],
     schema_dir: Path | None = None,
 ) -> list[str]:
-    """Validate the envelope JSON we hand to the container."""
+    """Validate a synthesis task file (the envelope any runner receives)."""
     return validate_output(task_input, "task_input", schema_dir)
 
 
@@ -76,7 +84,7 @@ def validate_cross_reference_targets(
     known_bookmark_ids: set[int],
 ) -> list[str]:
     """Verify every target_bookmark_id in cross_references appears in the
-    bookmarks the container was handed. Prevents synthesis from inventing IDs
+    bookmarks the task's materials offered. Prevents synthesis from inventing IDs
     that would FK-violate on insert."""
     errors: list[str] = []
     for i, ref in enumerate(cross_references):

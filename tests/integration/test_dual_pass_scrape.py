@@ -64,6 +64,13 @@ CDX_RESPONSE_EMPTY = json.dumps([
 ])
 
 
+def no_robots(router=respx):
+    """Every origin answers /robots.txt with 404: no rules (RFC 9309)."""
+    return router.get(url__regex=r"^https?://[^/]+/robots\.txt$").mock(
+        return_value=httpx.Response(404)
+    )
+
+
 def _epoch(iso: str) -> int:
     """ISO-8601 (UTC) → epoch seconds."""
     return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp())
@@ -116,6 +123,7 @@ def make_client(cache_dirs):
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc1_dual_pass_all_visible(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     bm1 = _insert_bookmark(db, "https://example.com/page1")
     bm2 = _insert_bookmark(db, "https://example.com/page2",
@@ -195,6 +203,7 @@ async def test_sc2_ia_global_rps():
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc3_at_capture_window(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     captured_iso = "2024-01-15T12:00:00+00:00"
     bm_id = _insert_bookmark(db, "https://example.com/page", captured_iso)
@@ -241,6 +250,7 @@ async def test_sc3_at_capture_window(fresh_db, make_client):
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc4_recent_archive_fallback(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     bm_id = _insert_bookmark(db, "https://example.com/page")
 
@@ -291,6 +301,7 @@ async def test_sc4_recent_archive_fallback(fresh_db, make_client):
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc5_priority_at_capture_wins(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     bm_id = _insert_bookmark(db, "https://example.com/page")
 
@@ -322,6 +333,7 @@ async def test_sc5_priority_at_capture_wins(fresh_db, make_client):
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc5_priority_live_fallback(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     bm_id = _insert_bookmark(db, "https://example.com/page")
 
@@ -348,6 +360,7 @@ async def test_sc5_priority_live_fallback(fresh_db, make_client):
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc5_priority_none(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     bm_id = _insert_bookmark(db, "https://example.com/page")
 
@@ -389,6 +402,7 @@ def test_sc6_auth_wall_negative():
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc6_auth_wall_in_db(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     bm_id = _insert_bookmark(db, "https://example.com/page")
 
@@ -418,6 +432,7 @@ async def test_sc6_auth_wall_in_db(fresh_db, make_client):
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc7_idempotent_reruns(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     _insert_bookmark(db, "https://example.com/page")
 
@@ -448,6 +463,7 @@ async def test_sc7_idempotent_reruns(fresh_db, make_client):
 @pytest.mark.asyncio
 @respx.mock
 async def test_sc8_cache_skips_network_on_rerun(fresh_db, make_client):
+    no_robots()
     db = fresh_db
     _insert_bookmark(db, "https://example.com/page")
 

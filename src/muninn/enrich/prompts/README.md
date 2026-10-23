@@ -33,3 +33,9 @@ After bumping, update the corresponding constant in `muninn.config`
 - `per_bookmark_v1.md` — Haiku per-bookmark enrichment. Produces
   `summary`, `tags`, `entities`, `content_type`, `language` as JSON.
   Used by `muninn.enrich.haiku`.
+- `suitability_v1.md` — Research Intake suitability assessment
+  (`muninn enrich --task suitability`). Produces the `assessment`
+  record's judgement fields (`disposition`, `relevance`, `confidence`,
+  `rationale`, `matched_interests`, `unresolved_questions`) as JSON. Its
+  stem is `assessments.prompt_version`, part of the assessment key. Used
+  by `muninn.enrich.suitability`.

@@ -1,0 +1,125 @@
+{
+  "data": [
+    {
+      "id": "1111111111111111105",
+      "author_id": "9000000013",
+      "created_at": "2026-08-10T14:00:00.000Z",
+      "lang": "en",
+      "text": "https://t.co/EXAMPLE0105",
+      "edit_history_tweet_ids": [
+        "1111111111111111105"
+      ],
+      "referenced_tweets": [
+        {
+          "type": "replied_to",
+          "id": "1111111111111111193"
+        }
+      ],
+      "article": {
+        "title": "A synthetic long-form article",
+        "preview_text": "The first lines of a synthetic article…",
+        "plain_text": "The first lines of a synthetic article. The full body continues here, and is present in this fixture to model the case where the API returns it."
+      },
+      "entities": {
+        "urls": [
+          {
+            "start": 0,
+            "end": 24,
+            "url": "https://t.co/EXAMPLE0105",
+            "expanded_url": "https://x.com/i/article/1111111111111111905",
+            "display_url": "x.com/i/article/1111…"
+          }
+        ]
+      }
+    },
+    {
+      "id": "1111111111111111106",
+      "author_id": "9000000013",
+      "created_at": "2026-08-02T09:45:00.000Z",
+      "lang": "en",
+      "text": "Title-only article plus two links https://t.co/EXAMPLE0106 https://t.co/EXAMPLE0116",
+      "edit_history_tweet_ids": [
+        "1111111111111111106"
+      ],
+      "referenced_tweets": [
+        {
+          "type": "quoted",
+          "id": "1111111111111111192"
+        }
+      ],
+      "article": {
+        "title": "A synthetic article whose body is not returned",
+        "preview_text": "Only the preview is present…"
+      },
+      "entities": {
+        "urls": [
+          {
+            "start": 34,
+            "end": 58,
+            "url": "https://t.co/EXAMPLE0106",
+            "expanded_url": "https://example.org/papers/synthetic-paper.pdf",
+            "display_url": "example.org/papers/synthet…",
+            "unwound_url": null,
+            "status": null
+          },
+          {
+            "start": 59,
+            "end": 83,
+            "url": "https://t.co/EXAMPLE0116",
+            "expanded_url": "https://short.example.net/gone",
+            "display_url": "short.example.net/gone",
+            "unwound_url": "https://www.example.org/a-page-that-is-gone",
+            "status": 404
+          }
+        ]
+      }
+    }
+  ],
+  "includes": {
+    "users": [
+      {
+        "id": "9000000013",
+        "name": "Example Writer",
+        "username": "example_writer",
+        "protected": false
+      }
+    ]
+  },
+  "errors": [
+    {
+      "value": "1111111111111111192",
+      "detail": "Could not find tweet with referenced_tweets.id: [1111111111111111192].",
+      "title": "Not Found Error",
+      "resource_type": "tweet",
+      "parameter": "referenced_tweets.id",
+      "resource_id": "1111111111111111192",
+      "section": "includes",
+      "type": "https://api.twitter.com/2/problems/resource-not-found"
+    },
+    {
+      "value": "1111111111111111193",
+      "detail": "Sorry, you are not authorized to see the Tweet with referenced_tweets.id: [1111111111111111193].",
+      "title": "Authorization Error",
+      "resource_type": "tweet",
+      "parameter": "referenced_tweets.id",
+      "resource_id": "1111111111111111193",
+      "section": "includes",
+      "type": "https://api.twitter.com/2/problems/not-authorized-for-resource"
+    },
+    {
+      "value": "9000000099",
+      "detail": "User has been suspended: [9000000099].",
+      "title": "Forbidden",
+      "resource_type": "user",
+      "parameter": "referenced_tweets.id.author_id",
+      "resource_id": "9000000099",
+      "section": "includes",
+      "type": "https://api.twitter.com/2/problems/resource-unavailable"
+    }
+  ],
+  "meta": {
+    "result_count": 2,
+    "next_token": "synthetic_next_token_page3",
+    "previous_token": "synthetic_previous_token_page1"
+  }
+}

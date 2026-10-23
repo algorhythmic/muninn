@@ -1,0 +1,10 @@
+{
+  "_fixture": "synthetic, documentation-derived, not recorded",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json; charset=utf-8",
+    "x-rate-limit-limit": "180",
+    "x-rate-limit-remaining": "177",
+    "x-rate-limit-reset": "1792584900"
+  }
+}

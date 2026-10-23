@@ -1,0 +1,40 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "interest-profile",
+    "expect": "invalid",
+    "covers": [
+      "integers only"
+    ],
+    "why": "floats are outside the canonical-JSON subset; weights are integers 0-100",
+    "fails_at": "interests/0/weight",
+    "fails_with": "integer"
+  },
+  "record": {
+    "record_type": "interest-profile",
+    "profile_id": "operator-research",
+    "label": "Synthetic research interests",
+    "version_label": "v1",
+    "interests": [
+      {
+        "interest_id": "retrieval-eval",
+        "label": "Retrieval evaluation",
+        "description": "Benchmarks and methods for evaluating search over small corpora.",
+        "weight": 0.8
+      },
+      {
+        "interest_id": "sqlite-tooling",
+        "label": "SQLite tooling",
+        "description": "Migrations, FTS5 and embedded analytics.",
+        "weight": 60
+      }
+    ],
+    "exclusions": [
+      {
+        "exclusion_id": "hype",
+        "description": "Announcements without method or data."
+      }
+    ]
+  }
+}

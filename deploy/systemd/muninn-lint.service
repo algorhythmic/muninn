@@ -1,0 +1,41 @@
+# Weekly deterministic vault lint (muninn lint). Example unit; not installed
+# by anything. See docs/vault-lint.md ("Cadence") for installation.
+#
+# Only the free, model-free lint runs here. The model tier
+# (`muninn synthesize lint`) spends money and stays a manual command.
+#
+# Adjust the lines marked ADJUST to your checkout and install.
+
+[Unit]
+Description=Muninn vault lint (read-only report)
+
+[Service]
+Type=oneshot
+# ADJUST: the muninn checkout; its .env supplies MUNINN_VAULT_DIR,
+# MUNINN_PERSONAL_VAULT_DIR (the never-same-vault guard) and the database
+# (MUNINN_DB_PATH, or MUNINN_DATA_DIR). Lint needs the database: it
+# withholds pages of hidden bookmarks, and refuses to run without it.
+WorkingDirectory=%h/Projects/muninn
+EnvironmentFile=-%h/Projects/muninn/.env
+# ADJUST: the muninn entry point (e.g. %h/Projects/muninn/.venv/bin/muninn).
+# The report names vault pages and the terms they mention: keep it private.
+ExecStart=%h/.local/bin/muninn lint --report %h/.local/state/muninn/lint/latest.txt
+ExecStart=%h/.local/bin/muninn lint --json --report %h/.local/state/muninn/lint/latest.json
+# The report directory, ~/.local/state/muninn/lint (created by systemd).
+StateDirectory=muninn/lint
+# Belt and braces for "lint never writes the vault": the file system,
+# home directory included, is read-only to this unit except the state
+# directory above and the database directory below. Drop these two lines
+# if your user manager cannot sandbox (the unit then fails with a
+# namespace error).
+ProtectSystem=strict
+ProtectHome=read-only
+# ADJUST: the directory holding the muninn database. Lint opens the
+# database read-only (SQLite mode=ro) and never writes it, but SQLite must
+# be able to create the WAL side files (muninn.db-shm, -wal) next to it
+# when no other process has it open; without this line lint refuses with
+# "attempt to write a readonly database". The leading "-" ignores a
+# missing path.
+ReadWritePaths=-%h/Projects/muninn/data
+NoNewPrivileges=yes
+Nice=10

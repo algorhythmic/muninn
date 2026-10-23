@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:interest-profile:0.1",
+  "title": "Interest profile",
+  "description": "One revision of the operator's interest profile (parsed from its versioned YAML file). The revision is the sha256 of this record's canonical JSON, so editing YAML comments or whitespace does not create a new revision. Old revisions stay resolvable (interest_profiles table).",
+  "type": "object",
+  "required": ["record_type", "profile_id", "label", "interests"],
+  "additionalProperties": false,
+  "properties": {
+    "record_type": { "const": "interest-profile" },
+    "profile_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/slug" },
+    "label": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+    "version_label": {
+      "description": "Human label only. The digest, not this label, is the revision.",
+      "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text"
+    },
+    "interests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["interest_id", "label", "description", "weight"],
+        "additionalProperties": false,
+        "properties": {
+          "interest_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/slug" },
+          "label": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/short_text" },
+          "description": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "weight": {
+            "description": "Relative weight, integer 0-100.",
+            "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/percent"
+          }
+        }
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["exclusion_id", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "exclusion_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/slug" },
+          "description": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        }
+      }
+    }
+  }
+}

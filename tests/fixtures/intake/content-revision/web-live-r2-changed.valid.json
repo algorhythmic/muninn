@@ -1,0 +1,33 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "content-revision",
+    "expect": "valid",
+    "covers": [
+      "changed-content revision: same item, new content_sha256, new revision_id"
+    ],
+    "why": "valid revision"
+  },
+  "record": {
+    "record_type": "content-revision",
+    "revision_id": "01M5EGTQY07141HHE4EDJF59CG",
+    "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+    "content_sha256": "bce2d570ca7682c4e49ec530422c846cbebfc889d878ecaa64d8bee75b0f40b9",
+    "normalization": "muninn-text/1",
+    "char_count": 292,
+    "coverage": "full",
+    "retrieval_method": "live",
+    "freshness": "current",
+    "extractor": {
+      "name": "muninn.scrape.extract",
+      "version": "selectolax-0.4.13"
+    },
+    "published_at": "2026-09-28T00:00:00Z",
+    "retrieved_at": "2026-10-21T06:02:00Z",
+    "observed_at": "2026-10-20T08:00:00Z",
+    "http_status": 200,
+    "scrape_pass": "live",
+    "text": "Synthetic notes on retrieval evaluation.\n\nWe compare BM25, dense and hybrid retrieval on a ten-thousand-document synthetic corpus. Hybrid retrieval improved recall at ten by a modest margin.\n\nMethod: fixed query set, judged by two annotators.\n\nUpdate: the margin shrank after a tokenizer fix."
+  }
+}

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from muninn.config import load_paths
+from muninn.db import require_current_schema
 
 
 def export_parquet(
@@ -19,7 +20,8 @@ def export_parquet(
     """Write the join to `out_path` and return the row count."""
     import duckdb
 
-    sqlite_path = str(db_path or load_paths().db_path)
+    # DuckDB's ATTACH bypasses connect(): check the schema version first.
+    sqlite_path = str(require_current_schema(db_path or load_paths().db_path))
     out = str(out_path)
 
     Path(out).parent.mkdir(parents=True, exist_ok=True)

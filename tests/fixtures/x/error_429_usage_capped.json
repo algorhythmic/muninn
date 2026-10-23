@@ -1,0 +1,9 @@
+{
+  "account_id": 1000000001,
+  "product_name": "pay-per-use",
+  "title": "UsageCapExceeded",
+  "period": "Monthly",
+  "scope": "Account",
+  "detail": "Usage cap exceeded: Monthly account cap",
+  "type": "https://api.twitter.com/2/problems/usage-capped"
+}

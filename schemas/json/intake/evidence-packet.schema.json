@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:muninn:research-intake:evidence-packet:0.1",
+  "title": "Evidence packet",
+  "description": "A versioned, content-addressed evidence packet, or the tombstone that replaced one. Identity: packet_id (ULID) + integer revision. Digest: sha256 over the packet's canonical JSON, which is also the sha256 of the exported file. A reference {ref: '<packet_id>@<revision>', digest} resolves to the active packet or, after withdrawal, to its tombstone.",
+  "oneOf": [
+    { "$ref": "#/$defs/active" },
+    { "$ref": "#/$defs/withdrawn" }
+  ],
+  "$defs": {
+    "active": {
+      "type": "object",
+      "required": [
+        "record_type", "contract", "contract_version", "status", "packet_id", "revision", "created_at",
+        "subject_item_id", "items", "item_links", "observations", "content_revisions",
+        "interest_profiles", "assessments", "primary_assessment", "evidence",
+        "repository_revisions", "unresolved_questions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "record_type": { "const": "evidence-packet" },
+        "contract": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/contract_name" },
+        "contract_version": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/contract_version" },
+        "status": { "const": "active" },
+        "packet_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid" },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 999999999 },
+        "previous_revision": {
+          "description": "The revision this one supersedes. Required when revision > 1, absent when revision = 1. The superseded revision stays resolvable.",
+          "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/packet_ref"
+        },
+        "created_at": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" },
+        "subject_item_id": {
+          "description": "The bookmarked item the packet is about (normally an x:post). It appears in items.",
+          "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/item_id"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "urn:muninn:research-intake:source-item:0.1" }
+        },
+        "item_links": {
+          "type": "array",
+          "items": { "$ref": "urn:muninn:research-intake:item-link:0.1" }
+        },
+        "observations": {
+          "type": "array",
+          "items": { "$ref": "urn:muninn:research-intake:bookmark-observation:0.1" }
+        },
+        "content_revisions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "urn:muninn:research-intake:content-revision:0.1" }
+        },
+        "interest_profiles": {
+          "description": "Every profile revision an included assessment references, by value.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "urn:muninn:research-intake:interest-profile:0.1" }
+        },
+        "assessments": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "urn:muninn:research-intake:assessment:0.1" }
+        },
+        "primary_assessment": {
+          "description": "The assessment that qualified this packet for export. It appears in assessments.",
+          "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/assessment_ref"
+        },
+        "evidence": {
+          "type": "object",
+          "required": ["supporting", "contradictory"],
+          "additionalProperties": false,
+          "properties": {
+            "supporting": { "type": "array", "items": { "$ref": "#/$defs/evidence_item" } },
+            "contradictory": { "type": "array", "items": { "$ref": "#/$defs/evidence_item" } }
+          }
+        },
+        "repository_revisions": {
+          "description": "Repository revisions inspected while assembling the evidence.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["item_id", "commit_sha", "inspected_at"],
+            "additionalProperties": false,
+            "properties": {
+              "item_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/github_item_id" },
+              "commit_sha": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/git_sha" },
+              "ref_name": { "type": "string", "minLength": 1, "maxLength": 255 },
+              "inspected_at": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" }
+            }
+          }
+        },
+        "unresolved_questions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        },
+        "usage": {
+          "description": "Optional cost of producing the included assessments.",
+          "type": "array",
+          "items": { "$ref": "urn:muninn:research-intake:usage-record:0.1" }
+        }
+      },
+      "if": { "properties": { "revision": { "minimum": 2 } } },
+      "then": { "required": ["previous_revision"] },
+      "else": { "not": { "required": ["previous_revision"] } }
+    },
+    "withdrawn": {
+      "description": "Tombstone. Replaces a packet whose source material was removed. It keeps the identity and the original digest so references resolve to 'withdrawn' instead of dangling; it carries no content.",
+      "type": "object",
+      "required": [
+        "record_type", "contract", "contract_version", "status", "packet_id", "revision",
+        "digest", "withdrawn_at", "withdrawal_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "record_type": { "const": "evidence-packet" },
+        "contract": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/contract_name" },
+        "contract_version": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/contract_version" },
+        "status": { "const": "withdrawn" },
+        "packet_id": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/ulid" },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 999999999 },
+        "digest": {
+          "description": "Digest of the withdrawn packet revision (not of this tombstone).",
+          "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/sha256"
+        },
+        "withdrawn_at": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/timestamp" },
+        "withdrawal_reason": { "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/withdrawal_reason" }
+      }
+    },
+    "evidence_item": {
+      "type": "object",
+      "required": ["statement", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "statement": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "source": {
+          "description": "The content revision the statement rests on. It appears in content_revisions.",
+          "$ref": "urn:muninn:research-intake:defs:0.1#/$defs/revision_ref"
+        },
+        "excerpt": {
+          "description": "Verbatim excerpt from the revision's normalized text.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        }
+      }
+    }
+  }
+}

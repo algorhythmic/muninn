@@ -143,6 +143,54 @@ def get_point_ids(
     return ids
 
 
+def get_point_payloads(
+    client: "QdrantClient",
+    collection_name: str = QDRANT_COLLECTION,
+    page_size: int = 1000,
+) -> dict[int, dict]:
+    """Return ``{point_id: payload}`` for the whole collection via ``scroll``.
+
+    Reconcile compares these payloads with the canonical rows to find
+    stale points (e.g. after a deep pass rewrote a summary)."""
+    payloads: dict[int, dict] = {}
+    offset = None
+    while True:
+        points, next_offset = client.scroll(
+            collection_name=collection_name,
+            limit=page_size,
+            offset=offset,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for p in points:
+            payloads[p.id] = dict(p.payload or {})
+        if next_offset is None:
+            break
+        offset = next_offset
+    return payloads
+
+
+def delete_points(
+    client: "QdrantClient",
+    point_ids: list[int],
+    collection_name: str = QDRANT_COLLECTION,
+) -> bool:
+    """Delete points by ``bookmark_id``. Returns True on success."""
+    if not point_ids:
+        return True
+    from qdrant_client.models import PointIdsList
+
+    try:
+        client.delete(
+            collection_name=collection_name,
+            points_selector=PointIdsList(points=list(point_ids)),
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to delete %d points: %s", len(point_ids), exc)
+        return False
+
+
 def get_collection_count(
     client: "QdrantClient",
     collection_name: str = QDRANT_COLLECTION,

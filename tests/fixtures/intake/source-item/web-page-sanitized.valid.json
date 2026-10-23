@@ -1,0 +1,28 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "source-item",
+    "expect": "valid",
+    "covers": [
+      "web page whose raw locator carried the canary; sanitized locator and redaction names only",
+      "canary"
+    ],
+    "why": "valid source item"
+  },
+  "record": {
+    "record_type": "source-item",
+    "item_id": "web:541a98f9fb4be88caa0b9e342532028528bc7c17457ed297406479316e6a9948",
+    "kind": "web_page",
+    "locator": "https://example.com/articles/synthetic-retrieval-notes",
+    "title": "Synthetic notes on retrieval evaluation",
+    "published_at": "2026-09-28T00:00:00Z",
+    "redaction": {
+      "param_names": [
+        "access_token"
+      ],
+      "path_redacted": false,
+      "userinfo_redacted": false
+    }
+  }
+}

@@ -7,7 +7,10 @@ Per-bookmark control flow (serial within a bookmark):
    didn't yield ``ok``.
 3. ``live`` — always run (for completeness/freshness comparison even when
    archives succeeded). Becomes the canonical content only as a last-resort
-   fallback.
+   fallback. robots.txt can stop it: an unreachable robots.txt skips the
+   pass this run (the stored live row is left as it is), and a disallow
+   writes a ``robots_disallowed`` row only when no earlier capture exists.
+   Neither adds a ``scrape_history`` revision.
 
 After all passes, ``bookmarks.enrichment_source`` is set per priority:
 ``at_capture > recent_archive > live_fallback > none`` (where the chosen
@@ -16,23 +19,54 @@ pass must have ``scrape_status='ok'``).
 All inserts use ``INSERT … ON CONFLICT(bookmark_id, pass) DO UPDATE`` so
 re-runs are idempotent (SC7) — row count stays constant across re-runs.
 
+Alongside each upsert, every fetch that observed a content state appends a
+``scrape_history`` revision (contract muninn-research-intake §4.4): digest
+over the normalized extracted text, extractor name and version,
+``retrieval_method`` ``live`` or ``archive`` (archive revisions are
+historical), and coverage. Unchanged content adds nothing (002 unique key).
+Transport failures and missing archives are operational states, not
+content, and add no revision.
+
+X rows (``source`` ``x`` / ``x_article``) are never scraped: their content
+comes from the X API, and a live fetch would overwrite it. Linked items
+(``x_link``) are scraped like any bookmark, but their ``enrichment_source``
+prefers the live pass, because research selection uses current captures
+(RI-01 §5); the browser lane keeps at_capture-first.
+
 ``scrape_all`` may interleave many bookmarks concurrently with a bounded
 semaphore; politeness is enforced by the shared :class:`RateLimiter` (one
 RPS per live origin, 0.5 RPS global to IA), not by the concurrency limit.
+
+Domain policy also applies to where a fetch *ends*
+(:func:`muninn.ingest.policy.row_hidden`). The live pass never follows a
+redirect to a hidden locator; a fetch that nonetheless ended on one (a
+Wayback snapshot of a redirect target, a cached response from before a
+policy change) keeps no content. Either way the hidden locator is kept in
+``final_url`` and the row is hidden (``content_visible = 0``) in the same
+transaction, exactly as if its own URL were hidden; once the run is over,
+:func:`muninn.ingest.policy.apply_policy` propagates that (masks in
+parent posts, titles, keyword index).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 from typing import Iterable, Optional
 
 from muninn.db import connect, transaction
+from muninn.ingest.policy import apply_policy, locator_hidden, row_visible_flag
+from muninn.intake_records import API_CONTENT_SOURCES, SOURCE_X_LINK, item_ref_for, row_metadata
 from muninn.models import ScrapeResult
+from muninn.revisions import record_revision
+from muninn.sanitize import sanitize_url
 from muninn.scrape.at_capture import fetch_at_capture
 from muninn.scrape.client import ScrapeClient
+from muninn.scrape.extract import EXTRACTOR_NAME, EXTRACTOR_VERSION
 from muninn.scrape.live import fetch_live
+from muninn.scrape.domain_policy import DomainPolicy, load_domain_policy
 from muninn.scrape.recent_archive import fetch_recent_archive
 
 log = logging.getLogger(__name__)
@@ -57,13 +91,18 @@ async def scrape_one(
     conn: sqlite3.Connection,
     client: ScrapeClient,
     bookmark_row: dict,
+    *,
+    policy: Optional[DomainPolicy] = None,
 ) -> dict:
     """Run all passes for one bookmark, persist results, update
-    ``enrichment_source``. Returns a small per-bookmark stats dict.
+    ``enrichment_source``. Returns a small per-bookmark stats dict
+    (``hidden``: the row is now hidden because a fetch ended on a
+    locator ``policy`` hides; no policy, no such check).
     """
     bookmark_id = int(bookmark_row["bookmark_id"])
     url = bookmark_row.get("url")
     captured_at = bookmark_row.get("captured_at")
+    stop_at = (lambda u: locator_hidden(policy, u)) if policy is not None else None
 
     results: list[ScrapeResult] = []
 
@@ -78,15 +117,51 @@ async def scrape_one(
 
     # Pass 3: live (always — even if archives succeeded, we want a fresh
     # comparison snapshot, and stream-2's tests assert the row exists).
-    live_result = await fetch_live(client, bookmark_id, url)
-    results.append(live_result)
+    # robots.txt outcomes are not observations of the page: an unreachable
+    # robots.txt skips the live pass this run (None), and a disallow keeps
+    # an earlier capture (see _keeps_stored_live).
+    live_result = await fetch_live(client, bookmark_id, url, stop_at=stop_at)
+    stored_live = _stored_live(conn, bookmark_id)
+    keep_stored_live = live_result is None or _keeps_stored_live(live_result, stored_live)
+    if not keep_stored_live:
+        results.append(live_result)
 
-    # Persist + route enrichment_source atomically per bookmark.
-    enrichment_source = _pick_enrichment_source(results)
+    if stop_at is not None:
+        results = [_withhold_hidden_fetch(r, stop_at, client, url) for r in results]
+
+    # Persist + route enrichment_source atomically per bookmark. A kept
+    # live row still counts for routing: it is the current live capture.
+    identity = _identity(conn, bookmark_row)
+    routed = (results + [stored_live]) if keep_stored_live and stored_live is not None else results
+    enrichment_source = _pick_enrichment_source(
+        routed, prefer_live=identity["source"] == SOURCE_X_LINK
+    )
     with transaction(conn):
         for r in results:
             _upsert_scrape_result(conn, r)
+        if live_result is not None and keep_stored_live:
+            conn.execute(
+                "UPDATE scrape_results SET error_detail = ? WHERE bookmark_id = ? AND pass = 'live'",
+                (f"{live_result.error_detail} at {live_result.fetched_at}; "
+                 "kept the earlier capture", bookmark_id),
+            )
+        # Live first: when a live and an archive capture have identical text,
+        # the one revision the unique key keeps is the current (live) one.
+        for r in sorted(results, key=lambda r: r.pass_ != "live"):
+            _record_history(conn, r, identity)
         _update_enrichment_source(conn, bookmark_id, enrichment_source)
+        hidden = policy is not None and not row_visible_flag(
+            conn, policy, bookmark_id, url, identity["source"]
+        )
+        if hidden:
+            conn.execute(
+                "UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = ?", (bookmark_id,)
+            )
+            # A hidden row has no keyword-index entry. apply_policy, later,
+            # sees the row already hidden and would not flip it, so the
+            # entry goes here, in the same transaction.
+            conn.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bookmark_id,))
+            log.info("bookmark %d hidden: a fetch ended on a policy-hidden locator", bookmark_id)
 
     log.info(
         "bookmark %d → enrichment_source=%s (%d passes)",
@@ -95,8 +170,74 @@ async def scrape_one(
     return {
         "bookmark_id": bookmark_id,
         "enrichment_source": enrichment_source,
-        "passes": {r.pass_: r.scrape_status for r in results},
+        "passes": {
+            **{r.pass_: r.scrape_status for r in results},
+            **({"live": "skipped"} if live_result is None else {}),
+        },
+        "hidden": hidden,
     }
+
+
+# Live-row states that hold a capture of the page.
+_CAPTURE_STATUSES = frozenset({"ok", "partial"})
+
+
+def _robots_refusal(r: ScrapeResult) -> bool:
+    """True when Muninn itself declined the fetch because robots.txt
+    disallows it (no request was made). An HTTP 451 answer, which the live
+    pass also records as ``robots_disallowed``, is the site refusing."""
+    return r.scrape_status == "robots_disallowed" and r.http_status != 451
+
+
+def _keeps_stored_live(r: ScrapeResult, stored: Optional[ScrapeResult]) -> bool:
+    """A robots.txt disallow does not replace a stored live capture.
+
+    The earlier capture was fetched while robots.txt allowed it; robots.txt
+    governs fetching, not what was already fetched, so the row keeps its
+    status, content and ``fetched_at`` (only ``error_detail`` notes the
+    disallow). With no earlier capture the ``robots_disallowed`` row is
+    written, so the reason the page has no live content is on record."""
+    return _robots_refusal(r) and stored is not None and stored.scrape_status in _CAPTURE_STATUSES
+
+
+def _stored_live(conn: sqlite3.Connection, bookmark_id: int) -> Optional[ScrapeResult]:
+    row = conn.execute(
+        "SELECT bookmark_id, pass, fetched_at, final_url, http_status, scrape_status, "
+        "extraction_quality, error_detail FROM scrape_results "
+        "WHERE bookmark_id = ? AND pass = 'live'",
+        (bookmark_id,),
+    ).fetchone()
+    return ScrapeResult(**dict(row)) if row is not None else None
+
+
+def _withhold_hidden_fetch(
+    r: ScrapeResult, hidden, client: ScrapeClient, url: Optional[str]
+) -> ScrapeResult:
+    """A fetch that ended on a hidden locator keeps none of its content
+    (its ``final_url`` stays, so the row is hidden by it): not in the row,
+    not in a spilled raw-HTML file, and not in the HTTP cache entry the
+    response was stored under (``live:`` keyed by the requested URL,
+    ``ia:`` by the snapshot URL), which would otherwise serve it again."""
+    if not r.final_url or not hidden(_sanitized_locator(r.final_url) or r.final_url):
+        return r
+    if r.raw_html_path:
+        try:
+            os.unlink(r.raw_html_path)
+        except OSError:
+            pass
+    if r.pass_ == "live" and url:
+        client.http_cache.delete(f"live:{url}")
+    elif r.archive_url:
+        client.http_cache.delete(f"ia:{r.archive_url}")
+    return r.model_copy(update={
+        "scrape_status": "failed",
+        "extraction_quality": None,
+        "content_text": None,
+        "content_html": None,
+        "raw_html_path": None,
+        "error_detail": r.error_detail if r.scrape_status == "failed"
+        else "fetch ended on a locator hidden by domain policy",
+    })
 
 
 async def scrape_all(
@@ -105,16 +246,26 @@ async def scrape_all(
     client: Optional[ScrapeClient] = None,
     concurrency: int = 4,
     limit: Optional[int] = None,
+    sources: Optional[Iterable[str]] = None,
+    policy: Optional[DomainPolicy] = None,
 ) -> dict:
     """Run dual-pass scrape for every ``content_visible=1`` bookmark.
 
     ``limit``: scrape only the N most recently captured bookmarks
     (newest ``captured_at`` first) — the roadmap's ~100-bookmark
     smoke-test workflow. Default: all visible bookmarks.
+    ``sources``: only rows whose ``bookmarks.source`` is listed. X post and
+    article rows are always skipped (their content comes from the X API).
+    ``policy``: the domain policy (default: ``domain_policy.yml``); a row
+    whose fetch ends on a locator it hides is hidden, and the policy is
+    then re-applied to every stored row (:func:`apply_policy`).
 
-    Returns aggregated stats: ``{processed, errors, by_source: {…}}``.
+    Returns aggregated stats: ``{processed, errors, hidden_by_policy,
+    by_source: {…}}``.
     """
-    bookmarks = _list_visible_bookmarks(conn, limit=limit)
+    if policy is None:
+        policy = load_domain_policy()
+    bookmarks = _list_visible_bookmarks(conn, limit=limit, sources=sources)
     log.info("scraping %d visible bookmarks", len(bookmarks))
 
     own_client = client is None
@@ -122,13 +273,14 @@ async def scrape_all(
         client = ScrapeClient()
 
     sem = asyncio.Semaphore(max(1, concurrency))
-    stats = {"processed": 0, "errors": 0, "by_source": {}}
+    stats = {"processed": 0, "errors": 0, "hidden_by_policy": 0, "by_source": {}}
 
     async def _one(bm: dict) -> None:
         async with sem:
             try:
-                result = await scrape_one(conn, client, bm)
+                result = await scrape_one(conn, client, bm, policy=policy)
                 stats["processed"] += 1
+                stats["hidden_by_policy"] += result["hidden"]
                 src = result["enrichment_source"]
                 stats["by_source"][src] = stats["by_source"].get(src, 0) + 1
             except Exception:
@@ -141,15 +293,27 @@ async def scrape_all(
         if own_client:
             await client.close()
 
+    if stats["hidden_by_policy"]:
+        # Newly hidden rows: mask their locators in the posts that link
+        # them, fix titles and keyword-index rows (as `muninn policy apply`).
+        report = apply_policy(conn, policy)
+        log.info("domain policy re-applied after scrape: %s", report.summary())
     return stats
 
 
 # ── Routing ──────────────────────────────────────────────────────
 
-def _pick_enrichment_source(results: Iterable[ScrapeResult]) -> str:
-    """Apply the priority ladder. Only ``scrape_status='ok'`` rows count."""
+def _pick_enrichment_source(
+    results: Iterable[ScrapeResult], *, prefer_live: bool = False
+) -> str:
+    """Apply the priority ladder. Only ``scrape_status='ok'`` rows count.
+
+    ``prefer_live`` (linked items of X posts) puts the live pass first."""
     by_pass = {r.pass_: r for r in results}
-    for pass_name in ("at_capture", "recent_archive", "live"):
+    order = ("live", "at_capture", "recent_archive") if prefer_live else (
+        "at_capture", "recent_archive", "live"
+    )
+    for pass_name in order:
         r = by_pass.get(pass_name)
         if r is not None and r.scrape_status == "ok":
             return _PASS_TO_SOURCE[pass_name]
@@ -158,19 +322,15 @@ def _pick_enrichment_source(results: Iterable[ScrapeResult]) -> str:
 
 # ── DB helpers (kept here, not in muninn.db, since they're scrape-only) ──
 
-_VISIBLE_BOOKMARKS_SQL = """
-    SELECT bookmark_id, url, captured_at, content_visible
-    FROM bookmarks
-    WHERE content_visible = 1
-    ORDER BY bookmark_id
-"""
+_SKIPPED_SOURCES = ", ".join(f"'{s}'" for s in API_CONTENT_SOURCES)
 
-_VISIBLE_BOOKMARKS_NEWEST_SQL = """
-    SELECT bookmark_id, url, captured_at, content_visible
+_VISIBLE_BOOKMARKS_SQL = f"""
+    SELECT bookmark_id, url, captured_at, content_visible, source, source_id, source_metadata
     FROM bookmarks
     WHERE content_visible = 1
-    ORDER BY captured_at DESC, bookmark_id DESC
-    LIMIT ?
+      AND source NOT IN ({_SKIPPED_SOURCES})
+      {{source_filter}}
+    ORDER BY {{order}}
 """
 
 _UPSERT_SCRAPE_SQL = """
@@ -200,16 +360,112 @@ _UPSERT_SCRAPE_SQL = """
 
 
 def _list_visible_bookmarks(
-    conn: sqlite3.Connection, limit: Optional[int] = None
+    conn: sqlite3.Connection,
+    limit: Optional[int] = None,
+    sources: Optional[Iterable[str]] = None,
 ) -> list[dict]:
+    params: list = []
+    source_filter = ""
+    if sources is not None:
+        wanted = list(dict.fromkeys(sources))
+        source_filter = f"AND source IN ({', '.join('?' for _ in wanted)})" if wanted else "AND 0"
+        params.extend(wanted)
     if limit is not None:
-        cur = conn.execute(_VISIBLE_BOOKMARKS_NEWEST_SQL, (limit,))
+        sql = _VISIBLE_BOOKMARKS_SQL.format(
+            source_filter=source_filter, order="captured_at DESC, bookmark_id DESC"
+        ) + " LIMIT ?"
+        params.append(limit)
     else:
-        cur = conn.execute(_VISIBLE_BOOKMARKS_SQL)
-    return [dict(row) for row in cur.fetchall()]
+        sql = _VISIBLE_BOOKMARKS_SQL.format(source_filter=source_filter, order="bookmark_id")
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+# ── scrape_history (append-only revisions) ───────────────────────
+
+_BLOCKED_STATUSES = frozenset({"auth_required", "robots_disallowed", "paywall", "js_required"})
+_DELETED_HTTP = frozenset({404, 410})
+
+
+def _identity(conn: sqlite3.Connection, bookmark_row: dict) -> dict:
+    """source / item_ref / observation time for a bookmark being scraped."""
+    row = bookmark_row
+    if "source" not in row or "source_id" not in row:
+        found = conn.execute(
+            "SELECT bookmark_id, url, captured_at, source, source_id, source_metadata "
+            "FROM bookmarks WHERE bookmark_id = ?",
+            (int(bookmark_row["bookmark_id"]),),
+        ).fetchone()
+        row = dict(found) if found is not None else {**bookmark_row, "source": "", "source_id": ""}
+    source = row.get("source") or ""
+    url = row.get("url")
+    captured_at = row.get("captured_at")
+    return {
+        "source": source,
+        "url": url,
+        "item_ref": item_ref_for(source, str(row.get("source_id") or ""), url, row_metadata(row)),
+        # Linked items are not bookmarks; a browser bookmark's ADD_DATE is.
+        "observed_at": None if source == SOURCE_X_LINK or not captured_at else int(captured_at),
+    }
+
+
+def _coverage(r: ScrapeResult) -> Optional[str]:
+    """Contract coverage of one fetch, or None when it observed no content
+    state (no URL, no archive, timeout, network error, other HTTP errors,
+    a fetch robots.txt kept Muninn from making)."""
+    status = r.scrape_status
+    if status in ("ok", "partial"):
+        if not (r.content_text or "").strip():
+            return "empty"
+        return "full" if status == "ok" and r.extraction_quality == "ok" else "partial"
+    if _robots_refusal(r):
+        # Muninn chose not to fetch: nothing about the page was observed.
+        # Contract `blocked` means the source refused (an HTTP 451 does).
+        return None
+    if status in _BLOCKED_STATUSES:
+        return "blocked"
+    if status == "failed" and r.http_status in _DELETED_HTTP:
+        return "deleted"
+    return None
+
+
+def _record_history(conn: sqlite3.Connection, r: ScrapeResult, identity: dict) -> None:
+    coverage = _coverage(r)
+    if coverage is None:
+        return
+    is_archive = r.pass_ in ("at_capture", "recent_archive")
+    if is_archive and r.actual_snapshot_at is None:
+        return  # an archive revision must name its snapshot time
+    final_locator = _sanitized_locator(r.final_url or (r.archive_url if is_archive else None))
+    if final_locator == identity["url"]:
+        final_locator = None
+    record_revision(
+        conn,
+        bookmark_id=r.bookmark_id,
+        item_ref=identity["item_ref"],
+        text=r.content_text,
+        coverage=coverage,  # type: ignore[arg-type]
+        retrieval_method="archive" if is_archive else "live",
+        scrape_pass=r.pass_,
+        extractor_name=EXTRACTOR_NAME,
+        extractor_version=EXTRACTOR_VERSION,
+        http_status=r.http_status,
+        final_locator=final_locator,
+        archive_snapshot_at=r.actual_snapshot_at if is_archive else None,
+        published_at=None,
+        retrieved_at=r.fetched_at,
+        observed_at=identity["observed_at"],
+    )
+
+
+def _sanitized_locator(url: Optional[str]) -> Optional[str]:
+    """``sanitize_url`` for a fetched locator; None when it is rejected."""
+    return sanitize_url(url).sanitized_url if url else None
 
 
 def _upsert_scrape_result(conn: sqlite3.Connection, r: ScrapeResult) -> None:
+    # ``final_url`` is wherever the redirects ended. It can carry a
+    # credential-shaped param the bookmark's own (sanitized) URL never had,
+    # so it is sanitized like every other stored locator.
     conn.execute(_UPSERT_SCRAPE_SQL, {
         "bookmark_id": r.bookmark_id,
         "pass": r.pass_,
@@ -217,7 +473,7 @@ def _upsert_scrape_result(conn: sqlite3.Connection, r: ScrapeResult) -> None:
         "target_timestamp": r.target_timestamp,
         "actual_snapshot_at": r.actual_snapshot_at,
         "archive_url": r.archive_url,
-        "final_url": r.final_url,
+        "final_url": _sanitized_locator(r.final_url),
         "http_status": r.http_status,
         "scrape_status": r.scrape_status,
         "extraction_quality": r.extraction_quality,
@@ -244,11 +500,27 @@ def run_scrape(
     *,
     concurrency: int = 4,
     limit: Optional[int] = None,
+    refresh: bool = False,
+    sources: Optional[Iterable[str]] = None,
 ) -> dict:
     """Synchronous wrapper for ``scrape_all``: opens a connection, runs,
-    closes. For use from ``__main__`` or click commands."""
+    closes. For use from ``__main__`` or click commands. ``refresh``
+    bypasses the live HTTP and robots.txt caches and every CDX lookup that
+    can still change (the recent_archive "latest snapshot" lookup, an
+    at_capture lookup whose window is open), so a changed page is
+    re-captured."""
     conn = connect(db_path)
     try:
-        return asyncio.run(scrape_all(conn, concurrency=concurrency, limit=limit))
+        client = ScrapeClient(refresh=refresh)
+
+        async def _run() -> dict:
+            try:
+                return await scrape_all(
+                    conn, client=client, concurrency=concurrency, limit=limit, sources=sources
+                )
+            finally:
+                await client.close()
+
+        return asyncio.run(_run())
     finally:
         conn.close()

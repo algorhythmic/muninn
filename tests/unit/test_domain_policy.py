@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from muninn.scrape.domain_policy import (
+    DomainPolicy,
     DomainPolicyError,
     load_domain_policy,
 )
@@ -69,3 +70,13 @@ def test_repo_root_default_policy_loads():
     # The canonical checked-in domain_policy.yml must always load cleanly.
     policy = load_domain_policy()
     assert policy is not None
+
+
+def test_path_rules_match_mixed_case_paths():
+    # Patterns are case-insensitive, so a mixed-case URL path must not
+    # escape a lowercase (or mixed-case) path rule.
+    policy = DomainPolicy(path_patterns=("github.com/Private-Org/*",))
+    assert policy.matches("https://github.com/private-org/repo") is True
+    assert policy.matches("https://github.com/PRIVATE-ORG/Repo") is True
+    assert policy.matches("https://GitHub.com/Private-Org/x") is True
+    assert policy.matches("https://github.com/other-org/repo") is False

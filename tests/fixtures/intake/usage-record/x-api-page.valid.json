@@ -1,0 +1,25 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "usage-record",
+    "expect": "valid",
+    "covers": [
+      "X API page read"
+    ],
+    "why": "valid usage record"
+  },
+  "record": {
+    "record_type": "usage-record",
+    "usage_id": "01M5C567W829TT6APT9ZV1K9BB",
+    "kind": "x_api",
+    "provider": "x",
+    "operation": "GET /2/users/:id/bookmarks",
+    "request_count": 1,
+    "resource_count": 2,
+    "cost_micro_usd": 2000,
+    "cost_basis": "estimated",
+    "occurred_at": "2026-10-20T08:00:05Z",
+    "sync_run_id": "01M5C56300PP7M76TABV7SH8FC"
+  }
+}

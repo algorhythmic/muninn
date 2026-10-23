@@ -1,0 +1,14 @@
+# Runs muninn-lint.service weekly. Example unit; not installed by anything.
+# See docs/vault-lint.md ("Cadence").
+
+[Unit]
+Description=Weekly Muninn vault lint
+
+[Timer]
+OnCalendar=Mon *-*-* 07:00:00
+RandomizedDelaySec=15min
+# Catch up after the machine was off at the scheduled time.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

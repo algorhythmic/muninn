@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "synthetic": true,
+    "provenance": "synthetic: invented for muninn-research-intake 0.1.0-draft tests; not recorded data",
+    "schema": "source-item",
+    "expect": "valid",
+    "covers": [
+      "github:repo identity lowercased from a mixed-case locator"
+    ],
+    "why": "valid source item"
+  },
+  "record": {
+    "record_type": "source-item",
+    "item_id": "github:repo:synthetic-org/synthetic-repo",
+    "kind": "github_repo",
+    "locator": "https://github.com/Synthetic-Org/synthetic-repo",
+    "title": "synthetic-org/synthetic-repo",
+    "published_at": null,
+    "repository": {
+      "owner": "synthetic-org",
+      "name": "synthetic-repo"
+    },
+    "redaction": {
+      "param_names": [],
+      "path_redacted": false,
+      "userinfo_redacted": false
+    }
+  }
+}

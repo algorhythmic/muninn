@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 
 from muninn.config import load_paths
+from muninn.db import require_current_schema
 
 
 def build_timeline(
@@ -30,7 +31,8 @@ def build_timeline(
     """
     import duckdb
 
-    sqlite_path = str(db_path or load_paths().db_path)
+    # DuckDB's ATTACH bypasses connect(): check the schema version first.
+    sqlite_path = str(require_current_schema(db_path or load_paths().db_path))
 
     con = duckdb.connect()
     try:

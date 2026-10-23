@@ -56,6 +56,13 @@ async def fetch_at_capture(
         to_ts=to_dt.strftime("%Y%m%d%H%M%S"),
         limit="1",
         cache_key=f"cdx:at_capture:{url}:{captured_at}",
+        # The window ends in the future for a recent bookmark (most X
+        # items): a miss now may be a hit later. Only an answer given after
+        # the window closed is final; before that it ages out like the
+        # recent_archive lookup, and --refresh asks again.
+        settled_at=to_dt.timestamp(),
+        max_age=client.recent_cdx_ttl,
+        bypass_cache=client.refresh,
     )
 
     if not timestamp:

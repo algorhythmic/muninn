@@ -230,3 +230,26 @@ class TestDomainPolicy:
             "SELECT count(*) FROM bookmarks WHERE content_visible = 0"
         ).fetchone()
         assert cur[0] == 0
+
+
+# ── X share params (sanitize Rule 1c) in the browser lane ──────────────
+
+def test_x_share_params_stripped_from_browser_bookmarks(fresh_db, tmp_path):
+    html = tmp_path / "x.html"
+    html.write_text(
+        '<!DOCTYPE NETSCAPE-Bookmark-file-1>\n<DL><p>\n'
+        '<DT><H3 ADD_DATE="1609459200">Era</H3>\n<DL><p>\n'
+        '<DT><A HREF="https://twitter.com/someone/status/1234567890123456789?s=20&amp;t=SyntheticShareTok_0001" '
+        'ADD_DATE="1609459201">A post</A>\n'
+        '<DT><A HREF="https://example.com/watch?s=20&amp;t=90" ADD_DATE="1609459202">Other host</A>\n'
+        '</DL><p>\n</DL><p>\n',
+        encoding="utf-8",
+    )
+    ingest_html(html, fresh_db, DomainPolicy.empty())
+    urls = {r["title"]: r["url"] for r in fresh_db.execute("SELECT title, url FROM bookmarks")}
+    assert urls == {
+        "A post": "https://twitter.com/someone/status/1234567890123456789",
+        "Other host": "https://example.com/watch?s=20&t=90",
+    }
+    rows = repr([tuple(r) for r in fresh_db.execute("SELECT * FROM bookmarks")])
+    assert "SyntheticShareTok" not in rows

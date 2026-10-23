@@ -17,6 +17,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from muninn.sanitize.rules import (
     DANGEROUS_PARAM_NAMES,
     DEFAULT_PORTS,
+    HOST_TRACKING_PARAMS,
     PASSTHROUGH_SCHEMES,
     PATH_CREDENTIAL_PATTERNS,
     REJECTED_SCHEMES,
@@ -119,14 +120,15 @@ def _sanitize(raw_url: object) -> SanitizationResult:
             path = f"/{prefix}/[redacted]"
         break
 
-    # ── Rules 1, 1b, 2: Query params ───────────────────────────────────
-    sanitized_query, query_redacted = _sanitize_kv_string(parsed.query)
+    # ── Rules 1, 1b, 1c, 2: Query params ───────────────────────────────
+    host_tracking = _host_tracking(hostname)
+    sanitized_query, query_redacted = _sanitize_kv_string(parsed.query, host_tracking)
 
     # ── Rule 7: Fragment — same treatment if it looks key=val ──────────
     fragment = parsed.fragment
     fragment_redacted: list[str] = []
     if fragment and "=" in fragment:
-        fragment, fragment_redacted = _sanitize_kv_string(fragment)
+        fragment, fragment_redacted = _sanitize_kv_string(fragment, host_tracking)
 
     redacted_param_names = sorted(set(query_redacted + fragment_redacted))
 
@@ -140,11 +142,23 @@ def _sanitize(raw_url: object) -> SanitizationResult:
     )
 
 
-def _sanitize_kv_string(qs: str) -> tuple[str, list[str]]:
-    """Apply Rules 1, 1b, 2 to a `k=v&k=v…` string.
+def _host_tracking(hostname: str) -> frozenset[str]:
+    """Rule 1c: the extra tracking names stripped on this host."""
+    names: frozenset[str] = frozenset()
+    for host_re, extra in HOST_TRACKING_PARAMS:
+        if host_re.match(hostname):
+            names |= extra
+    return names
+
+
+def _sanitize_kv_string(
+    qs: str, host_tracking: frozenset[str] = frozenset()
+) -> tuple[str, list[str]]:
+    """Apply Rules 1, 1b, 1c, 2 to a `k=v&k=v…` string.
 
     Returns (sorted-and-encoded sanitized string, redacted-name list).
-    Tracking params are dropped silently (not in returned list).
+    Tracking params (global, plus ``host_tracking`` for this host) are
+    dropped silently (not in returned list).
     """
     if not qs:
         return "", []
@@ -157,7 +171,7 @@ def _sanitize_kv_string(qs: str) -> tuple[str, list[str]]:
         lname = name.lower()
 
         # Rule 1b: tracking params — strip silently.
-        if lname in TRACKING_PARAM_NAMES:
+        if lname in TRACKING_PARAM_NAMES or lname in host_tracking:
             continue
 
         # Rule 1: dangerous denylist.

@@ -1,6 +1,6 @@
 """deep_pass task: per-bookmark deep analysis.
 
-Materials passed to the container:
+Materials in the task file:
   - bookmark_id, title, url, captured_at
   - source_text       (canonical pass content; key_quotes verified verbatim)
   - source_pass       (which scrape pass supplied source_text)
@@ -11,8 +11,17 @@ Materials passed to the container:
 DB writes (in order, single transaction):
   1. UPDATE enriched SET summary, tags, entities, content_type, language,
      word_count, key_quotes, deep_pass_requested=0 (the request is now
-     served — clearing it drains the --pending queue), enrichment_model,
-     enrichment_prompt_version, content_hash, enriched_at
+     served — clearing it drains the --pending queue).
+     The per-bookmark idempotency triple (enrichment_model,
+     enrichment_prompt_version, content_hash) and enriched_at are left
+     alone: they record the bulk enrichment, and overwriting them made the
+     next `muninn enrich` re-enrich every deep-passed row (RI-01 D6). Only
+     when no enriched row exists yet does the INSERT record the deep pass's
+     own provenance, since the NOT NULL columns need a value.
+     Then the bookmark's fts_bookmarks row is rewritten from the new
+     summary/tags, so keyword search sees the deep pass. The Qdrant point
+     is left for scripts/reconcile-vector-index.py, which re-embeds any
+     point whose payload no longer matches its enriched row.
   2. INSERT INTO cross_references with created_by='deep_pass' (skipped on
      UNIQUE conflict).
 """
@@ -46,12 +55,15 @@ def prepare_input(
 
     cur.execute(
         "SELECT bookmark_id, title, url, captured_at, era_label, "
-        "       enrichment_source FROM bookmarks WHERE bookmark_id = ?",
+        "       enrichment_source, content_visible FROM bookmarks WHERE bookmark_id = ?",
         (bookmark_id,),
     )
     bm = cur.fetchone()
     if bm is None:
         raise LookupError(f"bookmark_id {bookmark_id} not found")
+    if not bm["content_visible"]:
+        # Hidden by domain policy: its content must never reach a model.
+        raise LookupError(f"bookmark_id {bookmark_id} is hidden by domain policy")
 
     source_text, source_pass = _canonical_content_text(conn, bookmark_id, bm["enrichment_source"])
 
@@ -125,7 +137,8 @@ def write_output(
 
     cur = conn.cursor()
 
-    # 1. Upsert enriched row. UPDATE the deep-pass-overridable columns.
+    # 1. Upsert enriched row. On conflict, UPDATE only the deep-pass
+    #    columns — never the idempotency triple or enriched_at (D6).
     cur.execute(
         """
         INSERT INTO enriched (
@@ -141,11 +154,7 @@ def write_output(
             language                  = excluded.language,
             word_count                = excluded.word_count,
             key_quotes                = excluded.key_quotes,
-            deep_pass_requested       = 0,
-            enrichment_model          = excluded.enrichment_model,
-            enrichment_prompt_version = excluded.enrichment_prompt_version,
-            content_hash              = excluded.content_hash,
-            enriched_at               = excluded.enriched_at
+            deep_pass_requested       = 0
         """,
         (
             bookmark_id,
@@ -162,6 +171,9 @@ def write_output(
             int(time.time()),
         ),
     )
+
+    # 1b. Keep the keyword index in step with the new summary/tags.
+    _refresh_fts(conn, bookmark_id, source_text)
 
     # 2. Cross references — inject created_by='deep_pass', dedupe via UNIQUE.
     for ref in output.get("cross_references") or []:
@@ -182,6 +194,45 @@ def write_output(
                 ref.get("rationale") or _confidence_to_rationale(ref.get("confidence")),
             ),
         )
+
+
+def _refresh_fts(conn: sqlite3.Connection, bookmark_id: int, source_text: str) -> None:
+    """Rewrite the bookmark's ``fts_bookmarks`` row from the enriched row.
+
+    Runs inside the caller's success transaction, so the FTS row and the
+    deep-pass summary commit (or roll back) together. Column values match
+    what :func:`muninn.enrich.pipeline._upsert_enriched_row` writes: the
+    bookmark title, the summary, the content text and the tags JSON. The
+    content text is the text this deep pass read, else the text already
+    indexed. A hidden bookmark (``content_visible = 0``) loses its FTS row
+    instead, as the bulk pipeline never indexes hidden rows.
+
+    The Qdrant point is not touched here (no network inside a SQL
+    transaction): its payload now differs from the row, and
+    ``scripts/reconcile-vector-index.py`` re-embeds every such stale point.
+    """
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT b.title, b.content_visible, e.summary, e.tags "
+        "FROM bookmarks b JOIN enriched e ON e.bookmark_id = b.bookmark_id "
+        "WHERE b.bookmark_id = ?",
+        (bookmark_id,),
+    ).fetchone()
+    previous = cur.execute(
+        "SELECT content_text FROM fts_bookmarks WHERE rowid = ?", (bookmark_id,)
+    ).fetchone()
+    cur.execute("DELETE FROM fts_bookmarks WHERE rowid = ?", (bookmark_id,))
+    if row is None:
+        return
+    title, visible, summary, tags = tuple(row)  # works with or without sqlite3.Row
+    if not visible:
+        return
+    content_text = source_text or (previous[0] if previous else "") or ""
+    cur.execute(
+        "INSERT INTO fts_bookmarks(rowid, title, summary, content_text, tags) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (bookmark_id, title or "", summary or "", content_text, tags or "[]"),
+    )
 
 
 def _canonical_content_text(

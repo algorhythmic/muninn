@@ -1,0 +1,35 @@
+# Muninn interest profile: EXAMPLE ONLY (synthetic).
+#
+# `muninn enrich --task suitability` judges captured items against an
+# interest profile. Your real profile is personal: keep it OUTSIDE this
+# repository and point muninn at it with --profile PATH or the
+# MUNINN_INTEREST_PROFILE environment variable. This file is never read
+# unless you pass it explicitly.
+#
+# Format: the contract's `interest-profile` record without `record_type`
+# (schemas/json/intake/interest-profile.schema.json). Weights are integers
+# 0-100; no floats. The profile's revision is the sha256 of its parsed
+# canonical JSON, so editing comments or whitespace here does not trigger
+# reassessment, but any change to a value does.
+
+profile_id: example-research          # slug: [a-z0-9][a-z0-9_-]*
+label: Example research interests
+version_label: example-v1             # human label only; the digest is the revision
+
+interests:
+  - interest_id: retrieval-eval
+    label: Retrieval evaluation
+    description: Benchmarks and methods for evaluating search over small corpora.
+    weight: 80
+  - interest_id: sqlite-tooling
+    label: SQLite tooling
+    description: Migrations, FTS5 and embedded analytics on SQLite.
+    weight: 60
+  - interest_id: agent-harness
+    label: Agent harnesses
+    description: Tooling that runs coding agents under supervision.
+    weight: 50
+
+exclusions:
+  - exclusion_id: hype
+    description: Announcements without method, code or data.

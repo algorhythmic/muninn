@@ -22,30 +22,23 @@ Intake evidence packet.
 The browser-bookmark pipeline is implemented, but its bulk run is
 **v1.1** (below). Work the items in order; independent items may overlap.
 
-- [ ] **P1 dependency fixes.** *In progress 2026-10-21 on branch `adr-reset-x-first`.* These protect every later item, including the v1.1 bulk scrape.
-  - Pin `selectolax<1`, and make an extraction-backend import failure fatal. Without the pin, a fresh install silently returns `""` and degrades every scrape.
-  - Pin `mcp<2`; `muninn mcp` cannot import on 2.x.
-  - Pass `--prompt-version` through to the prompt loader.
-  - Add a lockfile.
-  - Drop the unused `aiosqlite` and move `pyarrow` to `dev`.
-  - Make the `scrape` imports lazy, and add an import-isolation test.
-
-  See [`RI-01-extension-spike.md`](research-intake/RI-01-extension-spike.md) §6.
-- [ ] **P2 schema migrator.** Add numbered `schemas/sql/NNN_*.sql` files and `PRAGMA user_version`, with backup-before-migrate. Add an explicit `muninn db migrate [--dry-run]`. Have `conftest` create test databases via migrate. This replaces "drop DB, re-ingest" (ADR-009).
+- [x] **P1 dependency fixes.** *Done 2026-10-21 (PR #1, branch `adr-reset-x-first`).* Pins for `selectolax<1`, `mcp<2` and `anthropic` 2.x, a fatal extraction-backend import, `--prompt-version` passthrough, `uv.lock`, `aiosqlite` dropped and `pyarrow` moved to `dev`, lazy `scrape` imports with an import-isolation test. See [`RI-01-extension-spike.md`](research-intake/RI-01-extension-spike.md) §6.
+- [x] **P2 schema migrator.** *Done 2026-10-21 on `x-slice`.* Numbered `schemas/sql/NNN_*.sql`, `PRAGMA user_version`, backup-before-migrate, `muninn db migrate [--dry-run]` and `muninn db status`; `conftest` builds test databases through the migrator. Replaces "drop DB, re-ingest" (ADR-009, RI-01 §4).
 - [ ] **RI-02 X access qualification.**
-  - **Live (operator-run):** create the developer app, run the PKCE flow, and fetch a bounded set of pages. Set a **$5 usage-spend cap**. Results go to dotprivate, not this repo.
-  - **Dev side:** synthetic fixtures from the documented response shapes, and a connector stub with recorded-response tests.
-- [ ] **RI-03 records and producer contract.** Write `muninn-research-intake` 0.1.0-draft: JSON Schema 2020-12 records, valid/invalid fixtures, identity and revision rules, tombstones, and a compatibility policy.
-- [ ] **X ingest adapter and linked-content scrape.**
-  - `muninn ingest x` (`ingest/x.py`) writes `bookmarks` rows with `source='x'`. Linked URLs become their own rows, joined by `item_links`.
-  - Every locator goes through `sanitize_url`.
-  - Linked articles and repositories are fetched by the existing `muninn scrape`. The live pass is the current evidence.
-  - Add append-only `scrape_history`.
-- [ ] **Suitability enrichment and packet export.**
-  - `muninn enrich --task suitability` uses the prompt `suitability_v1`. Its idempotency key is the existing triple plus the interest-profile digest. Results go to an append-only `assessments` table.
-  - `muninn export packets` writes content-addressed JSON that validates against the RI-03 schemas.
-- [ ] **Compile, index and search X pages.** The vault compiler writes X bookmarks to `wiki/bookmarks/`. Index them into Qdrant (EmbeddingGemma, already verified), and verify recall through MCP search.
-- [ ] **Retrieval interface (ADR-014).** Put the MCP search tools behind one small search interface, so a later backend swap (Braid) touches one module. Qdrant stays the v1 backend.
+  - [ ] **Live (operator-run):** create the developer app, run `muninn x auth`, and fetch a bounded set of pages (`muninn ingest x --max-pages 2`). Set a **$5 usage-spend cap**. Results go to dotprivate, not this repo. Settles the open questions in the contract (Article body, folder semantics, history depth, how deleted/protected posts surface, expansion billing).
+  - [x] **Dev side.** *Done 2026-10-21 on `x-slice`.* Synthetic fixtures (`tests/fixtures/x/`) from the documented response shapes, and the connector `ingest/x.py` with recorded-response tests.
+- [x] **RI-03 records and producer contract.** *0.1.0-draft, validated, 2026-10-21 on `x-slice`.* `docs/contracts/MUNINN-RESEARCH-INTAKE.md`: JSON Schema 2020-12 records, valid/invalid fixtures, identity and revision rules, tombstones, compatibility policy and a release manifest. Needs operator and Odin review before 0.1.0.
+- [x] **X ingest adapter and linked-content scrape.** *Code done 2026-10-21 on `x-slice`; no live run yet.*
+  - `muninn ingest x` (`ingest/x_store.py`) writes posts as `source='x'`, articles as `x_article` and linked URLs as `x_link` rows joined by `item_links`; incremental by default, resumable from `sync_checkpoints`, with per-page `usage_records`.
+  - Every locator goes through `sanitize_url`; links hidden by domain policy become `[hidden link]` in stored text.
+  - `muninn scrape` skips X rows, takes `--source` and `--refresh`, writes append-only `scrape_history`, and expires live cache entries (D9).
+- [x] **Suitability enrichment and packet export.** *Code done 2026-10-21 on `x-slice`; no live model run yet.*
+  - `muninn enrich --task suitability` (prompt `suitability_v1`) appends to `assessments`, keyed by content revision + profile digest + policy version + model + prompt version, with `--limit` and `--max-cost-usd`.
+  - `muninn export packets` writes content-addressed JSON validated against the RI-03 schemas; `--withdraw` leaves a tombstone.
+- [x] **Compile, index and search X pages.** *Code done 2026-10-21 on `x-slice`, verified end to end on synthetic data.* X posts, articles and linked items compile to `wiki/bookmarks/` with bidirectional links; they reach FTS5 and Qdrant through the normal enrichment path; recall verified through the MCP tools. Remaining: the same check on the first real sync.
+- [x] **Retrieval interface (ADR-014).** *Done 2026-10-21 on `x-slice`.* `muninn.search`, selected by `MUNINN_SEARCH_BACKEND`; Qdrant + FTS5 stay the v1 backend.
+
+**First real run (operator):** after RI-02a, run `muninn db migrate` on the homelab database, then `muninn ingest x`, `muninn scrape --source x_link`, `muninn enrich`, `muninn enrich --task suitability --limit 20`, `muninn export packets`, `muninn vault compile` and `scripts/reconcile-vector-index.py`, and spot-check recall. Before any bulk model run, make one small real `muninn enrich` call to confirm the Anthropic SDK 2.x path, which no test exercises.
 
 ## v1.1 — browser bookmarks (formerly v1)
 
@@ -68,13 +61,13 @@ tested. The bulk run waits for P1, because of the `selectolax` regression.
 
 Target: make Muninn's saved knowledge available to Claude Code sessions and Claude.ai, and to Odin as a `recall` scope.
 
-- [ ] **Implement the MCP server.** It is bound to the search interface plus the vault filesystem. Entry points:
+- [x] **Implement the MCP server.** *Done 2026-10-21 on `x-slice`* (contract in [`mcp-api.md`](mcp-api.md)). It is bound to the search interface plus the vault filesystem. Entry points:
   - `search(query: str, namespace: str | None, top_k: int = 10)` — semantic + keyword hybrid
   - `get_page(path: str)` — fetch a specific `wiki/*.md` page by path
   - `list_namespace(namespace: str)` — enumerate pages in a namespace with one-line summaries
-- [ ] **Expose MCP over Tailscale.** The MCP endpoint is reachable on the tailnet only, with no public internet exposure.
+- [ ] **Expose MCP over Tailscale.** The MCP endpoint is reachable on the tailnet only, with no public internet exposure. *Code side done 2026-10-21:* `muninn mcp --transport http [--host H] [--port P] [--allowed-host NAME]` (streamable HTTP, loopback by default, no auth layer). Remaining (operator): `tailscale serve` / ACLs on the homelab host.
 - [ ] **Wire up the Claude.ai remote MCP connector.** Register Muninn as a custom connector, for recall over saved knowledge. Project truth lives in Odin (ADR-011).
-- [ ] **Document the MCP contract.** Write `docs/mcp-api.md` for consumers (Odin recall, Claude sessions) and for operator debugging.
+- [x] **Document the MCP contract.** *Done 2026-10-21:* [`mcp-api.md`](mcp-api.md). Write `docs/mcp-api.md` for consumers (Odin recall, Claude sessions) and for operator debugging.
 
 ## Phase 3 — removed
 
@@ -88,9 +81,9 @@ This phase comes after the X slice. Synthesis (era narratives, deep passes, ad-h
 - Muninn validates the result file and writes it to the database.
 - The default runner is a direct Anthropic API call with an explicit budget. Any operator-chosen harness can run the same task file instead (a local Claude Code session, or an Odin-dispatched session).
 
-- [ ] **Define the contract.** Specify the task and result file layout. Fix `task-input.schema.json`, which rejects the orchestrator's `attempt` field. Specify how a run is triggered: `muninn synthesize … --emit-task` / `--ingest-result`.
-- [ ] **Implement the budgeted API runner.** Add per-run and monthly caps, use the batch API where latency allows, and persist usage.
-- [ ] **Retire the Saga-style container path.** Remove `containers/synthesis/`, `scripts/launch-synthesis.sh` and the credentials-volume config once the contract lands.
+- [x] **Define the contract.** *Done 2026-10-21 on `x-slice`:* `muninn-synthesis/1` in [`synthesis-contract.md`](synthesis-contract.md); `muninn synthesize … --emit-task DIR` and `muninn synthesize ingest-result FILE`; `task-input.schema.json` accepts `attempt`.
+- [x] **Implement the budgeted API runner.** *Done 2026-10-21 on `x-slice`:* per-run `--max-cost-usd` (default $3) and a required monthly cap, pre-call worst-case check, measured usage in `usage_records`. The Batch API and structured outputs remain future work.
+- [x] **Retire the Saga-style container path.** *Done 2026-10-21:* `containers/synthesis/`, `scripts/launch-synthesis.sh`, `synthesis/container.py` and the credentials-volume config are removed.
 - [ ] **Synthesis use cases.**
   - *Era narratives:* "summarize my reading on [topic] over [period]".
   - *Deep pass:* flagged bookmarks get a longer summary plus key quotes.
@@ -104,11 +97,11 @@ This phase comes after the X slice. Synthesis (era narratives, deep passes, ad-h
 
 This is Karpathy's "Lint" operation: periodic vault hygiene.
 
-- [ ] **Contradiction detection.** A synthesis-tier pass over pages that share tags flags contradictions inline with `<!-- contradiction: {other_page} -->` comments.
-- [ ] **Orphan detection.** Pages with zero inbound links get flagged for review or concept extraction.
-- [ ] **Stale claim supersession.** When a new ingest contradicts an existing page, the older claim gets a `superseded_at:` frontmatter field. Both versions remain, and git history preserves the original.
-- [ ] **Missing cross-reference suggestion.** When a page mentions an entity that exists elsewhere in the vault but isn't linked, the lint pass suggests the link.
-- [ ] **Cadence.** Weekly, or on demand from the CLI.
+- [x] **Contradiction detection.** A synthesis-tier pass over pages that share tags flags contradictions inline with `<!-- contradiction: {other_page} -->` comments. *Done 2026-10-23 on `x-slice`:* `muninn synthesize lint --tag TAG` (a `muninn-synthesis/1` task, budgeted like the others); findings live in SQLite (migration 003) and the compiler renders them only into compiled `wiki/bookmarks/` pages. See [`vault-lint.md`](vault-lint.md).
+- [x] **Orphan detection.** Pages with zero inbound links get flagged for review or concept extraction. *Done 2026-10-23:* `muninn lint` (deterministic, read-only), which also reports unresolved links.
+- [x] **Stale claim supersession.** When a new ingest contradicts an existing page, the older claim gets a `superseded_at:` frontmatter field. Both versions remain, and git history preserves the original. *Done 2026-10-23:* the same lint task's `supersedes` relation; the compiler adds `superseded_at:` and `superseded_by:` to the older compiled page. Authored pages are never edited.
+- [x] **Missing cross-reference suggestion.** When a page mentions an entity that exists elsewhere in the vault but isn't linked, the lint pass suggests the link. *Done 2026-10-23:* `muninn lint` suggests links to concepts/infra/people/projects pages (report-only).
+- [x] **Cadence.** Weekly, or on demand from the CLI. *Done 2026-10-23:* on demand via the CLI; an example weekly systemd user timer for the deterministic lint is in `deploy/systemd/` (not installed; the model tier stays manual because it spends money). Remaining (operator): install the timer on the homelab host.
 
 ## Post-X
 
@@ -125,7 +118,7 @@ This is Karpathy's "Lint" operation: periodic vault hygiene.
 
 | Item | Notes |
 |---|---|
-| Session pages from Skald's archive feed | A batch summarizer turns Skald's verbatim transcript archive into curated `wiki/sessions/` pages, as a captured-lane source (ADR-011). It replaces the retired `/note` skill |
+| Session pages from Skald's archive feed | A batch summarizer turns Skald's verbatim transcript archive into curated `wiki/sessions/` pages, as a captured-lane source (ADR-011). It replaces the retired `/note` skill. **Depends on:** Skald publishing its archive-feed contract (`ARCHIVE-FEED-V1`, a candidate as of 2026-10-21) so muninn reads pinned feed files rather than Skald's socket; and Skald enrolling every login whose sessions matter (each Claude Code login's `projects/` root is a separate `skald connect --root`). Live progress of a running session is not this item's job; agents read the source transcript directly for that |
 | Other saved-material sources | YouTube, Reddit, Instagram, GitHub stars, Pocket/Pinboard exports. Each is one adapter into the source-agnostic `bookmarks` table |
 
 ## Feature backlog — design complete, not yet scheduled
