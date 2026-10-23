@@ -161,6 +161,16 @@ def test_link_forms_resolve(link: str) -> None:
     assert "wiki/concepts/target page.md" not in {o["page"] for o in report.orphans}
 
 
+def test_frontmatter_property_links_count_as_inbound() -> None:
+    target = build_page("wiki/bookmarks/older-1.md", "---\npage_type: bookmark\n---\n# Older\n")
+    source = build_page(
+        "wiki/bookmarks/newer-2.md",
+        '---\npage_type: bookmark\nsuperseded_by: ["[[older-1]]"]\n---\n# Newer\n',
+    )
+    report = lint_pages([target, source])
+    assert "wiki/bookmarks/older-1.md" not in {o["page"] for o in report.orphans}
+
+
 def test_links_in_code_and_comments_do_not_count() -> None:
     target = build_page("wiki/concepts/target.md", "# Target\n")
     source = build_page(

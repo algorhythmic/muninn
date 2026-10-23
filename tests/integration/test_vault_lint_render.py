@@ -168,3 +168,18 @@ def test_compiled_pages_keep_the_compiler_marker(db_file: Path, tmp_path: Path) 
     _compile(db_file, out)
     for name in (V1, POST):
         assert is_compiled_page(out / "wiki" / "bookmarks" / name)
+
+
+def test_deterministic_lint_reads_a_compiled_vault_without_changing_it(db_file: Path, tmp_path: Path) -> None:
+    from muninn.consumers.vault.lint import lint_vault
+
+    _lint(db_file, SUPERSEDES, CONTRADICTS)
+    out = tmp_path / "vault"
+    _compile(db_file, out)
+    before = {p: p.read_bytes() for p in sorted(out.rglob("*.md"))}
+    report = lint_vault(out)
+    assert {p: p.read_bytes() for p in sorted(out.rglob("*.md"))} == before
+    assert report.lanes == {"captured": 4, "authored": 0}
+    assert report.unresolved == []
+    # v2 is linked from v1's superseded_by property; only the unrelated page is an orphan.
+    assert [o["page"] for o in report.orphans] == ["wiki/bookmarks/unrelated-5.md"]

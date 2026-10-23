@@ -27,7 +27,8 @@ Links resolve the way Obsidian does: ``[[target]]``, ``[[target|display]]``,
 ``[[target#heading]]``, ``[[target#^block]]``, ``![[embed]]``, a path
 (``[[concepts/foo]]``, ``[[wiki/concepts/foo]]``) or a file name,
 case-insensitively, with or without ``.md``; a page's ``aliases`` resolve
-too. Relative Markdown links to ``.md`` files count as links.
+too. Relative Markdown links to ``.md`` files count as links, and so do
+wikilinks in frontmatter values (Obsidian property links).
 
 Stdlib only at import time; the vault guard (the compiler's) is imported
 when the vault is resolved.
@@ -222,7 +223,13 @@ def build_page(rel: str, text: str) -> Page:
     prose = _FENCE_RE.sub(_blank, body)
     prose = _INLINE_CODE_RE.sub(_blank, prose)
     prose = _COMMENT_RE.sub(_blank, prose)
-    links: list[Link] = []
+    # Wikilinks in frontmatter values are Obsidian property links
+    # (``superseded_by: ["[[page]]"]``): they count as links too.
+    frontmatter = text[:body_start]
+    links: list[Link] = [
+        Link(_split_link(m.group(1)), _line_at(frontmatter, m.start(), 1), "wikilink")
+        for m in _WIKILINK_RE.finditer(frontmatter)
+    ]
     for m in _WIKILINK_RE.finditer(prose):
         links.append(Link(_split_link(m.group(1)), _line_at(prose, m.start(), body_line), "wikilink"))
     for m in _MDLINK_RE.finditer(prose):

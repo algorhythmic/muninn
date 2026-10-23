@@ -125,6 +125,14 @@ def test_rerun_with_unchanged_inputs_does_not_pay(db):
     assert _count(db, "usage_records") == usage_before
     assert _count(db, "synthesis_runs") == 1
 
+    # A dated snapshot served for the requested alias counts as the same model.
+    conn_model = db.execute("SELECT DISTINCT model FROM lint_pair_checks").fetchall()
+    assert [r[0] for r in conn_model] == ["claude-opus-5-5"]
+    db.execute("UPDATE lint_pair_checks SET model = 'claude-opus-5-5-20261001'")
+    snap = fake_client(message(lint_output()))
+    assert run_lint("llm", conn=db, runner=ApiRunner(snap)).status == "up_to_date"
+    assert snap.messages.stream.call_count == 0
+
     # Another model has not checked these pairs: it would pay.
     other = fake_client(message(lint_output(), model="claude-sonnet-5-5"))
     assert run_lint("llm", conn=db, runner=ApiRunner(other, model="claude-sonnet-5-5")).status == "completed"

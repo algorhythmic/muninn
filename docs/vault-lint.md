@@ -50,7 +50,8 @@ Links resolve the way Obsidian resolves them, case-insensitively:
 - `[[concepts/target]]` and `[[wiki/concepts/target]]` by path, or by a path suffix;
 - a page's frontmatter `aliases` (or `alias`), as an inline list `[a, b]` or a block list of `- a` lines;
 - `[[target\|display]]` inside a table (the escaped pipe);
-- relative Markdown links to `.md` files, `[text](../concepts/target.md#x)`, resolved from the linking page's directory.
+- relative Markdown links to `.md` files, `[text](../concepts/target.md#x)`, resolved from the linking page's directory;
+- wikilinks in frontmatter values (Obsidian property links, such as `superseded_by: ["[[page]]"]`).
 
 When two pages share a name, the one in the linking page's directory wins, then the shorter path, then path order. `[[#Heading]]` and a page's links to itself are not inbound links. Links inside code (fenced blocks and inline spans) and HTML comments are not links.
 
@@ -153,7 +154,7 @@ A failure gets the contract's single correction retry, as the other tasks do.
 
 Both tables are append-only, and their rows cascade away with a deleted bookmark.
 
-**Idempotency.** Before building a task, muninn checks every pair of the selected pages. If each pair was already checked with the same two content hashes and the same prompt version, it makes no call and builds no task, and the command reports `up to date`. For an API run, the model must match too; an emitted task matches any model. A changed page (new text, new summary, a link newly hidden), a new prompt version or another model re-opens the pairs it affects. Re-running with unchanged inputs never pays twice.
+**Idempotency.** Before building a task, muninn checks every pair of the selected pages. If each pair was already checked with the same two content hashes and the same prompt version, it makes no call and builds no task, and the command reports `up to date`. For an API run, the model must match too (the requested id, or a dated snapshot of it that the API served); an emitted task matches any model. A changed page (new text, new summary, a link newly hidden), a new prompt version or another model re-opens the pairs it affects. Re-running with unchanged inputs never pays twice.
 
 **Budget.** The same as every synthesis task: the per-run `--max-cost-usd` (default $3.00), and the required monthly `MUNINN_SYNTHESIS_MONTHLY_BUDGET_USD`. The worst case is checked before the call, and a call that doesn't fit is never made (`cap_hit`). Usage is recorded as `synthesize:lint`.
 

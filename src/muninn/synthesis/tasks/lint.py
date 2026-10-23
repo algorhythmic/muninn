@@ -214,7 +214,8 @@ def pending_pairs(
     model: str | None = None,
 ) -> list[tuple[int, int]]:
     """Pairs not yet checked with these two content hashes under this
-    prompt version (and model, when given). Empty means re-running would
+    prompt version (and model, when given: the id itself or a dated
+    snapshot of it, ``<model>-<digits…>``). Empty means re-running would
     pay for nothing new."""
     ids = sorted({p["bookmark_id"] for p in pages})
     if not ids:
@@ -225,8 +226,10 @@ def pending_pairs(
     )
     params: list[Any] = [prompt_version, *ids]
     if model is not None:
-        sql += " AND model = ?"
-        params.append(model)
+        # The row records the served model: the requested id, or a dated
+        # snapshot of it when the API resolves an alias.
+        sql += " AND (model = ? OR model GLOB ?)"
+        params += [model, f"{model}-[0-9]*"]
     done = {tuple(r) for r in conn.execute(sql, params)}
     return [
         (a["bookmark_id"], b["bookmark_id"])
