@@ -83,23 +83,36 @@ def not_found(path: str) -> VaultAccessError:
 def vault_wiki_dir() -> Path:
     """Resolved ``<MUNINN_VAULT_DIR>/wiki``, after the personal-vault guard."""
     paths = load_paths()
-    if paths.vault_dir is None:
+    return resolve_wiki_dir(paths.vault_dir, paths.personal_vault_dir)
+
+
+def resolve_wiki_dir(
+    vault_dir: Path | None, personal_dir: Path | None, *, action: str = "serve"
+) -> Path:
+    """Resolved ``<vault_dir>/wiki``, after the personal-vault guard.
+
+    The guard is the compiler's (SPEC Decision 2): the vault must not
+    equal, contain or sit inside ``personal_dir``, and neither may its
+    ``wiki/`` once symlinks are resolved. ``action`` only words the
+    refusal ("refusing to <action> the vault"). Used by the MCP server
+    (:func:`vault_wiki_dir`) and by ``muninn lint``."""
+    if vault_dir is None:
         raise VaultAccessError("vault_unconfigured", "MUNINN_VAULT_DIR is not set")
     from muninn.consumers.vault.compiler import (  # lazy: pulls in Jinja
         VaultPathConflictError,
         _validate_vault_paths,
     )
 
-    root = paths.vault_dir.resolve()
+    root = Path(vault_dir).expanduser().resolve()
     wiki = (root / "wiki").resolve()
     try:
-        _validate_vault_paths(root, paths.personal_vault_dir)
+        _validate_vault_paths(root, personal_dir)
         # wiki/ itself may be a symlink; what it points at is what we serve.
-        _validate_vault_paths(wiki, paths.personal_vault_dir)
+        _validate_vault_paths(wiki, personal_dir)
     except VaultPathConflictError:
         raise VaultAccessError(
             "vault_conflict",
-            "MUNINN_VAULT_DIR overlaps MUNINN_PERSONAL_VAULT_DIR; refusing to serve the vault",
+            f"MUNINN_VAULT_DIR overlaps MUNINN_PERSONAL_VAULT_DIR; refusing to {action} the vault",
         ) from None
     if not wiki.is_relative_to(root):
         raise VaultAccessError("vault_unconfigured", "the vault's wiki/ resolves outside the vault")
@@ -443,6 +456,7 @@ __all__ = [
     "page_info",
     "page_parts",
     "read_page",
+    "resolve_wiki_dir",
     "resolve_page",
     "scan_namespaces",
     "scan_terms",

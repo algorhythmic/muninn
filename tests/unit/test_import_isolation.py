@@ -39,6 +39,7 @@ HEAVY = (
         "muninn.search.hybrid",
         "muninn.consumers.mcp.tools",
         "muninn.consumers.mcp.vault_fs",
+        "muninn.consumers.vault.lint",
         "muninn.intake_records",
         "muninn.revisions",
     ],

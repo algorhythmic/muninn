@@ -949,6 +949,58 @@ def vault_compile_cmd(
     click.echo(f"Compiled {report.written} vault page(s); removed {len(report.removed)} stale page(s).")
 
 
+@cli.command("lint")
+@click.option(
+    "--vault", "vault_dir", default=None, type=click.Path(file_okay=False),
+    help="Compiled vault root to lint (default: $MUNINN_VAULT_DIR).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Print the report as JSON.")
+@click.option(
+    "--report", "report_path", default=None, type=click.Path(dir_okay=False),
+    help="Write the report to FILE (outside the vault) and print a one-line summary.",
+)
+@click.option("--strict", is_flag=True, help="Exit 1 when there is any finding.")
+def lint_cmd(vault_dir: str | None, as_json: bool, report_path: str | None, strict: bool) -> None:
+    """Lint the compiled vault: orphans, missing links, broken links.
+
+    Model-free and read-only: it never edits a vault file, authored or
+    compiled. Refuses a vault that overlaps MUNINN_PERSONAL_VAULT_DIR.
+    See docs/vault-lint.md. (Contradictions and superseded claims are the
+    model tier: `muninn synthesize lint --tag TAG`.)
+    """
+    from pathlib import Path
+
+    from muninn.config import load_paths  # lazy
+    from muninn.consumers.mcp.vault_fs import VaultAccessError  # lazy
+    from muninn.consumers.vault.lint import lint_vault, render_json, render_text  # lazy
+
+    try:
+        report = lint_vault(vault_dir)
+    except VaultAccessError as exc:
+        raise click.ClickException(str(exc)) from exc
+    output = render_json(report) if as_json else render_text(report)
+    if report_path is None:
+        click.echo(output, nl=False)
+    else:
+        target = Path(report_path).expanduser().resolve()
+        personal = load_paths().personal_vault_dir
+        for root, what in ((Path(report.vault), "the vault"), (personal, "the personal vault")):
+            if root is not None and target.is_relative_to(Path(root).resolve()):
+                raise click.ClickException(
+                    f"--report {target} is inside {what}; lint never writes a vault file"
+                )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(output, encoding="utf-8")
+        tmp.replace(target)
+        click.echo(
+            f"Vault lint: {len(report.orphans)} orphan(s), {len(report.suggestions)} suggested "
+            f"link(s), {len(report.unresolved)} unresolved link(s); report: {report_path}"
+        )
+    if strict and report.finding_count:
+        sys.exit(1)
+
+
 @cli.command("mcp")
 @click.option(
     "--transport",
