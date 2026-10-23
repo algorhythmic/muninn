@@ -36,7 +36,19 @@ the task and differ, and the pair is one of ``pairs``; a ``supersedes`` finding'
 strictly after ``other_bookmark_id``; every evidence quote names one of
 the finding's two pages and occurs in that page's ``text`` or ``summary``
 (exactly, or with different whitespace), never across a masked locator;
-each of the two pages is quoted at least once.
+each of the two pages is quoted at least once; the rationale is plain text
+(:data:`RATIONALE_FORBIDDEN`: no HTML or comment markup, no wikilinks, no
+URLs), because the compiler renders it into vault pages.
+
+Third pages: a task shows the model every page in its pairs, so a
+rationale may paraphrase a page other than its finding's two. The task's
+page set is recorded implicitly: it is the union of the task's
+``lint_pair_checks`` pairs (exactly its ``materials.pages``). A task is
+*tainted* (:func:`tainted_tasks`) once any page of that set is no longer
+visible: its findings stop rendering, and a pair on which it found
+something is pending again, so a re-check without the hidden page can
+restore the finding. (No code path deletes a bookmark row; a manually
+deleted page's checks cascade away, so it can't taint.)
 
 DB writes (single transaction, through the orchestrator):
   1. INSERT one ``lint_pair_checks`` row per pair of ``pairs``, finding or
@@ -73,6 +85,10 @@ MIN_PAGES = 2
 TEXT_LIMIT = 4000
 SUMMARY_LIMIT = 2000
 RELATIONS = ("contradicts", "supersedes")
+#: A rationale containing any of these is rejected: it is rendered into a
+#: compiled page, where ``<!--`` would hide the rest of the page, ``[[…]]``
+#: would become a link and a URL could name a since-hidden item.
+RATIONALE_FORBIDDEN = ("<", ">", "[[", "]]", "://")
 
 _MASKS = (x_pages.HIDDEN_LINK_TEXT, x_pages.ENRICHMENT_WITHHELD)
 
@@ -271,7 +287,7 @@ def pending_pairs(
     if not ids:
         return []
     sql = (
-        "SELECT bookmark_id_a, bookmark_id_b, content_hash_a, content_hash_b FROM lint_pair_checks "
+        "SELECT bookmark_id_a, bookmark_id_b, content_hash_a, content_hash_b, task_id FROM lint_pair_checks "
         f"WHERE prompt_version = ? AND bookmark_id_a IN ({','.join('?' * len(ids))})"
     )
     params: list[Any] = [prompt_version, *ids]
@@ -280,12 +296,56 @@ def pending_pairs(
         # snapshot of it when the API resolves an alias.
         sql += " AND (model = ? OR model GLOB ?)"
         params += [model, f"{model}-[0-9]*"]
-    done = {tuple(r) for r in conn.execute(sql, params)}
+    rows = [tuple(r) for r in conn.execute(sql, params)]
+    # A check from a tainted task (it showed the model a page hidden since)
+    # no longer counts for a pair it found something on: that finding
+    # stops rendering, so the pair is judged again without the hidden page.
+    tainted = tainted_tasks(conn, {r[4] for r in rows})
+    voided = _finding_pairs(conn, tainted)
+    done = {r[:4] for r in rows if (r[4], r[0], r[1]) not in voided}
     return [
         (a["bookmark_id"], b["bookmark_id"])
         for a, b in page_pairs(pages)
         if (a["bookmark_id"], b["bookmark_id"], a["content_hash"], b["content_hash"]) not in done
     ]
+
+
+def _chunks(values: Iterable[Any], size: int = 500) -> Iterable[list[Any]]:
+    items = sorted(set(values))
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
+def tainted_tasks(conn: sqlite3.Connection, task_ids: Iterable[str]) -> set[str]:
+    """The lint tasks among ``task_ids`` that showed the model a page that
+    is no longer visible (a page of any of the task's checked pairs)."""
+    out: set[str] = set()
+    for chunk in _chunks(task_ids):
+        marks = ",".join("?" * len(chunk))
+        out.update(
+            r[0] for r in conn.execute(
+                "SELECT c.task_id FROM lint_pair_checks c JOIN bookmarks b ON b.bookmark_id = c.bookmark_id_a "
+                f"WHERE b.content_visible = 0 AND c.task_id IN ({marks}) "
+                "UNION SELECT c.task_id FROM lint_pair_checks c JOIN bookmarks b ON b.bookmark_id = c.bookmark_id_b "
+                f"WHERE b.content_visible = 0 AND c.task_id IN ({marks})",
+                [*chunk, *chunk],
+            )
+        )
+    return out
+
+
+def _finding_pairs(conn: sqlite3.Connection, task_ids: set[str]) -> set[tuple[str, int, int]]:
+    """(task_id, lower id, higher id) of every finding of ``task_ids``."""
+    out: set[tuple[str, int, int]] = set()
+    for chunk in _chunks(task_ids):
+        out.update(
+            (r[0], r[1], r[2]) for r in conn.execute(
+                "SELECT task_id, min(bookmark_id, other_bookmark_id), max(bookmark_id, other_bookmark_id) "
+                f"FROM lint_findings WHERE task_id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            )
+        )
+    return out
 
 
 # ── validation ─────────────────────────────────────────────────────
@@ -336,6 +396,12 @@ def validate_output(output: dict[str, Any], materials: dict[str, Any]) -> list[s
                 "(it was already checked; judge only the listed pairs)"
             )
             continue
+        bad = [s for s in RATIONALE_FORBIDDEN if s in (finding.get("rationale") or "")]
+        if bad:
+            errors.append(
+                f"{where}: the rationale must be plain text; it contains {', '.join(repr(s) for s in bad)} "
+                "(no HTML or comment markup, no [[links]], no URLs)"
+            )
         if finding.get("relation") == "supersedes" and not pages[a]["dated_at"] > pages[b]["dated_at"]:
             errors.append(
                 f"{where}: supersedes needs bookmark_id {a} (dated {pages[a]['dated_at']}) to be newer "

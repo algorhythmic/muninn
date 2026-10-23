@@ -258,6 +258,20 @@ def test_a_finding_on_a_pair_that_was_not_asked_about_is_rejected(db):
     assert [tuple(r) for r in rows] == [(1, 6), (2, 6), (3, 6)]
 
 
+def test_a_hidden_page_reopens_only_the_pairs_its_task_found_something_on(db):
+    _add_page(db, 6, ["llm"], "Unrelated claims about tokenizers.", _t(60))
+    assert run_lint("llm", conn=db, runner=ApiRunner(fake_client(message(lint_output(SUPERSEDES))))).status == "completed"
+    assert lint_task.prepare_input(db, "llm")["pairs"] == []
+    # Page 3 was in that task. Once it is hidden, the task is tainted: its
+    # finding on (1, 2) is re-opened; its empty verdicts on (1, 6) and
+    # (2, 6) still stand, so they are not paid for again.
+    db.execute("UPDATE bookmarks SET content_visible = 0 WHERE bookmark_id = 3")
+    db.commit()
+    task_id = db.execute("SELECT DISTINCT task_id FROM lint_pair_checks").fetchone()[0]
+    assert lint_task.tainted_tasks(db, [task_id]) == {task_id}
+    assert lint_task.prepare_input(db, "llm")["pairs"] == [[1, 2]]
+
+
 def test_task_pairs_of_a_legacy_task_without_a_pair_list_are_all_pairs(db):
     pages = lint_task.prepare_input(db, "llm")["pages"]
     assert lint_task.task_pairs({"tag": "llm", "pages": pages}) == {(1, 2), (1, 3), (2, 3)}
@@ -298,6 +312,14 @@ def test_budget_refusal_makes_no_call_and_writes_no_findings(db, monkeypatch):
          "findings[0]: bookmark id(s) [4] are not pages of this task"),
         (finding("contradicts", 2, 2, [(2, "Version 2"), (2, "one hour")]),
          "findings[0]: bookmark_id and other_bookmark_id are the same page"),
+        (finding("contradicts", 1, 3, [(1, "caches prompts"), (3, "never works")], "Odd. <!-- hide"),
+         "findings[0]: the rationale must be plain text; it contains '<'"),
+        (finding("contradicts", 1, 3, [(1, "caches prompts"), (3, "never works")], "As -->"),
+         "findings[0]: the rationale must be plain text; it contains '>'"),
+        (finding("contradicts", 1, 3, [(1, "caches prompts"), (3, "never works")], "See [[other-page]]."),
+         "findings[0]: the rationale must be plain text; it contains '[[', ']]'"),
+        (finding("contradicts", 1, 3, [(1, "caches prompts"), (3, "never works")], "Per https://e.example/x."),
+         "findings[0]: the rationale must be plain text; it contains '://'"),
     ],
 )
 def test_evidence_and_pair_checks_fail_validation_then_retry(db, bad, expected):

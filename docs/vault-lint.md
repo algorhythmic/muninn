@@ -162,7 +162,8 @@ The result must validate against `schemas/json/lint.schema.json`. Muninn then ch
 - the pair is one of `materials.pairs`: a finding on any other pair, even between two pages of the task, is rejected;
 - for `supersedes`, the newer page's `dated_at` is strictly later than the older page's;
 - every evidence quote names one of the pair, and occurs in that page's `text` or `summary`, either exactly or with different whitespace (the stored span is kept). A quote across `[hidden link]` is rejected;
-- each of the two pages is quoted at least once.
+- each of the two pages is quoted at least once;
+- the rationale is plain text: it has no `<` or `>` (so no HTML and no `<!--` or `-->`), no `[[` or `]]`, and no `://` (no URL can name an item hidden later).
 
 A failure gets the contract's single correction retry, as the other tasks do.
 
@@ -183,14 +184,17 @@ Both tables are append-only, and their rows cascade away with a deleted bookmark
 
 - both pages are still visible;
 - both pages' content hashes still match;
-- the finding belongs to the latest check of that pair with those hashes (a later re-check that finds nothing clears it).
+- the finding belongs to the latest check of that pair with those hashes (a later re-check that finds nothing clears it);
+- every page its task showed the model is still visible. A task holds every page of its pairs, so a rationale could paraphrase a page other than the finding's two. The task's page set is the union of its `lint_pair_checks` pairs. Once any of those pages is hidden, none of the task's findings renders, and each pair it found something on is pending again, so the next `muninn synthesize lint` re-judges it without the hidden page. Its pairs without a finding stay checked.
+
+The rationale is rendered as inert text: it is escaped again at render time (`\`, `[` and `]` with a backslash, `&`, `<` and `>` as entities), so even a row written before the ingest check can't open a comment, a link or an embed. Evidence quotes are stored in `evidence_json` but never rendered.
 
 | Relation | Rendered on | What |
 |---|---|---|
 | `contradicts` | both pages | an inline `<!-- contradiction: {other_page} -->` comment, then a visible `> [!warning] Possible contradiction` callout linking the other page, with the rationale |
 | `supersedes` | the older page | `superseded_at:` (the earliest superseding page's `dated_at`) and `superseded_by: ["[[newer-page]]"]` in frontmatter, plus a `> [!note] Superseded` callout |
 
-The callouts go under the page's `# ` heading. Both pages stay, and the older claim is not removed. The vault's git history keeps every compiled version. A hidden page takes its findings, and their model-written rationale, off the other page too.
+The callouts go under the page's `# ` heading. Both pages stay, and the older claim is not removed. The vault's git history keeps every compiled version. A hidden page takes its findings, and their model-written rationale, off the other page too, and with them every finding of a task that showed it to the model.
 
 ## Cadence
 

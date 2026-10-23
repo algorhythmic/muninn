@@ -60,7 +60,9 @@ pair and relation once. A finding on a pair that is not in
    `supersedes`, why the newer claim replaces the older one. At most 500
    characters. It is about the finding's two pages only: do not mention,
    quote or paraphrase any other page. Do not repeat a hidden link or
-   guess at what it was.
+   guess at what it was. It is plain text, shown to a reader in a vault
+   page: no `<` or `>`, no `[[` or `]]`, and no URLs. A rationale with any
+   of these fails validation.
 5. Fill `synthesis_metadata`: `model` is your model id, `prompt_version`
    is the task's `prompt_version`, and the token counts are your best
    measurement (0 when you cannot measure them; a runner that can measure

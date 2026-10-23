@@ -13,7 +13,16 @@ A finding is rendered while it is **current**:
   summary or masking changed shows nothing until it is linted again;
 - it belongs to the latest check of that pair with those hashes, so a
   re-check under a new prompt version or model that finds nothing clears
-  it.
+  it;
+- every page its task showed the model is still visible
+  (:func:`muninn.synthesis.tasks.lint.tainted_tasks`): the rationale may
+  paraphrase a page other than the finding's two, so a task that saw a
+  page hidden since renders nothing.
+
+The rationale is model text derived from scraped pages. Ingest rejects
+markup in it, and :func:`escape_rationale` escapes it again here (defence
+in depth, and for rows written before that check). Evidence quotes are
+stored but never rendered.
 
 Rendering (pages with no current finding are byte-identical to before):
 
@@ -39,6 +48,16 @@ from muninn.consumers.vault.x_pages import has_table
 
 _FRONTMATTER_END_RE = re.compile(r"\A---\n.*?\n(?=---\n)", re.S)
 _H1_LINE_RE = re.compile(r"^# .*\n(?:\n)?", re.M)
+_ESCAPES = {"\\": "\\\\", "&": "&amp;", "<": "&lt;", ">": "&gt;", "[": "\\[", "]": "\\]"}
+_ESCAPE_RE = re.compile("|".join(re.escape(c) for c in _ESCAPES))
+
+
+def escape_rationale(text: str) -> str:
+    """Model-written text as inert Markdown inside a callout line: one line,
+    and no HTML, comment, link or embed markup (``<!--`` can't hide the
+    page, ``[[x]]`` and ``![x](url)`` are not links). Text without any of
+    ``\\ & < > [ ]`` is unchanged."""
+    return _ESCAPE_RE.sub(lambda m: _ESCAPES[m.group(0)], " ".join(text.split()))
 
 
 @dataclass(frozen=True)
@@ -53,7 +72,7 @@ def load_lint_notes(conn: sqlite3.Connection, visible_ids: set[int]) -> dict[int
     """Current findings, as notes keyed by the page they render on."""
     if not has_table(conn, "lint_findings"):
         return {}
-    from muninn.synthesis.tasks.lint import current_pages  # lazy: the task module
+    from muninn.synthesis.tasks.lint import current_pages, tainted_tasks  # lazy: the task module
 
     findings = conn.execute(
         "SELECT lint_finding_id, relation, bookmark_id, other_bookmark_id, content_hash, "
@@ -64,6 +83,7 @@ def load_lint_notes(conn: sqlite3.Connection, visible_ids: set[int]) -> dict[int
     if not findings:
         return {}
     pages = current_pages(conn, {f["bookmark_id"] for f in findings} | {f["other_bookmark_id"] for f in findings})
+    tainted = tainted_tasks(conn, {f["task_id"] for f in findings})
 
     latest: dict[tuple[int, int, str, str], str | None] = {}
 
@@ -89,11 +109,13 @@ def load_lint_notes(conn: sqlite3.Connection, visible_ids: set[int]) -> dict[int
         hashes = (pages[lo]["content_hash"], pages[hi]["content_hash"])
         if latest_check(lo, hi, *hashes) != f["task_id"]:
             continue  # a later check of this pair superseded this verdict
+        if f["task_id"] in tainted:
+            continue  # its task saw a page hidden since: the rationale may paraphrase it
         current[(f["relation"], a, b)] = f  # ordered by id: the latest wins
 
     notes: dict[int, list[LintNote]] = {}
     for (relation, a, b), f in current.items():
-        rationale = " ".join((f["rationale"] or "").split())
+        rationale = escape_rationale(f["rationale"] or "")
         if relation == "contradicts":
             notes.setdefault(a, []).append(LintNote("contradicts", b, rationale))
             notes.setdefault(b, []).append(LintNote("contradicts", a, rationale))
@@ -148,4 +170,4 @@ def apply_lint_notes(content: str, notes: list[LintNote], slug_by_id: dict[int, 
     return content[:at] + block + content[at:]
 
 
-__all__ = ["LintNote", "apply_lint_notes", "load_lint_notes"]
+__all__ = ["LintNote", "apply_lint_notes", "escape_rationale", "load_lint_notes"]

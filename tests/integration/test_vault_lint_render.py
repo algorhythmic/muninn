@@ -125,7 +125,7 @@ def _hide(db_path: Path, bookmark_id: int) -> None:
     conn.close()
 
 
-def test_a_hidden_page_takes_its_findings_with_it(db_file: Path, tmp_path: Path) -> None:
+def test_a_hidden_page_takes_every_finding_of_its_task_with_it(db_file: Path, tmp_path: Path) -> None:
     unlinted = _copy(db_file, tmp_path / "unlinted.db")
     _lint(db_file, SUPERSEDES, CONTRADICTS)
     for path in (db_file, unlinted):
@@ -133,10 +133,53 @@ def test_a_hidden_page_takes_its_findings_with_it(db_file: Path, tmp_path: Path)
     baseline = _compile(unlinted, tmp_path / "before")
     pages = _compile(db_file, tmp_path / "vault")
     assert POST not in pages
-    # Only the supersession remains on v1; nothing names the hidden post.
+    # The task showed the model the post, so even the 1-2 supersession's
+    # rationale could paraphrase it: nothing of that task renders.
+    assert pages[V1] == baseline[V1]
+    assert pages[V2] == baseline[V2]
+
+    # The pair it found something on is pending again, alone: page 3 is
+    # no longer a candidate, and (1, 2) is re-judged without it.
+    conn = connect(db_file)
+    try:
+        from muninn.synthesis.tasks import lint as lint_task
+
+        assert lint_task.prepare_input(conn, "llm")["pairs"] == [[1, 2]]
+    finally:
+        conn.close()
+    _lint(db_file, SUPERSEDES)
+    pages = _compile(db_file, tmp_path / "relinted")
     supersession_only = V1_BLOCK.split("\n\n", 1)[1]
     assert pages[V1] == _with(baseline[V1], frontmatter=V1_FRONTMATTER, block=supersession_only)
     assert "x-synth-author" not in pages[V1]
+
+
+def test_a_third_page_hidden_since_the_task_drops_the_finding(db_file: Path, tmp_path: Path) -> None:
+    # Only 1 and 2 are in the finding, but the task also showed page 3.
+    _lint(db_file, SUPERSEDES)
+    assert V1_FRONTMATTER in _compile(db_file, tmp_path / "a")[V1]
+    _hide(db_file, 3)
+    pages = _compile(db_file, tmp_path / "b")
+    assert "superseded_by" not in pages[V1] and "[!note]" not in pages[V1]
+
+
+def test_a_rationale_is_rendered_as_inert_text(db_file: Path, tmp_path: Path) -> None:
+    # A row written before ingest rejected markup (or by any other path):
+    # the compiler escapes it again.
+    _lint(db_file, SUPERSEDES)
+    hostile = "Fine. <!-- hides the rest --> [[secret-page|x]] ![img](https://e.example/p.png) a\\[b] & -->"
+    conn = connect(db_file)
+    conn.execute("UPDATE lint_findings SET rationale = ?", (hostile,))
+    conn.commit()
+    conn.close()
+    page = _compile(db_file, tmp_path / "vault")[V1]
+    callout = next(line for line in page.splitlines() if line.startswith("> A newer item supersedes"))
+    assert callout.endswith(
+        "Fine. &lt;!-- hides the rest --&gt; \\[\\[secret-page|x\\]\\] "
+        "!\\[img\\](https://e.example/p.png) a\\\\\\[b\\] &amp; --&gt;"
+    )
+    assert page.count("<!--") == page.count("<!-- contradiction:") + page.count("<!-- muninn")
+    assert "[[secret-page" not in page and "-->" not in callout
 
 
 def test_changed_content_expires_a_finding(db_file: Path, tmp_path: Path) -> None:
