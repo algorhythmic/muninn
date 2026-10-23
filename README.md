@@ -3,11 +3,12 @@
 > *"…and Muninn returns each day to whisper into Odin's ear what he
 > has remembered."*
 
-A personal knowledge base built from a decade of accumulated
-bookmarks, made queryable by both humans (via an Obsidian-browsable
-wiki) and LLMs (via an MCP server). Named after Odin's raven of
-**memory** — the one whose return Odin awaits more anxiously, because
-"thought" can always be re-derived but **memory cannot**.
+A personal archive and wiki of saved material, starting with X
+bookmarks and a decade of browser bookmarks. Humans can query it
+through an Obsidian-browsable wiki, and LLMs through an MCP server.
+Named after Odin's raven of **memory**: the one whose return Odin
+awaits more anxiously, because "thought" can always be re-derived but
+**memory cannot**.
 
 ---
 
@@ -33,19 +34,21 @@ that any LLM-aware tool can query.
 
 ---
 
-## Architecture (planned)
+## Architecture
 
-Two layers, because a compiled wiki alone can't hold 10k+ pages
-ergonomically and a vector index alone is unbrowsable by a human:
+There are two layers. A compiled wiki alone can't hold thousands of
+pages ergonomically, and a vector index alone can't be browsed by a
+human.
 
-### Layer 1 — Bragi-style vault
+### Layer 1 — the vault
 
-One markdown page per bookmark, structured as:
+The vault has one markdown page per saved item, structured like this:
 
 ```markdown
 # <page title>
 
-- **URL:** original-url
+- **URL:** sanitized-url
+- **Source:** x | bookmarks_html | …
 - **Captured:** YYYY-MM-DD
 - **Last scraped:** YYYY-MM-DD
 - **Tags:** tag1, tag2
@@ -54,95 +57,74 @@ One markdown page per bookmark, structured as:
 ## Summary
 ...
 
-## Key quotes
-...
-
 ## Cross-references
-- [[other-bookmark-slug]]
+- [[other-page-slug]]
 ```
 
-Obsidian-browsable, git-versioned. The user can navigate by tag,
-backlinks, or full-text search inside Obsidian. The vault structure
-mirrors what Saga's Bragi agent already produces for fleet
-journals — same tooling, different corpus.
+It is Obsidian-browsable and git-versioned. You can navigate it by tag,
+backlinks or full-text search inside Obsidian. The vault compiler
+generates these pages from muninn's SQLite store. Curated notes (concepts,
+infra, people, and reference project notes) are written by hand alongside
+them.
 
-### Layer 2 — Semantic index
+### Layer 2 — semantic index
 
-Embeddings of full-text + summaries indexed in a local vector DB
-(Qdrant on a homelab LXC at `.19`, an unused slot in the Pi-hole DHCP
-range). Exposed via an MCP server so any Claude Code session can
-query during brainstorms:
+Embeddings of full text and summaries are indexed in Qdrant, on a
+homelab LXC, behind a pluggable search interface. An MCP server exposes
+the index so any Claude Code session can query it:
 
 ```
 > What have I saved about distributed consensus algorithms?
-[MCP returns 5 most relevant bookmark pages from the vault]
+[MCP returns the most relevant pages from the vault]
 ```
 
-The vault is the **human interface**; the MCP is the **LLM interface**.
+The vault is the **human interface**; the MCP server is the **LLM
+interface**.
+
+### Research Intake
+
+Muninn can also assess selected saved items for suitability. It looks
+at substance, evidence quality, novelty and topic relevance, then exports
+**versioned, content-addressed evidence packets**. Odin, the operator's
+project supervisor, consumes those packets to decide whether anything
+applies to an active project. Muninn produces the evidence; it does not
+make project decisions.
 
 ---
 
-## How it gets built
+## How it runs
 
-The original framing assumed Muninn was an **exercise of Saga at
-scale** — submit a `bookmarks.html` export to Saga, Odin decomposes
-it into N parallel scrape-and-summarize streams, each dvergr handles
-its slice. That framing made Muninn dependent on Saga **Phase 3**
-(spec decomposition + multi-dvergr launch), which isn't shipped yet.
+- **Capture and bulk enrichment:** source adapters (X bookmarks API and
+  browser `bookmarks.html` export) feed an HTTP scraper (live + Wayback
+  passes). The scraper feeds a Python async worker pool that calls the
+  Anthropic API directly with Haiku. Every stage is a separate,
+  idempotent CLI command.
+- **Synthesis** (era narratives, deep passes, ad-hoc analyses) runs
+  through a task-file → result-file contract. The default runner is a
+  budgeted direct API call; any harness the operator chooses can run the
+  same task.
 
-The spec design (see `SPEC.md`) revised this. Two-tier execution:
-
-- **Bulk per-bookmark enrichment (scrape + summary + tags):**
-  Python async worker pool calling the Anthropic API directly with
-  Haiku 4.5. No Claude Code instances, no dvergar, no Saga
-  orchestration. The bottleneck is HTTP wait + LLM API latency — a
-  worker pool handles it; a fleet would be over-engineering at this
-  shape.
-- **Synthesis (era narratives, flagged deep-passes, ad-hoc
-  analysis):** Opus 4.6 with 1M context, run in a single Saga-style
-  container that mounts the existing `saga-claude-credentials`
-  volume for subscription-mode auth. This is a **sibling of dvergr**,
-  not a consumer of Odin/heimdall.
-
-This shifts the Saga dependency:
-
-- Depends on Saga **infrastructure (Phase 1+2, already done)** —
-  the credentials volume, the keepalive cron, the Trail of Bits
-  devcontainer base image, the dvergr container-launch pattern.
-- Does **not** depend on Saga **orchestration (Phase 3, not yet
-  shipped)** — Odin's spec decomposition isn't needed at v1's
-  single-instance synthesis volume.
-
-Net: **v1 Muninn is no longer blocked on Saga Phase 3.** It can be
-built immediately on top of the Saga infrastructure that already
-exists. Multi-instance synthesis batching becomes a v2 question
-when corpus size or simultaneous-task volume actually requires it —
-that's when Saga's parallel-dvergr pattern earns its keep on
-Muninn's synthesis side.
-
-Muninn is still a **product** (the knowledge base) and is still an
-eventual stress-test for Saga's fleet capabilities (v2+ multi-source
-ingest will want them) — but it's now a near-term standalone build,
-not a forcing function for an unshipped Saga phase.
+Muninn is a standalone tool. It does not depend on any agent
+orchestrator to run.
 
 ---
 
 ## Status
 
-Spec drafted (`SPEC.md`), implementation pending. Currently this repo
-contains:
+- **Implemented:** the browser-bookmark pipeline (ingest → sanitize →
+  dual-pass scrape → enrich → vault compiler, MCP, timeline, Parquet),
+  with a test suite. Real embeddings (EmbeddingGemma) and the Qdrant
+  index are verified on a 100-bookmark smoke set.
+- **In progress (v1):** X bookmarks end to end, plus Research Intake
+  evidence-packet export. See `docs/muninn-roadmap.md`.
+- **Next (v1.1):** the bulk run over the full browser-bookmark export.
 
-- This README (project framing and architecture sketch)
-- `MUNINN.MD` — original brainstorming context
-- `SPEC.md` — working specification, with the six core design
-  decisions resolved
-- `CLAUDE.md` — project-specific guidance for Claude Code sessions
-- `docs/` — Saga architecture, setup, and insights documents that
-  ground the synthesis-container design
+Key documents:
 
-Implementation can begin against the existing Saga Phase 1+2
-infrastructure (credentials volume, keepalive cron, container
-patterns) — no longer blocked on Saga Phase 3.
+- `SPEC.md`: pipeline design
+- `docs/muninn-decisions.md`: ADR log
+- `docs/research-intake/`: the Research Intake workflow
+- `CLAUDE.md`: guidance for Claude Code sessions
 
 ---
 
@@ -150,10 +132,11 @@ patterns) — no longer blocked on Saga Phase 3.
 
 | Project | Relationship |
 |---|---|
-| **Saga** | Builds Muninn — Saga's dvergar handle the parallel scrape/summarize work; Saga's Bragi handles the vault compilation |
-| **Homelab** | Hosts the Qdrant vector DB at `.19`, hosts the vault git repo on Gitea |
-| **Memex** *(future)* | Sibling project — same architecture pattern but applied to homelab state instead of bookmarks |
-| **Portfolio site** *(future)* | Possible public-facing variant: a curated subset of the vault published as a "things I've found worth remembering" reading list |
+| **Odin** | Consumes Research Intake evidence packets, and can use muninn as a recall source. It owns project state and decisions |
+| **Skald** | Independent transcript archiver. A possible future source for session notes |
+| **Braid** | Independent retrieval engine. A candidate backend for muninn's search layer |
+| **Homelab** | Hosts the Qdrant vector DB, and hosts the vault git repo on Gitea |
+| **Portfolio site** *(future)* | A possible public-facing variant: a curated subset of the vault published as a "things I've found worth remembering" reading list |
 
 ---
 
@@ -171,17 +154,18 @@ memory once lost is gone. A bookmark corpus IS personal memory —
 losing it (link rot, service shutdown, lost browser profile) is
 a real loss.
 
-The project sits in a Norse-named ecosystem alongside Saga (the
-goddess of history and storytelling) and follows the same
-naming convention.
+The name is historical. Muninn is a standalone tool, and Norse naming
+isn't a requirement for anything new.
 
 ---
 
 ## What this is NOT
 
 - **Not a generic bookmark manager.** Pinboard, Raindrop, Pocket,
-  and others already do storage + tagging well. Muninn doesn't
-  replace them; it builds *on top of* their export formats.
+  and others already do storage and tagging well. Muninn doesn't
+  replace them; it builds *on top of* their exports and APIs.
+- **Not a project tracker.** Project state, proposals and decisions
+  belong to Odin. Muninn supplies the evidence.
 - **Not a public service.** The corpus is personal; the value is in
   the curation. The vault stays private. Only individual entries
   worth sharing get republished elsewhere.

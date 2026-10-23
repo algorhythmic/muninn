@@ -1,3 +1,8 @@
+> **Status: superseded — Huginn deferred indefinitely by ADR-015 (2026-10-21).** Never
+> implemented. Its durable-intake half is covered by Research Intake (ADR-009); automatic
+> high-volume discovery, if ever wanted, returns as a new source with its own ADR. Its
+> "built by Saga" framing and links are historical. Kept for reference only.
+
 # Huginn
 
 **Spec for a multi-source information triage layer, built by Saga.**
@@ -6,7 +11,7 @@
 
 This document is the source of truth for Huginn's design. It is intended for ingestion into Saga's Phase 3 spec pipeline, where Odin will decompose it into parallel dvergar workstreams.
 
-For architectural rationale behind key decisions referenced here, see Muninn's [`DECISIONS.md`](../muninn/DECISIONS.md) — specifically ADR-003 (Huginn as separate service) and ADR-004 (vault as source of truth).
+For architectural rationale behind key decisions referenced here, see Muninn's [`DECISIONS.md`](../muninn-decisions.md) — specifically ADR-003 (Huginn as separate service) and ADR-004 (vault as source of truth).
 
 ---
 

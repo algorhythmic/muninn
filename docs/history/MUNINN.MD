@@ -1,3 +1,6 @@
+> **Status: historical (2026-10-21).** Raw April 2026 brainstorming transcript that seeded
+> SPEC.md. Not authoritative; its Saga/dvergar/Bragi framing is superseded by ADR-010.
+
 My read: this is Muninn (Odin's raven, "memory" — literally "the one who remembers"). Fits better than "Memex" 
   given the Saga naming convention, and the role maps cleanly: Muninn remembers everything you've ever read so
   Odin can recall it when you're brainstorming.                                                                  

@@ -1,3 +1,7 @@
+> **Status: historical (2026-10-21).** April 2026 structured view of `SPEC.md` prepared as a
+> Saga Phase 3 handoff. Not authoritative; `SPEC.md` and the ADR log win. Saga/Odin framing
+> superseded by ADR-010.
+
 ---
 project: muninn
 version: v1-spec

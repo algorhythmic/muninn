@@ -1,6 +1,6 @@
 """HTML → plain text extraction + extraction_quality classifier.
 
-We use ``selectolax``'s very-fast Lexbor parser. The strategy:
+We use ``selectolax``'s Modest parser (``selectolax.parser``; removed in 1.0, hence the ``<1`` pin). The strategy:
 
 1. Drop obvious non-content tags (``script``, ``style``, ``nav``, ``footer``,
    ``aside``, ``form``, ``noscript``, ``svg``, ``iframe``).
@@ -24,8 +24,13 @@ from typing import Optional, Tuple
 
 try:
     from selectolax.parser import HTMLParser
-except ImportError:  # pragma: no cover - selectolax should be installed
-    HTMLParser = None  # type: ignore[assignment]
+except ImportError as exc:  # pragma: no cover - exercised via test with a stub
+    # Fail loudly: silently degrading to "" turned every scrape into
+    # partial/none when selectolax 1.x dropped ``selectolax.parser``.
+    raise ImportError(
+        "muninn.scrape.extract requires selectolax<1 (selectolax.parser."
+        "HTMLParser); install the pinned dependency"
+    ) from exc
 
 
 # Tags whose text we never want.
@@ -56,7 +61,7 @@ _MIN_PARTIAL_CHARS = 30
 
 def extract_text(html: str) -> str:
     """Return the visible text content of ``html``, whitespace-collapsed."""
-    if not html or HTMLParser is None:
+    if not html:
         return ""
 
     try:

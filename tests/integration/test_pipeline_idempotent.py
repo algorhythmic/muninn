@@ -170,7 +170,7 @@ def seeded_db(fresh_db: sqlite3.Connection) -> sqlite3.Connection:
 def _mock_enrich_factory(*, cache_hit: bool = True):
     """Build a side-effect that returns deterministic EnrichmentResults."""
 
-    def _impl(title, content, client=None):
+    def _impl(title, content, client=None, **_kwargs):
         return EnrichmentResult(
             summary=f"Summary of {title}",
             tags=["tag1", "tag2"],
@@ -215,7 +215,7 @@ class TestPipelineEligibility:
         # The mock records the (title, content) it was called with.
         captured = {}
 
-        def _capture(title, content, client=None):
+        def _capture(title, content, client=None, **_kwargs):
             captured[title] = content
             return _mock_enrich_factory()(title, content, client)
 
@@ -288,8 +288,13 @@ class TestForceAndPromptVersion:
 
     @patch("muninn.enrich.pipeline.enrich_bookmark")
     def test_new_prompt_version_invalidates_and_is_recorded(
-        self, mock_enrich, seeded_db: sqlite3.Connection
+        self, mock_enrich, seeded_db: sqlite3.Connection, tmp_path, monkeypatch
     ) -> None:
+        from muninn.enrich import haiku
+
+        for version in (PER_BOOKMARK_PROMPT_VERSION, "per_bookmark_v2"):
+            (tmp_path / f"{version}.md").write_text(f"PROMPT {version}")
+        monkeypatch.setattr(haiku, "PROMPT_DIR", tmp_path)
         mock_enrich.side_effect = _mock_enrich_factory()
         enrich_all(seeded_db, client=MagicMock(), qdrant=None)
 
@@ -391,7 +396,7 @@ class TestCacheHitRateScenario:
         # First call is a cache miss (prompt write); rest hit.
         call_count = {"n": 0}
 
-        def _warmup(title, content, client=None):
+        def _warmup(title, content, client=None, **_kwargs):
             call_count["n"] += 1
             is_first = call_count["n"] == 1
             return EnrichmentResult(
@@ -516,3 +521,64 @@ class TestFtsSync:
             "SELECT rowid FROM fts_bookmarks WHERE fts_bookmarks MATCH 'Summary'"
         ).fetchall()
         assert len(rows) == 5
+
+
+class TestPromptVersionOverride:
+    """``--prompt-version vN`` must send vN's prompt, not just record it."""
+
+    def test_requested_prompt_is_sent_and_recorded(
+        self, seeded_db: sqlite3.Connection, tmp_path, monkeypatch
+    ) -> None:
+        import json
+
+        from muninn.enrich import haiku
+
+        prompt_dir = tmp_path / "prompts"
+        prompt_dir.mkdir()
+        (prompt_dir / "per_bookmark_v2.md").write_text("PROMPT V2 BODY")
+        monkeypatch.setattr(haiku, "PROMPT_DIR", prompt_dir)
+
+        sent_systems: list[str] = []
+
+        def _create(**kwargs):
+            sent_systems.append(kwargs["system"][0]["text"])
+            response = MagicMock()
+            response.content = [
+                MagicMock(
+                    text=json.dumps(
+                        {"summary": "s", "tags": [], "entities": [],
+                         "content_type": "article", "language": "en"}
+                    )
+                )
+            ]
+            response.usage = MagicMock(
+                input_tokens=10,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+                output_tokens=5,
+            )
+            return response
+
+        client = MagicMock()
+        client.messages.create.side_effect = _create
+
+        enrich_all(
+            seeded_db, client=client, qdrant=None, prompt_version="per_bookmark_v2"
+        )
+
+        assert sent_systems and set(sent_systems) == {"PROMPT V2 BODY"}
+        versions = {
+            r[0]
+            for r in seeded_db.execute(
+                "SELECT enrichment_prompt_version FROM enriched"
+            )
+        }
+        assert versions == {"per_bookmark_v2"}
+
+    def test_unknown_prompt_version_fails_fast(
+        self, seeded_db: sqlite3.Connection
+    ) -> None:
+        client = MagicMock()
+        with pytest.raises(FileNotFoundError):
+            enrich_all(seeded_db, client=client, prompt_version="per_bookmark_v999")
+        client.messages.create.assert_not_called()

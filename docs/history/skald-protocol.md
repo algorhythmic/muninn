@@ -1,3 +1,9 @@
+> **Status: superseded — retired 2026-10-21 by ADR-011** (muninn holds no canonical
+> project or session state; Odin owns project state, the standalone Skald archives
+> transcripts). Kept for history only; nothing implements or validates against it.
+> "Skald" here was a *role name* for vault emitters and is unrelated to the standalone
+> Skald transcript archiver (github.com/algorhythmic/skald).
+
 # Skald Protocol — session capture and project-state collation
 
 > **Lifecycle:** Draft v1 (2026-07-16). Tracked by `ROADMAP.md` — this document is the
