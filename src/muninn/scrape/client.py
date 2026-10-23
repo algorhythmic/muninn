@@ -31,6 +31,7 @@ from muninn.config import (
     IA_GLOBAL_RPS,
     LIVE_CACHE_TTL_SECONDS,
     LIVE_DOMAIN_RPS,
+    RECENT_CDX_TTL_SECONDS,
     load_paths,
 )
 from muninn.sanitize import sanitize_url
@@ -67,17 +68,22 @@ class ScrapeClient:
         client: Optional[httpx.AsyncClient] = None,
         rate_limiter: Optional[RateLimiter] = None,
         live_cache_ttl: Optional[float] = LIVE_CACHE_TTL_SECONDS,
+        recent_cdx_ttl: Optional[float] = RECENT_CDX_TTL_SECONDS,
         refresh: bool = False,
         clock=time.time,
     ) -> None:
         """``live_cache_ttl``: seconds a cached live response stays usable
-        (None = forever). ``refresh``: never read the live cache (responses
-        are still written to it). Neither affects archive or CDX entries:
-        Wayback snapshots are immutable."""
+        (None = forever). ``recent_cdx_ttl``: the same for the
+        "latest snapshot" CDX lookup of the recent_archive pass, whose answer
+        changes whenever IA archives the page again. ``refresh``: read
+        neither of those two caches (results are still written to them).
+        Snapshot bodies and the date-bounded at_capture CDX lookups are
+        cached forever, refresh or not: a Wayback snapshot is immutable."""
         paths = load_paths()
         self.http_cache = HttpCache(http_cache_dir or paths.http_cache_dir, clock=clock)
         self.scrape_cache = HttpCache(scrape_cache_dir or paths.scrape_cache_dir, clock=clock)
         self.live_cache_ttl = live_cache_ttl
+        self.recent_cdx_ttl = recent_cdx_ttl
         self.refresh = refresh
         self.rate = rate_limiter or RateLimiter()
         self._client = client
@@ -174,6 +180,8 @@ class ScrapeClient:
         to_ts: Optional[str] = None,
         limit: str = "1",
         cache_key: Optional[str] = None,
+        max_age: Optional[float] = None,
+        bypass_cache: bool = False,
     ) -> Optional[str]:
         """Query the IA CDX API for a snapshot timestamp.
 
@@ -183,6 +191,10 @@ class ScrapeClient:
 
         Returns the timestamp string (YYYYMMDDHHMMSS) on hit, ``None`` on
         miss or after retries are exhausted.
+
+        The answer is memoized in the scrape cache: forever by default,
+        for ``max_age`` seconds when given. ``bypass_cache`` skips the read
+        (the fresh answer is still written).
         """
         params: dict[str, str] = {
             "url": url,
@@ -199,7 +211,7 @@ class ScrapeClient:
 
         # Cache CDX results in the scrape_cache to memoize across runs.
         ck = cache_key or f"cdx:{url}:{closest}:{from_ts}:{to_ts}:{limit}"
-        cached = self.scrape_cache.get(ck)
+        cached = None if bypass_cache else self.scrape_cache.get(ck, max_age=max_age)
         if cached is not None:
             return cached.get("timestamp")
 

@@ -12,7 +12,9 @@ The cache key is an arbitrary string (callers prefix it with the pass —
 filename is ``sha256(key).json``; for raw HTML, it's ``sha256(key).html.gz``.
 
 Entries never expire unless the caller passes ``max_age`` to :meth:`get`:
-the live pass does (RI-01 D9), Wayback and CDX entries don't. Age is the
+the live pass does (RI-01 D9), and so does the recent_archive "latest
+snapshot" CDX lookup; Wayback snapshot bodies and the date-bounded
+at_capture CDX lookups don't. Age is the
 entry file's mtime against the injected ``clock``.
 """
 

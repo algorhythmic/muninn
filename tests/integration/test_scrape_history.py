@@ -328,3 +328,72 @@ async def test_redirect_final_url_is_sanitized(seeded, make_client) -> None:
     assert rev["final_locator"] == final_url
     dump = "\n".join(conn.iterdump())
     assert secret not in dump and "access_token" not in dump
+
+
+def _cdx_hit(timestamp: str) -> httpx.Response:
+    return httpx.Response(200, text=json.dumps([
+        ["urlkey", "timestamp", "original", "mimetype", "statuscode", "digest", "length"],
+        ["x", timestamp, "x", "text/html", "200", "D", "1"],
+    ]))
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_recent_snapshot_lookup_expires_and_refresh_bypasses_it(tmp_path) -> None:
+    """The "latest snapshot" CDX answer changes as IA re-archives a page:
+    it is reused for MUNINN_RECENT_CDX_TTL_SECONDS, then asked again, and
+    `--refresh` asks again at once. The snapshot bodies stay cached."""
+    import time
+
+    from muninn.scrape.recent_archive import fetch_recent_archive
+
+    answers = iter(["20261001120000", "20261010120000", "20261020120000"])
+    cdx = respx.get(IA_CDX_BASE).mock(side_effect=lambda request: _cdx_hit(next(answers)))
+    respx.get(url__startswith=IA_WEB_BASE).mock(return_value=httpx.Response(200, text=PAGE))
+    clock = Clock(time.time())
+
+    def make(**kw) -> ScrapeClient:
+        return ScrapeClient(http_cache_dir=tmp_path / "h", scrape_cache_dir=tmp_path / "s",
+                            recent_cdx_ttl=3600, clock=clock, rate_limiter=NoWait(), **kw)
+
+    async def snapshot(client: ScrapeClient) -> str:
+        try:
+            return (await fetch_recent_archive(client, 1, LINK)).archive_url
+        finally:
+            await client.close()
+
+    assert "/20261001120000id_/" in await snapshot(make())
+    clock.now += 3599
+    assert "/20261001120000id_/" in await snapshot(make())
+    assert cdx.call_count == 1
+    clock.now += 2  # past the TTL: IA may have archived the page again
+    assert "/20261010120000id_/" in await snapshot(make())
+    assert cdx.call_count == 2
+    assert "/20261020120000id_/" in await snapshot(make(refresh=True))
+    assert cdx.call_count == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_at_capture_lookup_is_cached_forever_even_under_refresh(tmp_path) -> None:
+    import time
+
+    from muninn.scrape.at_capture import fetch_at_capture
+
+    cdx = respx.get(IA_CDX_BASE).mock(return_value=_cdx_hit("20261001120000"))
+    archive = respx.get(url__startswith=IA_WEB_BASE).mock(return_value=httpx.Response(200, text=PAGE))
+    clock = Clock(time.time())
+
+    def make(**kw) -> ScrapeClient:
+        return ScrapeClient(http_cache_dir=tmp_path / "h", scrape_cache_dir=tmp_path / "s",
+                            recent_cdx_ttl=1, live_cache_ttl=1, clock=clock,
+                            rate_limiter=NoWait(), **kw)
+
+    for client in (make(), make(refresh=True)):
+        try:
+            result = await fetch_at_capture(client, 1, LINK, SNAPSHOT_EPOCH)
+        finally:
+            await client.close()
+        assert result.actual_snapshot_at == SNAPSHOT_EPOCH
+        clock.now += 10**7
+    assert cdx.call_count == 1 and archive.call_count == 1

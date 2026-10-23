@@ -114,9 +114,16 @@ AT_CAPTURE_WINDOW_DAYS = 365
 HTTP_TIMEOUT_SECONDS = 30
 # Live-pass HTTP cache entries older than this are refetched (RI-01 D9), so a
 # later `muninn scrape` can capture a new revision; `--refresh` bypasses the
-# cache entirely. Archive (Wayback) entries never expire: snapshots are
+# cache entirely. Archive snapshot bodies never expire: snapshots are
 # immutable.
 LIVE_CACHE_TTL_SECONDS = int(os.environ.get("MUNINN_LIVE_CACHE_TTL_SECONDS", str(24 * 3600)))
+# The recent_archive pass asks the IA CDX API for the *latest* snapshot,
+# which changes as IA archives the page again, so that lookup is cached for
+# this long (default 30 days); `--refresh` bypasses it too. The date-bounded
+# at_capture lookups and the snapshot bodies stay cached forever.
+RECENT_CDX_TTL_SECONDS = int(
+    os.environ.get("MUNINN_RECENT_CDX_TTL_SECONDS", str(30 * 24 * 3600))
+)
 
 
 # ── X API (muninn ingest x / muninn x auth) ───────────────────────

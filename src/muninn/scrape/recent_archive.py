@@ -3,7 +3,10 @@
 Fired only when at_capture produced ``no_archive`` (or otherwise didn't
 yield ``ok``). The most-recent snapshot is found via CDX with ``limit=-1``
 and no time bounds. ``target_timestamp`` is left NULL because we asked for
-"latest", not a specific date.
+"latest", not a specific date. Unlike the at_capture lookup, that answer
+changes over time, so it is cached with a TTL (``recent_cdx_ttl``) and
+``--refresh`` bypasses it; the snapshot body it names is immutable and
+cached forever.
 """
 
 from __future__ import annotations
@@ -33,10 +36,14 @@ async def fetch_recent_archive(
             error_detail="missing url",
         )
 
+    # "Latest snapshot" changes as IA re-archives the page: the memo
+    # expires (MUNINN_RECENT_CDX_TTL_SECONDS) and `--refresh` skips it.
     timestamp = await client.cdx_lookup(
         url,
         limit="-1",
         cache_key=f"cdx:recent:{url}",
+        max_age=client.recent_cdx_ttl,
+        bypass_cache=client.refresh,
     )
 
     if not timestamp:

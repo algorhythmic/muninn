@@ -371,7 +371,8 @@ def run_scrape(
 ) -> dict:
     """Synchronous wrapper for ``scrape_all``: opens a connection, runs,
     closes. For use from ``__main__`` or click commands. ``refresh``
-    bypasses the live HTTP cache so a changed page is re-captured."""
+    bypasses the live HTTP cache and the recent_archive "latest snapshot"
+    lookup, so a changed page is re-captured."""
     conn = connect(db_path)
     try:
         client = ScrapeClient(refresh=refresh)
