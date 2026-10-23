@@ -124,14 +124,16 @@ muninn synthesize lint --tag TAG [--limit N] [--prompt-version lint_vN]
 
 This is a task on the synthesis contract (`muninn-synthesis/1`, task type `lint`; see [`synthesis-contract.md`](synthesis-contract.md)). It runs with the budgeted API runner by default. With `--emit-task DIR` it writes a task file for another harness, and `muninn synthesize ingest-result FILE` takes the result back.
 
-**Input.** The pages are the newest `--limit` (default 20, at most 40) visible bookmarks whose enrichment tags include `TAG`, case-insensitively, and that have a summary or captured text. Each has a page in `wiki/bookmarks/`.
+**Input.** The candidates are the newest `--limit` (default 20, at most 40) visible bookmarks whose enrichment tags include `TAG`, case-insensitively, and that have a summary or captured text. Each has a page in `wiki/bookmarks/`.
+
+The task holds only the **pending pairs** among the candidates (see Idempotency) as `materials.pairs`, and only the pages that appear in them as `materials.pages`. The model is told to judge those pairs and no others. So one new page among 20 candidates costs its 19 pairs and its 19 partners' pages, not all 190 pairs, and a pair already checked is never re-judged because an unrelated page changed.
 
 - A `content_visible = 0` row is never included.
 - An X post that links a policy-hidden item gets the vault's treatment (`x_pages.py`). The hidden locators are masked out of its text and title as `[hidden link]`, and enrichment that quotes one is withheld whole.
 - Each page carries its title, summary, captured text (clipped to 4,000 characters), its dates and a content hash.
 - `dated_at` is the publication time when muninn knows it (X posts), else the bookmark or capture time.
 
-**Findings.** The model compares the pages' claims and returns zero or more findings. Each has:
+**Findings.** The model compares the claims of each pair it was given and returns zero or more findings. Each has:
 
 - a relation: `contradicts`, or `supersedes` (the newer page's claim replaces the older page's);
 - the two bookmark ids;
@@ -141,6 +143,7 @@ This is a task on the synthesis contract (`muninn-synthesis/1`, task type `lint`
 The result must validate against `schemas/json/lint.schema.json`. Muninn then checks, before writing anything:
 
 - both ids are pages of the task, and they differ;
+- the pair is one of `materials.pairs`: a finding on any other pair, even between two pages of the task, is rejected;
 - for `supersedes`, the newer page's `dated_at` is strictly later than the older page's;
 - every evidence quote names one of the pair, and occurs in that page's `text` or `summary`, either exactly or with different whitespace (the stored span is kept). A quote across `[hidden link]` is rejected;
 - each of the two pages is quoted at least once.
@@ -149,12 +152,12 @@ A failure gets the contract's single correction retry, as the other tasks do.
 
 **Storage** (migration 003):
 
-- **`lint_pair_checks`**: one row per pair of pages examined, finding or not. It records the pair, both content hashes, the model, the prompt version, the run's `task_id` and the tag.
+- **`lint_pair_checks`**: one row per pair the task asked about (`materials.pairs`), finding or not. It records the pair, both content hashes, the model, the prompt version, the run's `task_id` and the tag. A pair the task did not ask about is never recorded, so a task cannot replace the verdict on it.
 - **`lint_findings`**: one row per finding. It records the relation, both pages and their content hashes, the rationale, the verified evidence (`evidence_json`), the model, the prompt version, the `task_id` and the tag. Contradictions are stored with the lower id first.
 
 Both tables are append-only, and their rows cascade away with a deleted bookmark.
 
-**Idempotency.** Before building a task, muninn checks every pair of the selected pages. If each pair was already checked with the same two content hashes and the same prompt version, it makes no call and builds no task, and the command reports `up to date`. For an API run, the model must match too (the requested id, or a dated snapshot of it that the API served); an emitted task matches any model. A changed page (new text, new summary, a link newly hidden), a new prompt version or another model re-opens the pairs it affects. Re-running with unchanged inputs never pays twice.
+**Idempotency.** Before building a task, muninn checks every pair of the candidates. A pair is done when it was already checked with the same two content hashes and the same prompt version, under any tag: the check is keyed by content, so two pages that share two tags are checked once, not once per tag. For an API run, the model must match too (the requested id, or a dated snapshot of it that the API served); an emitted task matches any model. Every other pair is pending, and only pending pairs go into the task. When none is pending, muninn makes no call and builds no task, and the command reports `up to date`. A changed page (new text, new summary, a link newly hidden), a new prompt version or another model re-opens the pairs it affects. Re-running with unchanged inputs never pays twice.
 
 **Budget.** The same as every synthesis task: the per-run `--max-cost-usd` (default $3.00), and the required monthly `MUNINN_SYNTHESIS_MONTHLY_BUDGET_USD`. The worst case is checked before the call, and a call that doesn't fit is never made (`cap_hit`). Usage is recorded as `synthesize:lint`.
 

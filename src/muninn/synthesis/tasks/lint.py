@@ -6,13 +6,22 @@ content from SQLite.
 
 Materials in the task file:
   - tag             the tag the pages share
+  - pairs: [[a, b], ...]   the pairs to judge, a < b, sorted: only the
+                           pending ones (see below)
   - pages: [{bookmark_id, title, source, published_at, captured_at,
              dated_at, dated_by, summary, text, text_truncated,
-             content_hash}, ...]   oldest first
+             content_hash}, ...]   oldest first; exactly the pages that
+                                   appear in ``pairs``
 
-  Pages are visible bookmarks (``content_visible = 1``: the compiler writes
-  a page for each) whose enrichment tags include ``tag``, newest
-  ``limit``. ``dated_at`` is the publication time when known, else the
+  The candidates are visible bookmarks (``content_visible = 1``: the
+  compiler writes a page for each) whose enrichment tags include ``tag``,
+  newest ``limit``. A pair of candidates is *pending* unless it was already
+  checked with the same two content hashes and prompt version (and, for an
+  API run, model), under any tag: the check is keyed by content, not by
+  tag. Only pending pairs, and only their pages, go into a task, so one
+  new page among ``limit`` costs ``limit - 1`` pairs, not all of them, and
+  a pair is never re-judged as a side effect of an unrelated page.
+  ``dated_at`` is the publication time when known, else the
   bookmark/capture time, and orders a supersession. ``text`` is the
   captured text of the canonical pass, clipped to :data:`TEXT_LIMIT`. An
   X post that links a policy-hidden item gets the vault's treatment
@@ -23,17 +32,19 @@ Materials in the task file:
   finding is still current.
 
 Validation (after the result schema): both ids of a finding are pages of
-the task and differ; a ``supersedes`` finding's ``bookmark_id`` is dated
+the task and differ, and the pair is one of ``pairs``; a ``supersedes`` finding's ``bookmark_id`` is dated
 strictly after ``other_bookmark_id``; every evidence quote names one of
 the finding's two pages and occurs in that page's ``text`` or ``summary``
 (exactly, or with different whitespace), never across a masked locator;
 each of the two pages is quoted at least once.
 
 DB writes (single transaction, through the orchestrator):
-  1. INSERT one ``lint_pair_checks`` row per pair of pages, finding or
-     not: the idempotency record. A later run skips the model call when
-     every pair was already checked with the same two content hashes and
-     prompt version (and, for an API run, model).
+  1. INSERT one ``lint_pair_checks`` row per pair of ``pairs``, finding or
+     not: the idempotency record. A later run leaves a pair out when it
+     was already checked with the same two content hashes and prompt
+     version (and, for an API run, model), and skips the model call when
+     no pair is left. Pairs not in ``pairs`` are never recorded, so a
+     task cannot overwrite the verdict on a pair it was not asked about.
   2. INSERT one ``lint_findings`` row per finding (contradictions stored
      with the lower bookmark id first), with both content hashes, the
      model, prompt version, run id and the located evidence spans.
@@ -54,7 +65,7 @@ from muninn.models import SynthesisRun
 from muninn.synthesis.tasks.deep_pass import _canonical_content_text
 
 TASK = "lint"
-PROMPT_VERSION = "lint_v1"
+PROMPT_VERSION = "lint_v2"
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 40
 MIN_PAGES = 2
@@ -185,7 +196,19 @@ def select_pages(conn: sqlite3.Connection, tag: str, limit: int = DEFAULT_LIMIT)
     return chosen
 
 
-def prepare_input(conn: sqlite3.Connection, tag: str, *, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
+def prepare_task(
+    conn: sqlite3.Connection,
+    tag: str,
+    *,
+    limit: int = DEFAULT_LIMIT,
+    prompt_version: str = PROMPT_VERSION,
+    model: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    """The task materials for ``tag``, and the number of candidate pairs.
+
+    ``materials["pairs"]`` holds only the pending pairs and
+    ``materials["pages"]`` only their pages; both are empty when every
+    candidate pair was already checked (nothing to pay for)."""
     tag = (tag or "").strip()
     if not tag:
         raise LintInputError("a lint task needs a tag")
@@ -194,7 +217,25 @@ def prepare_input(conn: sqlite3.Connection, tag: str, *, limit: int = DEFAULT_LI
         raise LintInputError(
             f"tag {tag!r} has {len(pages)} visible page(s) with content; lint compares at least {MIN_PAGES}"
         )
-    return {"tag": tag, "pages": pages}
+    pending = pending_pairs(conn, pages, prompt_version=prompt_version, model=model)
+    involved = {bid for pair in pending for bid in pair}
+    materials = {
+        "tag": tag,
+        "pairs": [[a, b] for a, b in pending],
+        "pages": [p for p in pages if p["bookmark_id"] in involved],
+    }
+    return materials, len(pages) * (len(pages) - 1) // 2
+
+
+def prepare_input(
+    conn: sqlite3.Connection,
+    tag: str,
+    *,
+    limit: int = DEFAULT_LIMIT,
+    prompt_version: str = PROMPT_VERSION,
+    model: str | None = None,
+) -> dict[str, Any]:
+    return prepare_task(conn, tag, limit=limit, prompt_version=prompt_version, model=model)[0]
 
 
 # ── idempotency ────────────────────────────────────────────────────
@@ -204,6 +245,15 @@ def page_pairs(pages: list[dict[str, Any]]) -> list[tuple[dict[str, Any], dict[s
     """Every unordered pair, lower bookmark id first."""
     ordered = sorted(pages, key=lambda p: p["bookmark_id"])
     return list(itertools.combinations(ordered, 2))
+
+
+def task_pairs(materials: dict[str, Any]) -> set[tuple[int, int]]:
+    """The pairs a task asks about, lower id first. A task file emitted
+    before ``materials.pairs`` existed (lint_v1) asked about every pair of
+    its pages."""
+    if "pairs" in materials:
+        return {(min(p), max(p)) for p in materials["pairs"] if len(p) == 2}
+    return {(a["bookmark_id"], b["bookmark_id"]) for a, b in page_pairs(materials.get("pages") or [])}
 
 
 def pending_pairs(
@@ -268,6 +318,7 @@ def _locate_in_page(quote: str, page: dict[str, Any]) -> tuple[str, str] | None:
 def validate_output(output: dict[str, Any], materials: dict[str, Any]) -> list[str]:
     """Checks beyond the schema; an empty list means the findings hold."""
     pages = {p["bookmark_id"]: p for p in materials.get("pages") or []}
+    pairs = task_pairs(materials)
     errors: list[str] = []
     for i, finding in enumerate(output.get("findings") or []):
         where = f"findings[{i}]"
@@ -278,6 +329,12 @@ def validate_output(output: dict[str, Any], materials: dict[str, Any]) -> list[s
             continue
         if a == b:
             errors.append(f"{where}: bookmark_id and other_bookmark_id are the same page")
+            continue
+        if (min(a, b), max(a, b)) not in pairs:
+            errors.append(
+                f"{where}: the pair [{min(a, b)}, {max(a, b)}] is not in materials.pairs "
+                "(it was already checked; judge only the listed pairs)"
+            )
             continue
         if finding.get("relation") == "supersedes" and not pages[a]["dated_at"] > pages[b]["dated_at"]:
             errors.append(
@@ -314,14 +371,16 @@ def write_output(
     tag: str,
     materials: dict[str, Any],
 ) -> None:
-    """Record every pair as checked and every finding, from the registry
-    copy's materials (a harness that edits its own copy changes nothing).
-    Pages whose bookmark was deleted since the task was built are skipped."""
+    """Record every pair the task asked about as checked, and every
+    finding on one of those pairs, from the registry copy's materials (a
+    harness that edits its own copy changes nothing). Pages whose bookmark
+    was deleted since the task was built are skipped."""
     meta = output.get("synthesis_metadata") or {}
     model = run.enrichment_model or meta.get("model") or "unknown"
     prompt_version = run.enrichment_prompt_version or meta.get("prompt_version") or PROMPT_VERSION
     now = int(time.time())
     pages = {p["bookmark_id"]: p for p in materials["pages"]}
+    pairs = task_pairs(materials)
     ids = sorted(pages)
     existing = {
         r[0] for r in conn.execute(
@@ -329,6 +388,8 @@ def write_output(
         )
     }
     for pa, pb in page_pairs(list(pages.values())):
+        if (pa["bookmark_id"], pb["bookmark_id"]) not in pairs:
+            continue
         if pa["bookmark_id"] not in existing or pb["bookmark_id"] not in existing:
             continue
         conn.execute(
@@ -339,6 +400,8 @@ def write_output(
         )
     for finding in output.get("findings") or []:
         a, b = finding["bookmark_id"], finding["other_bookmark_id"]
+        if (min(a, b), max(a, b)) not in pairs:
+            continue  # validation rejects it; never record a verdict nobody asked for
         if a not in existing or b not in existing:
             continue
         if finding["relation"] == "contradicts" and a > b:

@@ -128,8 +128,15 @@ def _ad_hoc_spec(
     return materials, {"prompt": prompt, "filter_query": filter_query, "title": title}
 
 
-def _lint_spec(conn: sqlite3.Connection, tag: str, limit: int) -> tuple[dict, dict]:
-    return _lint.prepare_input(conn, tag, limit=limit), {"tag": tag.strip()}
+def _lint_spec(
+    conn: sqlite3.Connection, tag: str, limit: int, prompt_version: str, model: str | None
+) -> tuple[dict, dict, int]:
+    """Materials holding only the pending pairs (and their pages), the
+    envelope fields, and the number of candidate pairs."""
+    materials, candidates = _lint.prepare_task(
+        conn, tag, limit=limit, prompt_version=prompt_version, model=model
+    )
+    return materials, {"tag": tag.strip()}, candidates
 
 
 def _lint_prompt_version(prompt_version: str | None) -> str:
@@ -252,17 +259,16 @@ def run_lint(
     """Lint the compiled bookmark pages tagged ``tag`` for contradictions
     and superseded claims; writes lint_pair_checks + lint_findings.
 
-    Idempotent: when every pair of the selected pages was already checked
-    with the same content hashes, prompt version and model, no task is
-    built and no call is made (status ``up_to_date``)."""
+    Only the pending pairs (not yet checked with the same content hashes,
+    prompt version and model) and their pages are sent. When there are
+    none, no task is built and no call is made (status ``up_to_date``)."""
     own_conn, conn = _ensure_conn(conn)
     try:
         version = _lint_prompt_version(prompt_version)
-        materials, extra = _lint_spec(conn, tag, limit)
         runner = runner if runner is not None else ApiRunner()
-        if not _lint.pending_pairs(conn, materials["pages"], prompt_version=version,
-                                   model=getattr(runner, "model", None)):
-            return _up_to_date("lint", materials)
+        materials, extra, candidates = _lint_spec(conn, tag, limit, version, getattr(runner, "model", None))
+        if not materials["pairs"]:
+            return _up_to_date("lint", candidates)
         return _run_task(conn, runner, budget, task_id, "lint", materials, extra, prompt_version=version)
     finally:
         if own_conn:
@@ -340,15 +346,16 @@ def emit_lint_task(
     prompt_version: str | None = None,
     task_id: str | None = None,
 ) -> TaskResult:
-    """Write a lint task file to `out_dir`; run nothing. Skipped
-    (``up_to_date``, no file) when every pair was already checked with the
-    same content hashes and prompt version, by any model."""
+    """Write a lint task file to `out_dir`; run nothing. The task holds
+    the pairs not yet checked with the same content hashes and prompt
+    version, by any model. Skipped (``up_to_date``, no file) when there
+    are none."""
     own_conn, conn = _ensure_conn(conn)
     try:
         version = _lint_prompt_version(prompt_version)
-        materials, extra = _lint_spec(conn, tag, limit)
-        if not _lint.pending_pairs(conn, materials["pages"], prompt_version=version):
-            return _up_to_date("lint", materials)
+        materials, extra, candidates = _lint_spec(conn, tag, limit, version, None)
+        if not materials["pairs"]:
+            return _up_to_date("lint", candidates)
         return _emit(conn, "lint", materials, extra, out_dir, registry, task_id, prompt_version=version)
     finally:
         if own_conn:
@@ -577,11 +584,10 @@ def _envelope_extra(task: dict[str, Any]) -> dict[str, Any]:
     return {k: task.get(k) for k in keys}
 
 
-def _up_to_date(task_type: str, materials: dict[str, Any]) -> TaskResult:
-    pages = len(materials.get("pages") or [])
+def _up_to_date(task_type: str, pairs: int) -> TaskResult:
     return TaskResult(
         task_id="", task_type=task_type, status="up_to_date", attempts=[],
-        errors=[f"all {pages * (pages - 1) // 2} page pair(s) already checked; nothing to pay for"],
+        errors=[f"all {pairs} page pair(s) already checked; nothing to pay for"],
     )
 
 

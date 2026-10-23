@@ -759,9 +759,9 @@ def synthesize_analyze_cmd(
 @synthesize_group.command("lint")
 @click.option("--tag", required=True, help="Compare the visible compiled bookmark pages carrying this tag.")
 @click.option("--limit", type=click.IntRange(2, 40), default=20, show_default=True,
-              help="Most recent pages to compare (every pair among them is checked).")
+              help="Most recent pages to compare (only pairs among them not yet checked are sent).")
 @click.option("--prompt-version", default=None,
-              help="Lint prompt version, lint_vN (default lint_v1). A new version re-checks every pair.")
+              help="Lint prompt version, lint_vN (default lint_v2). A new version re-checks every pair.")
 @_synthesis_options
 @click.pass_context
 def synthesize_lint_cmd(

@@ -1,4 +1,4 @@
-"""The model-tier lint task (task_type 'lint', prompt lint_v1).
+"""The model-tier lint task (task_type 'lint', prompt lint_v2).
 
 The Anthropic client is a MagicMock (tests/integration/synthesis_fakes.py):
 no network, no model. Covers the materials (visible compiled bookmark pages
@@ -22,9 +22,12 @@ from muninn.synthesis.api_runner import ApiRunner
 from muninn.synthesis.budget import Budget, SynthesisConfigError
 from muninn.synthesis.contract import CONTRACT_VERSION, ContractError, result_filename
 from muninn.synthesis.tasks import lint as lint_task
+from muninn.models import SynthesisRun
 from tests.integration.lint_fakes import (
     CONTRADICTS,
+    DAY,
     HIDDEN_URL,
+    T0,
     SUPERSEDES,
     finding,
     lint_output,
@@ -96,12 +99,12 @@ def test_run_records_checks_findings_and_usage(db):
         "SELECT task_type, status, enrichment_prompt_version, container_id FROM synthesis_runs WHERE task_id = ?",
         (result.task_id,),
     ).fetchone()
-    assert tuple(run) == ("lint", "completed", "lint_v1", "anthropic-api:msg_lint")
+    assert tuple(run) == ("lint", "completed", "lint_v2", "anthropic-api:msg_lint")
     checks = db.execute(
         "SELECT bookmark_id_a, bookmark_id_b, model, prompt_version, task_id, tag FROM lint_pair_checks ORDER BY 1, 2"
     ).fetchall()
     assert [tuple(c)[:2] for c in checks] == [(1, 2), (1, 3), (2, 3)]
-    assert {tuple(c)[2:] for c in checks} == {("claude-opus-5-5", "lint_v1", result.task_id, "llm")}
+    assert {tuple(c)[2:] for c in checks} == {("claude-opus-5-5", "lint_v2", result.task_id, "llm")}
     rows = db.execute(
         "SELECT relation, bookmark_id, other_bookmark_id, evidence_json FROM lint_findings ORDER BY relation"
     ).fetchall()
@@ -144,6 +147,121 @@ def test_rerun_with_unchanged_inputs_does_not_pay(db):
     changed = fake_client(message(lint_output()))
     assert run_lint("llm", conn=db, runner=ApiRunner(changed)).status == "completed"
     assert changed.messages.stream.call_count == 1
+
+
+def _t(days: int) -> int:
+    return T0 + days * DAY
+
+
+def _add_page(conn, bid: int, tags: list[str], text: str, captured_at: int) -> None:
+    conn.execute(
+        "INSERT INTO bookmarks (bookmark_id, source, source_id, captured_at, title, url, domain, "
+        "  content_visible, enrichment_source) VALUES (?, 'bookmarks_html', ?, ?, ?, ?, 'example.org', 1, 'at_capture')",
+        (bid, str(bid), captured_at, f"Page {bid}", f"https://example.org/p{bid}"),
+    )
+    conn.execute(
+        "INSERT INTO scrape_results (bookmark_id, pass, fetched_at, scrape_status, content_text) "
+        "VALUES (?, 'at_capture', ?, 'ok', ?)",
+        (bid, captured_at, text),
+    )
+    conn.execute(
+        "INSERT INTO enriched (bookmark_id, summary, tags, enrichment_model, enrichment_prompt_version, "
+        "  content_hash, enriched_at) VALUES (?, ?, ?, 'haiku', 'per_bookmark_v1', ?, ?)",
+        (bid, f"Summary {bid}.", json.dumps(tags), f"h{bid}", captured_at),
+    )
+    conn.commit()
+
+
+def _sent(client, call: int = -1) -> str:
+    return client.messages.stream.call_args_list[call].kwargs["messages"][0]["content"]
+
+
+def _sent_task(client, call: int = -1) -> dict:
+    return json.loads(_sent(client, call).split("\n\n", 1)[1])
+
+
+def test_only_pending_pairs_and_their_pages_are_sent_deduplicated_across_tags(db):
+    # First run: every pair of 1, 2, 3 is pending.
+    first = fake_client(message(lint_output()))
+    assert run_lint("llm", conn=db, runner=ApiRunner(first)).status == "completed"
+    task = _sent_task(first)
+    assert task["materials"]["pairs"] == [[1, 2], [1, 3], [2, 3]]
+    assert [p["bookmark_id"] for p in task["materials"]["pages"]] == [1, 2, 3]
+
+    # A new page 6 shares 'llm' with 1-3 and 'caching' with 1 and 2.
+    _add_page(db, 6, ["llm", "caching"], "Version 3 caches prompts for a day.", _t(60))
+    db.execute("UPDATE enriched SET tags = ? WHERE bookmark_id = 2", (json.dumps(["LLM", "caching"]),))
+    db.commit()
+
+    # 'caching' (1, 2, 6): (1, 2) was checked under 'llm' with the same
+    # hashes, so only the new page's pairs are paid for.
+    caching = fake_client(message(lint_output()))
+    assert run_lint("caching", conn=db, runner=ApiRunner(caching)).status == "completed"
+    assert _sent_task(caching)["materials"]["pairs"] == [[1, 6], [2, 6]]
+
+    # 'llm' again (1, 2, 3, 6): only (3, 6) is left, and only its two pages go.
+    llm = fake_client(message(lint_output()))
+    assert run_lint("llm", conn=db, runner=ApiRunner(llm)).status == "completed"
+    task = _sent_task(llm)
+    assert task["materials"]["pairs"] == [[3, 6]]
+    assert [p["bookmark_id"] for p in task["materials"]["pages"]] == [3, 6]
+    assert "five minutes" not in _sent(llm) and "one hour" not in _sent(llm)  # pages 1 and 2 stay out
+
+    # Every pair was checked exactly once.
+    pairs = db.execute("SELECT bookmark_id_a, bookmark_id_b, count(*) FROM lint_pair_checks GROUP BY 1, 2").fetchall()
+    assert {(a, b): n for a, b, n in pairs} == {
+        (1, 2): 1, (1, 3): 1, (2, 3): 1, (1, 6): 1, (2, 6): 1, (3, 6): 1,
+    }
+    assert run_lint("llm", conn=db, runner=ApiRunner(fake_client())).status == "up_to_date"
+
+
+def test_an_unrelated_new_page_does_not_clear_an_earlier_finding(db):
+    from muninn.consumers.vault.lint_notes import load_lint_notes
+
+    assert run_lint("llm", conn=db, runner=ApiRunner(fake_client(message(lint_output(SUPERSEDES))))).status == "completed"
+    visible = {1, 2, 3, 5, 6}
+    assert [n.relation for n in load_lint_notes(db, visible)[1]] == ["superseded_by"]
+
+    # Page 6 arrives; the model, judging only 6's pairs, repeats nothing.
+    _add_page(db, 6, ["llm"], "Unrelated claims about tokenizers.", _t(60))
+    rerun = fake_client(message(lint_output()))
+    assert run_lint("llm", conn=db, runner=ApiRunner(rerun)).status == "completed"
+    assert _sent_task(rerun)["materials"]["pairs"] == [[1, 6], [2, 6], [3, 6]]
+    # (1, 2) was not re-checked, so its finding still renders.
+    assert [n.relation for n in load_lint_notes(db, visible)[1]] == ["superseded_by"]
+    assert db.execute(
+        "SELECT count(*) FROM lint_pair_checks WHERE bookmark_id_a = 1 AND bookmark_id_b = 2"
+    ).fetchone()[0] == 1
+
+
+def test_a_finding_on_a_pair_that_was_not_asked_about_is_rejected(db):
+    assert run_lint("llm", conn=db, runner=ApiRunner(fake_client(message(lint_output())))).status == "completed"
+    _add_page(db, 6, ["llm"], "Version 3 caches prompts for a day.", _t(60))
+    # Both attempts report on (1, 2), which was already checked.
+    client = fake_client(message(lint_output(SUPERSEDES)), message(lint_output(SUPERSEDES)))
+    result = run_lint("llm", conn=db, runner=ApiRunner(client))
+    assert result.status == "validation_failed"
+    assert any("the pair [1, 2] is not in materials.pairs" in e for e in result.errors), result.errors
+    assert _count(db, "lint_findings") == 0
+    assert db.execute("SELECT count(*) FROM lint_pair_checks WHERE task_id = ?", (result.task_id,)).fetchone()[0] == 0
+
+    # The writer ignores an off-pair finding even if one got past validation.
+    materials = lint_task.prepare_input(db, "llm")
+    assert materials["pairs"] == [[1, 6], [2, 6], [3, 6]]
+    run = SynthesisRun(task_id="lint-direct", task_type="lint", attempt=1, started_at=0, status="running",
+                       enrichment_model="m", enrichment_prompt_version="lint_v2")
+    lint_task.write_output(db, lint_output(SUPERSEDES), run, tag="llm", materials=materials)
+    assert _count(db, "lint_findings") == 0
+    rows = db.execute(
+        "SELECT bookmark_id_a, bookmark_id_b FROM lint_pair_checks WHERE task_id = 'lint-direct' ORDER BY 1, 2"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [(1, 6), (2, 6), (3, 6)]
+
+
+def test_task_pairs_of_a_legacy_task_without_a_pair_list_are_all_pairs(db):
+    pages = lint_task.prepare_input(db, "llm")["pages"]
+    assert lint_task.task_pairs({"tag": "llm", "pages": pages}) == {(1, 2), (1, 3), (2, 3)}
+    assert lint_task.task_pairs({"tag": "llm", "pages": pages, "pairs": [[3, 1]]}) == {(1, 3)}
 
 
 def test_budget_refusal_makes_no_call_and_writes_no_findings(db, monkeypatch):
@@ -212,7 +330,7 @@ def test_both_attempts_invalid_writes_nothing(db):
     assert result.status == "validation_failed"
     assert _count(db, "lint_pair_checks") == _count(db, "lint_findings") == 0
     # Not recorded as checked, so the next run is not skipped.
-    assert lint_task.pending_pairs(db, lint_task.prepare_input(db, "llm")["pages"], prompt_version="lint_v1")
+    assert lint_task.pending_pairs(db, lint_task.prepare_input(db, "llm")["pages"], prompt_version="lint_v2")
 
 
 def test_prompt_version_must_be_a_lint_prompt(db, tmp_path):
@@ -231,7 +349,13 @@ def test_emit_then_ingest_writes_findings_and_later_emits_are_skipped(db, tmp_pa
     assert emitted.status == "emitted"
     task = json.loads(emitted.task_file.read_text())
     assert validate_task_input(task) == []
-    assert task["task_type"] == "lint" and task["prompt_version"] == "lint_v1" and task["tag"] == "llm"
+    assert task["task_type"] == "lint" and task["prompt_version"] == "lint_v2" and task["tag"] == "llm"
+    assert task["materials"]["pairs"] == [[1, 2], [1, 3], [2, 3]]
+    # A lint_v2 task must carry its pair list; a lint_v1 task file (emitted
+    # before pair lists existed) is still valid without one.
+    no_pairs = {**task, "materials": {k: v for k, v in task["materials"].items() if k != "pairs"}}
+    assert any("pairs" in e for e in validate_task_input(no_pairs))
+    assert validate_task_input({**no_pairs, "prompt_version": "lint_v1"}) == []
     assert task["instructions"].startswith("You are the lint step of Muninn")
     assert "intra.example" not in emitted.task_file.read_text()
 
@@ -266,7 +390,7 @@ def test_ingested_invalid_result_emits_a_retry_with_the_lint_prompt(db, tmp_path
     res = ingest_result(path, conn=db, registry=registry, retry_dir=out)
     assert res.status == "validation_failed"
     retry = json.loads(res.task_file.read_text())
-    assert (retry["attempt"], retry["prompt_version"], retry["tag"]) == (2, "lint_v1", "llm")
+    assert (retry["attempt"], retry["prompt_version"], retry["tag"]) == (2, "lint_v2", "llm")
     assert retry["materials"] == task["materials"]
 
 

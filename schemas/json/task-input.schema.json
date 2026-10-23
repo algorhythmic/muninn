@@ -82,8 +82,47 @@
     },
     "materials": {
       "type": "object",
-      "description": "Task-specific input payload. Era passes bookmarks+neighbors; deep_pass passes source_text+known_bookmark_ids; ad_hoc passes corpus subset; lint passes pages sharing a tag.",
+      "description": "Task-specific input payload. Era passes bookmarks+neighbors; deep_pass passes source_text+known_bookmark_ids; ad_hoc passes corpus subset; lint passes the pairs to judge (pairs) and the pages sharing a tag that appear in them (pages).",
       "additionalProperties": true
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "task_type": { "const": "lint" } },
+        "required": ["task_type"]
+      },
+      "then": {
+        "properties": {
+          "materials": {
+            "properties": {
+              "pairs": {
+                "type": "array",
+                "minItems": 1,
+                "description": "lint: the pairs of bookmark ids to judge, lower id first. Only these pairs are recorded as checked, and a finding on any other pair is rejected.",
+                "items": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": { "type": "integer" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "task_type": { "const": "lint" },
+          "prompt_version": { "not": { "const": "lint_v1" } }
+        },
+        "required": ["task_type", "prompt_version"]
+      },
+      "then": {
+        "properties": { "materials": { "required": ["tag", "pairs", "pages"] } }
+      }
+    }
+  ]
 }

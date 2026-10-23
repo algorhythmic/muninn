@@ -102,7 +102,7 @@ def lint_output(*findings: dict) -> dict:
         "findings": list(findings),
         "synthesis_metadata": {
             "model": "claude-opus-5-5",
-            "prompt_version": "lint_v1",
+            "prompt_version": "lint_v2",
             "input_token_count": 0,
             "output_token_count": 0,
         },

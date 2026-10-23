@@ -39,7 +39,7 @@ muninn synthesize ingest-result FILE [--retry-dir DIR]
 | `task_type` | `era_narrative`, `deep_pass`, `ad_hoc_analysis` or `lint` |
 | `attempt` | `1`, or `2` for the single self-correction retry |
 | `task_digest` | `sha256:<hex>`, see below |
-| `prompt_version` | e.g. `synthesis_v1` (the first three tasks) or `lint_v1`; names `src/muninn/synthesis/prompts/<version>.md` |
+| `prompt_version` | e.g. `synthesis_v1` (the first three tasks) or `lint_v2`; names `src/muninn/synthesis/prompts/<version>.md` |
 | `created_at` | ISO-8601 UTC |
 | `instructions` | the system prompt (the text of that prompt file) |
 | `result_schema` | the JSON Schema the result's `output` must satisfy (`era-narrative`, `deep-pass`, `ad-hoc-analysis` or `lint.schema.json`, inlined) |
@@ -166,16 +166,17 @@ An Odin-dispatched session works the same way. Odin carries the task file to its
 
 `task_type: "lint"` is the model tier of vault lint: contradictions and superseded claims among compiled bookmark pages that share a tag. [`vault-lint.md`](vault-lint.md) covers it end to end. Here is what differs from the other three tasks.
 
-- **Prompt.** `prompt_version` is `lint_v1` (`prompts/lint_v1.md`), not `synthesis_v1`. `--prompt-version` takes another `lint_vN`. Anything not named `lint_v<N>` is refused, by the same rule `muninn enrich --prompt-version` uses.
+- **Prompt.** `prompt_version` is `lint_v2` (`prompts/lint_v2.md`), not `synthesis_v1`. `--prompt-version` takes another `lint_vN`. Anything not named `lint_v<N>` is refused, by the same rule `muninn enrich --prompt-version` uses. `lint_v2` replaced `lint_v1` when tasks began carrying `materials.pairs`; its prompt file is gone, so a new `lint_v1` task can't be built, but a `lint_v1` task file already emitted still ingests (it asked about every pair of its pages).
 - **Envelope.** `tag` is the task's subject.
 - **Materials.**
   - `materials.tag`.
-  - `materials.pages`, oldest first. Each page has `bookmark_id`, `title`, `source`, `published_at`, `captured_at`, `dated_at`, `dated_by`, `summary`, `text`, `text_truncated` and `content_hash`.
+  - `materials.pairs`: the pairs to judge, as `[lower_id, higher_id]` lists, sorted. Only the pending pairs (see Idempotency) are listed, and `task-input.schema.json` requires at least one for any `lint_v2` or later task.
+  - `materials.pages`, oldest first: exactly the pages that appear in `materials.pairs`. Each page has `bookmark_id`, `title`, `source`, `published_at`, `captured_at`, `dated_at`, `dated_by`, `summary`, `text`, `text_truncated` and `content_hash`.
   - The pages are visible rows only, with X posts masked and withheld as the vault shows them.
 - **Result schema.** `lint.schema.json`: `findings[]` (`relation` is `contradicts` or `supersedes`, plus `bookmark_id`, `other_bookmark_id`, `rationale` and `evidence[]` of `{bookmark_id, quote}`) and `synthesis_metadata`.
-- **Checks after the schema.** Both ids are pages of the task, and they differ. A `supersedes` finding's `bookmark_id` is dated strictly after `other_bookmark_id`. Every quote occurs in the named page's `text` or `summary` (exactly, or with different whitespace), and not across `[hidden link]`. Each page of the pair is quoted at least once. A failure is `validation_failed`, with the usual single correction retry.
-- **Writes.** One `lint_pair_checks` row per pair of pages, finding or not, and one `lint_findings` row per finding. Both carry the two content hashes, the model, the prompt version and the run's `task_id`.
-- **Idempotency.** Before any task is built, `synthesize lint` checks whether every pair of the selected pages was already checked with the same content hashes and prompt version. An API run also needs the same model; an emitted task accepts any model. If so, it makes no call, emits no file and records no run, and reports `up to date`.
+- **Checks after the schema.** Both ids are pages of the task, they differ, and the pair is in `materials.pairs`. A `supersedes` finding's `bookmark_id` is dated strictly after `other_bookmark_id`. Every quote occurs in the named page's `text` or `summary` (exactly, or with different whitespace), and not across `[hidden link]`. Each page of the pair is quoted at least once. A failure is `validation_failed`, with the usual single correction retry.
+- **Writes.** One `lint_pair_checks` row per pair in `materials.pairs`, finding or not, and one `lint_findings` row per finding. A finding on any other pair is never written. Both carry the two content hashes, the model, the prompt version and the run's `task_id`.
+- **Idempotency.** Before any task is built, `synthesize lint` checks each pair of the selected pages: was it already checked, under any tag, with the same content hashes and prompt version? An API run also needs the same model; an emitted task accepts any model. Only the pairs that were not go into the task. If there are none, it makes no call, emits no file and records no run, and reports `up to date`.
 - **Usage.** `operation='synthesize:lint'`, under the same per-run and monthly caps.
 - **Rendering.** `muninn vault compile` renders current findings into compiled `wiki/bookmarks/` pages only (see `vault-lint.md`).
 
