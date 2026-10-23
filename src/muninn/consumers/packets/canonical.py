@@ -36,6 +36,21 @@ MAX_SAFE_INTEGER = 2**53 - 1
 # Name of the text normalization rule; recorded on every content revision.
 TEXT_NORMALIZATION = "muninn-text/1"
 
+# The whitespace of muninn-text/1: exactly these 29 code points, written out
+# so the rule never depends on a runtime's Unicode tables. It is the set
+# Python's str.isspace() matches (Unicode 15.0 and 16.0): U+0009..U+000D,
+# U+001C..U+001F, U+0020, U+0085, U+00A0, U+1680, U+2000..U+200A, U+2028,
+# U+2029, U+202F, U+205F, U+3000. Not whitespace here: U+180E, U+200B,
+# U+2060, U+FEFF.
+TEXT_WHITESPACE = (
+    "\u0009\u000a\u000b\u000c\u000d"
+    "\u001c\u001d\u001e\u001f"
+    "\u0020\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+_BLANK_RUNS = re.compile(r"\n{3,}")
+
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -122,18 +137,25 @@ def context_digest(entries: Any) -> str:
 
 
 def normalize_text(text: str | None) -> str:
-    """Normalization rule ``muninn-text/1`` for extracted content.
+    """Normalization rule ``muninn-text/1`` for extracted content (contract
+    section 2), in order:
 
-    NFC; CRLF and CR to LF; trailing whitespace stripped from each line;
-    runs of three or more newlines collapsed to two; leading and trailing
-    whitespace stripped. ``None`` normalizes to the empty string.
+    1. Unicode NFC.
+    2. CR LF, then any remaining CR, becomes LF. Nothing else is a line
+       break (not U+000B, U+000C, U+0085, U+2028 or U+2029).
+    3. Each LF-separated line loses its trailing :data:`TEXT_WHITESPACE`.
+    4. Runs of three or more LFs become two.
+    5. Leading and trailing :data:`TEXT_WHITESPACE` is removed.
+
+    Whitespace inside a line is kept as it is. ``None`` normalizes to the
+    empty string.
     """
     if not text:
         return ""
     out = unicodedata.normalize("NFC", text).replace("\r\n", "\n").replace("\r", "\n")
-    out = "\n".join(line.rstrip() for line in out.split("\n"))
-    out = re.sub(r"\n{3,}", "\n\n", out)
-    return out.strip()
+    out = "\n".join(line.rstrip(TEXT_WHITESPACE) for line in out.split("\n"))
+    out = _BLANK_RUNS.sub("\n\n", out)
+    return out.strip(TEXT_WHITESPACE)
 
 
 def content_digest(text: str | None) -> str:

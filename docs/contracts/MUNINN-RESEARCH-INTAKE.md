@@ -129,12 +129,48 @@ applicability review, proposals and human decisions.
 
   So a consumer may verify digests with any JCS implementation, or with
   `sha256sum` on an exported file, which is written in canonical form.
-- **Text normalization `muninn-text/1`.** Unicode NFC; CRLF and CR become
-  LF; trailing whitespace is stripped from each line; runs of three or
-  more newlines collapse to two; leading and trailing whitespace is
-  stripped. `content_sha256` is the sha256 of the normalized text's UTF-8
-  bytes. A capture with no readable content has the empty-string digest
+- **Text normalization `muninn-text/1`.** The input is a sequence of
+  Unicode scalar values (no surrogates); a missing text is the empty
+  string. These steps run in order:
+  1. Normalize to NFC (Unicode Standard Annex #15). The reference
+     implementation uses Unicode 15.0 or later. Normalization stability
+     makes the result the same under any later version for text whose
+     characters are all assigned in both versions.
+  2. Replace every CR LF pair (U+000D U+000A) with LF (U+000A), then every
+     remaining CR with LF. No other code point is a line break: U+000B,
+     U+000C, U+0085, U+2028 and U+2029 stay as they are.
+  3. Split the text on LF into lines. Remove every whitespace code point
+     (the set W below) from the end of each line, then join the lines
+     with LF.
+  4. Replace every run of three or more consecutive LFs with exactly two.
+  5. Remove every code point in W from the start and the end of the text.
+
+  W, the whitespace of `muninn-text/1`, is exactly these 29 code points:
+  U+0009 to U+000D, U+001C to U+001F, U+0020, U+0085, U+00A0, U+1680,
+  U+2000 to U+200A, U+2028, U+2029, U+202F, U+205F and U+3000. It is the
+  set Python's `str.isspace()` matches, written out so the rule does not
+  depend on a runtime's Unicode tables. U+180E, U+200B, U+2060 and U+FEFF
+  are not in W. Whitespace inside a line is kept unchanged, not collapsed.
+
+  `content_sha256` is the sha256 of the normalized text's UTF-8 bytes. A
+  capture with no readable content has the empty-string digest
   `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+  An implementation must reproduce these vectors (inputs and outputs are
+  JSON string literals):
+
+  | Input | Normalized | `content_sha256` |
+  |---|---|---|
+  | `""` | `""` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+  | `"Hello, world."` | `"Hello, world."` | `f8c3bf62a9aa3e6fc1619c250e48abe7519373d3edf41be62eb5dc45199af2ef` |
+  | `"  Hello\r\nworld  \r\n\r\n\r\n\r\nEnd\t \n"` | `"Hello\nworld\n\nEnd"` | `0bb5c06fdca9a48e0a49e3142e81ea5fcaa5adea50df44d6916f3af5bee31962` |
+  | `"a\rb\r\r\rc"` | `"a\nb\n\nc"` | `e065ac2af3e0fcb06066a74d683ed8a2cdbf0407c710bd7922bdb409ac5778a1` |
+  | `"Cafe\u0301 au lait"` | `"Caf\u00e9 au lait"` | `793e7643ce558259f6fe71f9ecaaf268acbcd011a2bb4c7f561df05a133d4d08` |
+  | `"x\u00a0\u3000\ny\u2028"` | `"x\ny"` | `9ab9de25768ac172235e119b76362ecddad33878fe9a7792cdddbe47236f9a87` |
+  | `"a\u00a0 b\tc"` | `"a\u00a0 b\tc"` | `979e2aec504fe9fdb2bd310fe87c8b4c6785b46b1b6c47d0e666984874b12982` |
+  | `"a\u200b\nb\ufeff"` | `"a\u200b\nb\ufeff"` | `02600435d4b7081eb3e71aa221542971417aac507610639ef0e835110412ffb9` |
+  | `"a\u2028b\u0085c"` | `"a\u2028b\u0085c"` | `93029dc74bec70d80caa7cdf47baa1ab91c7a84098975a904cc5528b7942ed5b` |
+  | `"a\u000c\n\u000c\n\u000c\nb"` | `"a\n\nb"` | `38022fd2b8dbc5cb3d2cee74e083edbf59e3d4e13d067ebcb5db633d4cff4d8c` |
+  | `" \t\u3000\r\n "` | `""` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 - **Locators.** Every URL in a record is the output of muninn's
   `sanitize_url`. That function lowercases the host, strips userinfo,
   tracking parameters and credential-shaped parameters, and sorts the
@@ -846,7 +882,7 @@ is then refused may have a NULL `sync_checkpoint_id`.
 
 | Version | Date | Status | Manifest | Notes |
 |---|---|---|---|---|
-| 0.1.0-draft | 2026-10-21 | draft, unreleased: schemas validated; capture, revisions, assessment, exporter and withdrawal implemented on synthetic data | `docs/contracts/MUNINN-RESEARCH-INTAKE-0.1.0-draft.sha256` | First draft (RI-03). Amended in place before release: assessment `evidence`, the required assessment `context_digest` (part of the assessment key), the optional-key convention (null removed from the optional `entity_status`, `http_status` and `final_locator`), automatic withdrawal, and the section 10.1 conventions. Open questions in section 14 |
+| 0.1.0-draft | 2026-10-21 | draft, unreleased: schemas validated; capture, revisions, assessment, exporter and withdrawal implemented on synthetic data | `docs/contracts/MUNINN-RESEARCH-INTAKE-0.1.0-draft.sha256` | First draft (RI-03). Amended in place before release: assessment `evidence`, the required assessment `context_digest` (part of the assessment key), the optional-key convention (null removed from the optional `entity_status`, `http_status` and `final_locator`), automatic withdrawal, the section 10.1 conventions, and the exact `muninn-text/1` algorithm (its whitespace set and line breaks) with test vectors, which leaves every digest unchanged. Open questions in section 14 |
 
 ## 12. Status by part
 
@@ -888,7 +924,8 @@ These run in muninn's test suite, offline and without credentials:
    - the canary
 4. Packet integrity rules (including the excerpts and items that
    assessment evidence cites), digest stability, and file sha256 equal to
-   the packet digest.
+   the packet digest. The `muninn-text/1` vectors in section 2 hold, and
+   its whitespace set W equals Python's `str.isspace()` set.
 5. 002 applies to a 001 database without changing it, and its
    append-only, coverage, disposition and SET NULL rules hold.
 6. The packets package and the row-to-record mapping import no heavy

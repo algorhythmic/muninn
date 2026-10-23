@@ -331,6 +331,47 @@ def test_text_normalization() -> None:
     assert normalize_text(None) == "" and content_digest(None) == hashlib.sha256(b"").hexdigest()
 
 
+# muninn-text/1 conformance vectors: (input, normalized, content_sha256).
+# The contract (section 2) carries the same table; see the test below.
+TEXT_VECTORS = [
+    ("", "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+    ("Hello, world.", "Hello, world.", "f8c3bf62a9aa3e6fc1619c250e48abe7519373d3edf41be62eb5dc45199af2ef"),
+    ("  Hello\r\nworld  \r\n\r\n\r\n\r\nEnd\t \n", "Hello\nworld\n\nEnd",
+     "0bb5c06fdca9a48e0a49e3142e81ea5fcaa5adea50df44d6916f3af5bee31962"),
+    ("a\rb\r\r\rc", "a\nb\n\nc", "e065ac2af3e0fcb06066a74d683ed8a2cdbf0407c710bd7922bdb409ac5778a1"),
+    ("Café au lait", "Café au lait", "793e7643ce558259f6fe71f9ecaaf268acbcd011a2bb4c7f561df05a133d4d08"),
+    ("x 　\ny ", "x\ny", "9ab9de25768ac172235e119b76362ecddad33878fe9a7792cdddbe47236f9a87"),
+    ("a  b\tc", "a  b\tc", "979e2aec504fe9fdb2bd310fe87c8b4c6785b46b1b6c47d0e666984874b12982"),
+    ("a​\nb﻿", "a​\nb﻿", "02600435d4b7081eb3e71aa221542971417aac507610639ef0e835110412ffb9"),
+    ("a b\u0085c", "a b\u0085c", "93029dc74bec70d80caa7cdf47baa1ab91c7a84098975a904cc5528b7942ed5b"),
+    ("a\u000c\n\u000c\n\u000c\nb", "a\n\nb", "38022fd2b8dbc5cb3d2cee74e083edbf59e3d4e13d067ebcb5db633d4cff4d8c"),
+    (" \t　\r\n ", "", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+]
+
+
+@pytest.mark.parametrize(("text", "normalized", "digest"), TEXT_VECTORS)
+def test_text_normalization_vectors(text: str, normalized: str, digest: str) -> None:
+    assert normalize_text(text) == normalized
+    assert content_digest(text) == digest == hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def test_text_normalization_vectors_match_the_contract() -> None:
+    row = re.compile(r'^\s*\| `(".*?")` \| `(".*?")` \| `([0-9a-f]{64})` \|\s*$')
+    rows = [m.groups() for m in map(row.match, CONTRACT.read_text(encoding="utf-8").splitlines()) if m]
+    assert [(json.loads(a), json.loads(b), d) for a, b, d in rows] == TEXT_VECTORS
+
+
+def test_text_whitespace_is_explicit_and_matches_isspace() -> None:
+    """The rule's whitespace set is written out (29 code points), equal to
+    str.isspace() on this runtime, so digests are those the earlier
+    str.strip()-based implementation produced."""
+    from muninn.consumers.packets.canonical import TEXT_WHITESPACE
+
+    assert len(TEXT_WHITESPACE) == len(set(TEXT_WHITESPACE)) == 29
+    assert set(TEXT_WHITESPACE) == {chr(c) for c in range(sys.maxunicode + 1) if chr(c).isspace()}
+    assert not set(TEXT_WHITESPACE) & {"᠎", "​", "⁠", "﻿"}
+
+
 def test_identity_rules() -> None:
     assert x_post_item_id("1900000000000000001") == "x:post:1900000000000000001"
     for bad in ("", "0123", "12a"):
