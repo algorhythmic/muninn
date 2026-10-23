@@ -338,3 +338,71 @@ async def test_http_451_is_still_a_blocked_revision(fresh_db, make_client) -> No
     assert [r[0] for r in fresh_db.execute(
         "SELECT coverage FROM scrape_history WHERE bookmark_id = ?", (bid,)
     )] == ["blocked"]
+
+
+# ── robots.txt redirects ──────────────────────────────────────────
+
+HIDDEN_HOST = "private.example.com"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_robots_redirect_to_a_hidden_host_is_not_followed(fresh_db, make_client) -> None:
+    """The hidden host is never contacted. Its rules cannot be read, so the
+    origin counts as unreachable: nothing on it is fetched this run, and the
+    stop is not cached, so the next run asks again."""
+    from muninn.scrape.domain_policy import DomainPolicy
+
+    respx.get(IA_CDX_BASE).mock(return_value=httpx.Response(200, text=CDX_EMPTY))
+    robots = respx.get(ROBOTS).mock(return_value=httpx.Response(
+        301, headers={"location": f"https://{HIDDEN_HOST}/robots.txt"}))
+    hidden = respx.route(host=HIDDEN_HOST).mock(return_value=httpx.Response(200, text=""))
+    page = respx.get(PUBLIC).mock(return_value=httpx.Response(200, text=PAGE))
+    bid = _insert(fresh_db, PUBLIC, "p")
+
+    client = make_client()
+    try:
+        await scrape_all(fresh_db, client=client, policy=DomainPolicy(domain_patterns=(HIDDEN_HOST,)))
+    finally:
+        await client.close()
+
+    assert hidden.call_count == 0 and page.call_count == 0 and robots.call_count == 1
+    assert _live(fresh_db, bid) is None  # skipped this run
+    client = make_client()
+    try:
+        assert await client.robots_verdict(PUBLIC) is None  # not cached: asked again
+    finally:
+        await client.close()
+    assert robots.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_robots_redirect_is_followed_hop_by_hop(fresh_db, make_client) -> None:
+    moved = "https://cdn.example.net/site/robots.txt"
+    respx.get(ROBOTS).mock(return_value=httpx.Response(302, headers={"location": moved}))
+    target = respx.get(moved).mock(return_value=httpx.Response(200, text=RULES))
+    client = make_client()
+    try:
+        assert await client.robots_verdict(PRIVATE) == "disallowed"
+        assert await client.robots_verdict(PUBLIC) is None
+    finally:
+        await client.close()
+    assert target.call_count == 1
+    assert [r["url"] for r in client.request_log] == [ROBOTS, moved]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_more_than_five_robots_redirects_mean_no_rules(fresh_db, make_client) -> None:
+    hops = [f"{SITE}/r{i}" for i in range(7)]
+    respx.get(ROBOTS).mock(return_value=httpx.Response(302, headers={"location": hops[0]}))
+    for here, there in zip(hops, hops[1:]):
+        respx.get(here).mock(return_value=httpx.Response(302, headers={"location": there}))
+    respx.get(hops[-1]).mock(return_value=httpx.Response(200, text="User-agent: *\nDisallow: /\n"))
+    client = make_client()
+    try:
+        assert await client.robots_verdict(PRIVATE) is None
+    finally:
+        await client.close()
+    assert len(client.request_log) == 6  # robots.txt plus five redirects, no more

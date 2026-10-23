@@ -22,8 +22,10 @@ is not one). Each origin's file is fetched once, cached per run
 and on disk for ``robots_ttl`` seconds. A 4xx answer means "no rules"
 (allow); a 5xx answer or a transport error means the origin is skipped for
 the rest of the run, with nothing cached on disk, so the next run asks
-again. A caller-supplied ``stop_at`` predicate (domain policy) stops a
-redirect before a hidden origin is contacted, robots.txt included. Wayback
+again. robots.txt redirects are followed one hop at a time too, at most
+five (more: no rules). A caller-supplied ``stop_at`` predicate (domain
+policy) stops a redirect, of a page or of a robots.txt, before a hidden
+locator is contacted; a robots.txt stopped that way counts as unreachable. Wayback
 fetches and CDX lookups are not subject to the target site's robots.txt.
 """
 
@@ -65,6 +67,9 @@ ROBOTS_TOKEN = "Muninn"
 ROBOTS_MAX_BYTES = 500 * 1024
 # Redirect hops the live pass follows (each one robots- and policy-checked).
 MAX_REDIRECTS = 10
+# Redirect hops a robots.txt fetch follows (RFC 9309 §2.3.1.2: at least
+# five), each one policy-checked. More than that: "unavailable" (no rules).
+ROBOTS_MAX_REDIRECTS = 5
 
 IA_CDX_BASE = "https://web.archive.org/cdx/search/cdx"
 IA_WEB_BASE = "https://web.archive.org/web"
@@ -258,7 +263,7 @@ class ScrapeClient:
                 "error": "redirected to a locator hidden by domain policy; not followed",
                 "error_kind": "policy_hidden",
             }
-        verdict = await self.robots_verdict(url)
+        verdict = await self.robots_verdict(url, stop_at=stop_at)
         if verdict is None:
             return None
         if verdict == "disallowed":
@@ -284,15 +289,18 @@ class ScrapeClient:
             host = f"[{host}]"
         return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port is not None else "")
 
-    async def robots_verdict(self, url: str) -> Optional[str]:
+    async def robots_verdict(
+        self, url: str, *, stop_at: Optional[Callable[[str], bool]] = None
+    ) -> Optional[str]:
         """None if robots.txt lets ``Muninn`` fetch ``url``; ``"disallowed"``
         if it does not; otherwise why the origin's robots.txt could not be
-        read (a 5xx status or a transport error), in which case nothing on
-        that origin is fetched this run (RFC 9309 §2.3.1.4)."""
+        read (a 5xx status, a transport error, or a redirect to a locator
+        ``stop_at`` hides), in which case nothing on that origin is fetched
+        this run (RFC 9309 §2.3.1.4)."""
         origin = self._origin(url)
         if origin is None:
             return None  # not an http(s) URL: nothing to ask
-        state = await self._robots_for(origin)
+        state = await self._robots_for(origin, stop_at)
         if isinstance(state, str):
             return state
         if state is None or state.can_fetch(ROBOTS_TOKEN, url):
@@ -300,33 +308,54 @@ class ScrapeClient:
         return "disallowed"
 
     async def _robots_for(
-        self, origin: str
+        self, origin: str, stop_at: Optional[Callable[[str], bool]] = None
     ) -> RobotsRules | None | str:
         if origin not in self._robots:
             lock = self._robots_locks.setdefault(origin, asyncio.Lock())
             async with lock:
                 if origin not in self._robots:
-                    self._robots[origin] = await self._load_robots(origin)
+                    self._robots[origin] = await self._load_robots(origin, stop_at)
         return self._robots[origin]
 
     async def _load_robots(
-        self, origin: str
+        self, origin: str, stop_at: Optional[Callable[[str], bool]] = None
     ) -> RobotsRules | None | str:
-        """The origin's parsed robots.txt, None when it has none (4xx), or
-        the reason it could not be read (not cached on disk)."""
+        """The origin's parsed robots.txt, None when it has none (4xx, or
+        more than :data:`ROBOTS_MAX_REDIRECTS` redirects), or the reason it
+        could not be read (not cached on disk).
+
+        Redirects are followed one hop at a time, and a hop to a locator
+        ``stop_at`` hides is not contacted. That counts as unreachable,
+        not as "no rules": the origin's rules could not be read, so its
+        pages are skipped this run rather than fetched blind, and since
+        nothing is cached the next run (perhaps under another policy)
+        asks again."""
         cache_key = f"robots:{origin}"
         entry = None if self.refresh else self.http_cache.get(cache_key, max_age=self.robots_ttl)
         if entry is None:
-            robots_url = f"{origin}/robots.txt"
-            await self.rate.wait_for_domain(robots_url, LIVE_DOMAIN_INTERVAL)
-            self._request_log.append({"type": "robots", "url": robots_url, "time": time.monotonic()})
             client = await self._get_client()
-            try:
-                # RFC 9309 §2.3.1.2: follow (at least five) redirects.
-                resp = await client.get(robots_url, follow_redirects=True)
-            except httpx.HTTPError as exc:
-                log.warning("robots.txt for %s unreachable: %s", origin, exc)
-                return type(exc).__name__
+            current = f"{origin}/robots.txt"
+            for _hop in range(ROBOTS_MAX_REDIRECTS + 1):
+                if stop_at is not None and stop_at(sanitize_url(current).sanitized_url or current):
+                    log.warning("robots.txt for %s redirects to a policy-hidden locator", origin)
+                    return "redirect to a policy-hidden locator"
+                await self.rate.wait_for_domain(current, LIVE_DOMAIN_INTERVAL)
+                self._request_log.append({"type": "robots", "url": current, "time": time.monotonic()})
+                try:
+                    resp = await client.get(current, follow_redirects=False)
+                except httpx.HTTPError as exc:
+                    log.warning("robots.txt for %s unreachable: %s", origin, exc)
+                    return type(exc).__name__
+                if resp.next_request is None:
+                    break
+                current = str(resp.next_request.url)
+            else:
+                # RFC 9309 §2.3.1.2: past the redirect limit the file may
+                # be taken as unavailable, which means no rules.
+                log.warning("robots.txt for %s: more than %d redirects", origin, ROBOTS_MAX_REDIRECTS)
+                entry = {"status": 404, "body": "", "redirects_exceeded": True}
+                self.http_cache.put(cache_key, entry)
+                return None
             status = resp.status_code
             if not (200 <= status < 300 or 400 <= status < 500):
                 log.warning("robots.txt for %s answered HTTP %d", origin, status)
