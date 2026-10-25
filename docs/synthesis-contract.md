@@ -102,8 +102,15 @@ The lint checks are in [The lint task](#the-lint-task).
 
 The outcome:
 
-- **Valid:** the canonical tables are written and the run row becomes `completed`, in one transaction. The tables are `eras` (upsert), `enriched` + `cross_references` (deep pass), `analyses` (append) or `lint_pair_checks` + `lint_findings` (lint, append). The writes use the registry copy's materials, so a harness that edits its own copy changes nothing. A deep pass keeps the bulk-enrichment idempotency triple (RI-01 D6). It also refreshes FTS, while Qdrant waits for `scripts/reconcile-vector-index.py`.
+- **Valid:** the canonical tables are written and the run row becomes `completed`, in one transaction. The tables are `eras` (upsert), `deep_pass_results` + `enriched` + `cross_references` (deep pass), `analyses` (append) or `lint_pair_checks` + `lint_findings` (lint, append). The writes use the registry copy's materials, so a harness that edits its own copy changes nothing. A deep pass keeps the bulk-enrichment idempotency triple (RI-01 D6). It also refreshes FTS, while Qdrant waits for `scripts/reconcile-vector-index.py`.
 - **Invalid:** the row becomes `validation_failed` with its errors, and no canonical table is touched. On attempt 1 with `--retry-dir`, an attempt-2 task file is emitted. It has the same task id and materials, plus the correction instructions. Ingesting its result follows the same rules. There is no third attempt.
+
+A deep pass first preserves its complete output and provenance in immutable
+`deep_pass_results` (migration 004), in the same transaction as its mutable
+projections. See [deep-pass provenance](synthesis-provenance.md) for the
+identity/replay rules and visibility-filtered read helpers. History does not
+select display precedence or automatically restore an older summary. The
+`muninn-synthesis/1` task/result file format is unchanged.
 
 An ingested result records no `usage_records` row. A harness's spend is not muninn's API spend.
 

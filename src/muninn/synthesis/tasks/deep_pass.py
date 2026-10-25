@@ -9,7 +9,9 @@ Materials in the task file:
                         cross-reference (the candidate set + self)
 
 DB writes (in order, single transaction):
-  1. UPDATE enriched SET summary, tags, entities, content_type, language,
+  1. Append the immutable result and its source/run provenance. Identical
+     replays return without changing projections; conflicting replays fail.
+  2. UPDATE enriched SET summary, tags, entities, content_type, language,
      word_count, key_quotes, deep_pass_requested=0 (the request is now
      served — clearing it drains the --pending queue).
      The per-bookmark idempotency triple (enrichment_model,
@@ -22,7 +24,7 @@ DB writes (in order, single transaction):
      summary/tags, so keyword search sees the deep pass. The Qdrant point
      is left for scripts/reconcile-vector-index.py, which re-embeds any
      point whose payload no longer matches its enriched row.
-  2. INSERT INTO cross_references with created_by='deep_pass' (skipped on
+  3. INSERT INTO cross_references with created_by='deep_pass' (skipped on
      UNIQUE conflict).
 """
 
@@ -35,6 +37,7 @@ import time
 from typing import Any
 
 from muninn.models import SynthesisRun
+from muninn.synthesis.provenance import record_deep_pass
 
 
 CANONICAL_PASSES_FALLBACK = ("at_capture", "recent_archive", "live", "live_fallback")
@@ -85,7 +88,7 @@ def prepare_input(
             f"SELECT b.bookmark_id, b.title, b.url, e.summary, e.tags "
             f"FROM bookmarks b "
             f"LEFT JOIN enriched e ON e.bookmark_id = b.bookmark_id "
-            f"WHERE b.bookmark_id IN ({placeholders})",
+            f"WHERE b.bookmark_id IN ({placeholders}) AND b.content_visible = 1",
             candidate_neighbor_ids,
         )
         for r in cur.fetchall():
@@ -99,7 +102,7 @@ def prepare_input(
                 }
             )
 
-    known_ids = list(set(candidate_neighbor_ids) | {bookmark_id})
+    known_ids = sorted({neighbor["bookmark_id"] for neighbor in neighbors} | {bookmark_id})
 
     return {
         "bookmark_id": bookmark_id,
@@ -121,13 +124,29 @@ def write_output(
     bookmark_id: int,
     materials: dict[str, Any] | None = None,
 ) -> None:
-    """Update the enriched row and insert deep_pass cross_references.
+    """Preserve the result, then update the current deep-pass projections.
 
+    Runs inside the caller's success transaction. The immutable record is
+    written first so a conflicting replay cannot alter enriched, FTS or
+    cross-references. An identical replay leaves later projections alone.
     `created_by='deep_pass'` is injected here, never trusted from the model.
-    UNIQUE(source_bookmark_id, target_bookmark_id, created_by) makes
-    re-running idempotent.
     """
+    # Policy may have changed since the task's materials were prepared.
+    # Reject stale hidden tasks before any write or completed run status.
+    visibility = conn.execute(
+        "SELECT content_visible FROM bookmarks WHERE bookmark_id = ?", (bookmark_id,),
+    ).fetchone()
+    if visibility is None:
+        raise LookupError(f"bookmark_id {bookmark_id} not found")
+    if not visibility[0]:
+        raise LookupError(f"bookmark_id {bookmark_id} is hidden by domain policy")
+
     materials = materials or {}
+    identity = record_deep_pass(
+        conn, output, run, bookmark_id=bookmark_id, materials=materials,
+    )
+    if not identity.inserted:
+        return
     meta = output.get("synthesis_metadata", {}) or {}
     enrichment_model = run.enrichment_model or meta.get("model") or "unknown"
     prompt_version = run.enrichment_prompt_version or meta.get("prompt_version") or "deep_pass_v1"
@@ -137,7 +156,7 @@ def write_output(
 
     cur = conn.cursor()
 
-    # 1. Upsert enriched row. On conflict, UPDATE only the deep-pass
+    # 2. Upsert enriched row. On conflict, UPDATE only the deep-pass
     #    columns — never the idempotency triple or enriched_at (D6).
     cur.execute(
         """
@@ -172,10 +191,10 @@ def write_output(
         ),
     )
 
-    # 1b. Keep the keyword index in step with the new summary/tags.
+    # 2b. Keep the keyword index in step with the new summary/tags.
     _refresh_fts(conn, bookmark_id, source_text)
 
-    # 2. Cross references — inject created_by='deep_pass', dedupe via UNIQUE.
+    # 3. Cross references — inject created_by='deep_pass', dedupe via UNIQUE.
     for ref in output.get("cross_references") or []:
         target_id = ref.get("target_bookmark_id")
         if target_id is None:
@@ -185,13 +204,19 @@ def write_output(
             INSERT OR IGNORE INTO cross_references (
                 source_bookmark_id, target_bookmark_id, relationship,
                 rationale, created_by
-            ) VALUES (?, ?, ?, ?, 'deep_pass')
+            )
+            SELECT ?, ?, ?, ?, 'deep_pass'
+            WHERE EXISTS (
+                SELECT 1 FROM bookmarks
+                WHERE bookmark_id = ? AND content_visible = 1
+            )
             """,
             (
                 bookmark_id,
                 target_id,
                 ref.get("relationship"),
                 ref.get("rationale") or _confidence_to_rationale(ref.get("confidence")),
+                target_id,
             ),
         )
 
