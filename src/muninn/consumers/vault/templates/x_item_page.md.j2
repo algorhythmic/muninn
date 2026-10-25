@@ -104,6 +104,14 @@ _Post text unavailable (retrieval status: {{ x.retrieval_status or 'not retrieve
 
 {% endfor %}
 {% endif %}
+{% if persisted_cross_refs %}
+
+## Cross-references
+
+{% for ref in persisted_cross_refs %}
+- [[{{ ref }}]]
+{% endfor %}
+{% endif %}
 {% if cross_refs %}
 
 ## Related

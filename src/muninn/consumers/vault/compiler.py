@@ -16,8 +16,10 @@ and superseded claims) are added to the pages they concern; see
 
 X-lane rows (`source` in `x`, `x_article`, `x_link`) compile into the same
 namespace through `templates/x_item_page.md.j2`, with bidirectional links
-from `item_links`; see :mod:`muninn.consumers.vault.x_pages`. Browser
-bookmark pages keep their template and slugs unchanged.
+from `item_links`; see :mod:`muninn.consumers.vault.x_pages`. Both templates
+render persisted `cross_references` in both directions, separately from
+era/tag suggestions. Only visible compiled targets get links; stored
+relationship prose is not rendered. Browser bookmark slugs are unchanged.
 
 CRITICAL: this module enforces SPEC.md Decision 2 (two distinct vaults — the
 COMPILED Muninn output vault must NEVER be the same as the user's PERSONAL
@@ -31,12 +33,12 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
 
 from jinja2 import Environment, FileSystemLoader
 
 from muninn.config import load_paths
 from muninn.consumers.vault import x_pages
+from muninn.consumers.vault.cross_refs import load_cross_refs
 from muninn.consumers.vault.lint_notes import apply_lint_notes, load_lint_notes
 from muninn.db import connect
 
@@ -119,14 +121,14 @@ def _parse_json_list(val: str | None) -> list:
     return parsed if isinstance(parsed, list) else []
 
 
-def _build_cross_refs(
+def _build_related_refs(
     bookmark_id: int,
     era_label: str | None,
     tags: list,
     conn: sqlite3.Connection,
     slug_by_id: dict[int, str],
 ) -> list[str]:
-    """Other visible bookmarks sharing era_label or any tag with this one."""
+    """Heuristic suggestions, distinct from persisted cross-references."""
     related: set[int] = set()
 
     if era_label:
@@ -157,8 +159,8 @@ def _get_template_env() -> Environment:
 
 
 def _get_x_template_env() -> Environment:
-    # Separate env: the X template uses block trimming, and the browser
-    # template's output must not change (golden-tested).
+    # Separate env: the X template uses block trimming; preserve the
+    # browser template's existing whitespace conventions.
     return Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
         autoescape=False,
@@ -297,6 +299,7 @@ def compile_vault_report(
         slug_by_id = _build_slugs(bookmarks)
         rows_by_id = {r["bookmark_id"]: r for r in bookmarks}
         graph = x_pages.load_link_graph(conn, set(rows_by_id))
+        cross_refs_by_id = load_cross_refs(conn, slug_by_id)
         lint_notes = load_lint_notes(conn, set(rows_by_id))
 
         written: set[str] = set()
@@ -312,9 +315,15 @@ def compile_vault_report(
             entities = _parse_json_list(enr["entities"]) if enr else []
             key_quotes = _parse_json_list(enr["key_quotes"]) if enr else []
 
-            cross_refs = _build_cross_refs(
-                bm["bookmark_id"], bm["era_label"], tags, conn, slug_by_id
-            )
+            persisted_cross_refs = cross_refs_by_id.get(bm["bookmark_id"], [])
+            persisted_slugs = set(persisted_cross_refs)
+            cross_refs = [
+                slug
+                for slug in _build_related_refs(
+                    bm["bookmark_id"], bm["era_label"], tags, conn, slug_by_id
+                )
+                if slug not in persisted_slugs
+            ]
 
             bookmark_view = dict(bm)
             bookmark_view.pop("source_metadata")
@@ -345,6 +354,7 @@ def compile_vault_report(
                     tags=tags,
                     entities=entities,
                     key_quotes=key_quotes,
+                    persisted_cross_refs=persisted_cross_refs,
                     cross_refs=[r for r in cross_refs if r not in linked],
                 )
             else:
@@ -354,6 +364,7 @@ def compile_vault_report(
                     tags=tags,
                     entities=entities,
                     key_quotes=key_quotes,
+                    persisted_cross_refs=persisted_cross_refs,
                     cross_refs=cross_refs,
                 )
 

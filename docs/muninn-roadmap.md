@@ -84,6 +84,7 @@ This phase comes after the X slice. Synthesis (era narratives, deep passes, ad-h
 - [x] **Define the contract.** *Done 2026-10-21 on `x-slice`:* `muninn-synthesis/1` in [`synthesis-contract.md`](synthesis-contract.md); `muninn synthesize … --emit-task DIR` and `muninn synthesize ingest-result FILE`; `task-input.schema.json` accepts `attempt`.
 - [x] **Implement the budgeted API runner.** *Done 2026-10-21 on `x-slice`:* per-run `--max-cost-usd` (default $3) and a required monthly cap, pre-call worst-case check, measured usage in `usage_records`. The Batch API and structured outputs remain future work.
 - [x] **Retire the Saga-style container path.** *Done 2026-10-21:* `containers/synthesis/`, `scripts/launch-synthesis.sh`, `synthesis/container.py` and the credentials-volume config are removed.
+- [x] **Compile persisted cross-references.** *Source implemented 2026-10-25:* browser and X pages render visible incoming/outgoing `cross_references` as distinct, deterministic wikilinks, alongside existing era/tag suggestions, X item links and lint notes. Hidden, missing and self targets are omitted. See [`cross-references.md`](cross-references.md). No personal vault compilation or live qualification was run; checks SKIPPED (YOLO MODE).
 - [ ] **Synthesis use cases.**
   - *Era narratives:* "summarize my reading on [topic] over [period]".
   - *Deep pass:* flagged bookmarks get a longer summary plus key quotes.

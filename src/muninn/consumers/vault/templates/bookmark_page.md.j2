@@ -55,7 +55,13 @@ enrichment_source: {{ bookmark.enrichment_source or 'none' }}
 {% endfor %}
 {% endif %}
 
-{% if cross_refs %}
+{% if persisted_cross_refs %}
+## Cross-references
+
+{% for ref in persisted_cross_refs %}
+- [[{{ ref }}]]
+{% endfor %}
+{% endif %}{% if cross_refs %}
 ## Related
 
 {% for ref in cross_refs %}
