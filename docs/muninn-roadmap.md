@@ -114,6 +114,14 @@ This is Karpathy's "Lint" operation: periodic vault hygiene.
   4. Record the operating cost: the Go binary, and the asymmetric-embedding gap.
 
   Adopt Braid only on measured results.
+
+  [Implementation references](braid-integration/README.md), prepared 2026-10-25,
+  split the proposed integration into five packages: EmbeddingGemma compatibility,
+  full-text/authored-note publishing, search with FTS/Qdrant fallback, bounded
+  context assembly, and operations/recovery. These are planning documents, not
+  implementation, activation or retrieval-quality receipts. The existing default
+  and roadmap completion state are unchanged. The active operator YOLO policy
+  governs whether checks may run; these references schedule none.
 - [ ] **Research Intake RI-04 – RI-08** follow-through per the Odin design handoff (kept privately). Muninn's share of RI-07 is publishing the contract; Odin owns executive review, proposals and decisions.
 
 ## Future
