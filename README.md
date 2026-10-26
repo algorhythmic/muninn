@@ -124,6 +124,9 @@ Key documents:
 - `SPEC.md`: pipeline design
 - `docs/muninn-decisions.md`: ADR log
 - `docs/research-intake/`: the Research Intake workflow
+- [Braid integration references](docs/braid-integration/README.md): five planned
+  implementation packages for embeddings, publishing, search/fallback, context
+  assembly and operations; no backend activation is implied
 - `CLAUDE.md`: guidance for Claude Code sessions
 
 ---
