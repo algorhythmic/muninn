@@ -11,16 +11,24 @@ def index_group():
 
 
 @index_group.command("sync")
-@click.option("--binary", default="braid", show_default=True)
+@click.option("--backend", type=click.Choice(["braid"]), default="braid", show_default=True)
+@click.option("--binary", type=click.Path(path_type=str))
 @click.option("--namespace", "namespaces", multiple=True,
               type=click.Choice(["bookmarks", "concepts", "infra", "people", "projects"]))
 @click.pass_context
-def sync(ctx, binary, namespaces):
+def sync(ctx, backend, binary, namespaces):
     """Build a ready generation; activation is a separate explicit command."""
     from muninn.consumers.mcp.vault_fs import NAMESPACES
     from muninn.index.publisher import build_generation
+    from muninn.config import load_braid_settings
 
     try:
+        binary = binary or load_braid_settings().binary
+        if binary is None:
+            raise ValueError("absolute Braid binary required")
+        from pathlib import Path
+        if not Path(binary).is_absolute():
+            raise ValueError("absolute Braid binary required")
         result = build_generation(ctx.obj.get("db"), binary=binary,
                                   namespaces=namespaces or NAMESPACES)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -47,14 +55,42 @@ def activate(ctx, generation_id):
 @click.pass_context
 def status(ctx):
     """Report captured epoch and active generation without loading a model."""
-    from dataclasses import asdict
-    from muninn.db import connect_readonly
-    from muninn.index.registry import active_generation, ensure_corpus, source_epoch
+    from muninn.index.status import index_status
+    click.echo(json.dumps(index_status(ctx.obj.get("db"))))
 
-    conn = connect_readonly(ctx.obj.get("db"))
+
+@index_group.command("rollback")
+@click.argument("generation_id")
+@click.pass_context
+def rollback(ctx, generation_id):
+    """Explicitly select the retained previous generation after source checks."""
+    from muninn.index.publisher import rollback_generation
     try:
-        active = active_generation(conn)
-        click.echo(json.dumps({"corpus_id": ensure_corpus(conn), "source_epoch": source_epoch(conn),
-                               "active": asdict(active) if active else None}))
-    finally:
-        conn.close()
+        result = rollback_generation(generation_id, ctx.obj.get("db"))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException("index rollback refused: " + type(exc).__name__) from exc
+    click.echo(json.dumps({"generation_id": result.generation_id, "state": "active"}))
+
+
+@index_group.command("worker")
+@click.option("--once", is_flag=True, help="Process one already-pending job and exit.")
+@click.option("--poll-seconds", default=5.0, type=click.FloatRange(min=0.1))
+@click.pass_context
+def worker(ctx, once, poll_seconds):
+    """Optional foreground publisher; supervision is the operator's responsibility.
+
+    Never activates a generation. No daemon or service is installed.
+    """
+    from dataclasses import asdict
+    from muninn.config import load_braid_settings
+    from muninn.index.worker import run_once, supervise
+    try:
+        binary = load_braid_settings().binary
+        if binary is None:
+            raise ValueError("absolute Braid binary required")
+        if once:
+            click.echo(json.dumps(asdict(run_once(ctx.obj.get("db"), binary=binary))))
+        else:
+            supervise(ctx.obj.get("db"), poll_seconds=poll_seconds, binary=binary)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException("index worker failed: " + type(exc).__name__) from exc
