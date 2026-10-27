@@ -181,7 +181,7 @@ def test_create_relocate_reopen_and_checkpoint(tmp_path, monkeypatch):
     binary = tmp_path / "synthetic-binary"
     binary.write_bytes(b"synthetic identity; never executed")
     captures = []
-    def transport(command, *, cwd):
+    def transport(command, *, cwd, ownership_fd=None):
         captures.append((command, cwd))
         config = json.loads((cwd / "braid.json").read_text())
         assert config["store"]["path"] == "braid.db"
