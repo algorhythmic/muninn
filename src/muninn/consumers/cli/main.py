@@ -46,6 +46,7 @@ import click
 from .deep_pass import deep_pass_cmd
 from .status import status_cmd
 from .triage import triage_cmd
+from .index import index_group
 
 
 class MuninnGroup(click.Group):
@@ -1184,6 +1185,8 @@ def db_status_cmd(ctx: click.Context) -> None:
         raise click.ClickException(str(exc)) from exc
     _echo_plan(plan)
 
+
+cli.add_command(index_group)
 
 if __name__ == "__main__":
     cli()

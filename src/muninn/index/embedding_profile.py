@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 ADAPTER_VERSION = "muninn-profile-encoder/1"
 PROFILE_SCHEMA = "muninn-embedding-profile/1"
-QUERY_CAPABILITY = "query_embedding"  # contract revision 0; negotiate first
+QUERY_CAPABILITY = "query_embedding"  # contract revision 1; negotiate first
 
 
 class ProfileUnavailable(RuntimeError):
@@ -170,7 +170,7 @@ def _encode(profile: EmbeddingProfile, texts: list[str], prompt_name: str) -> li
 
 def query_embedding(text: str, profile: EmbeddingProfile, *,
                     capabilities: Iterable[str], protocol_version: int = 1) -> dict:
-    """Contract revision 0 field; consumers must negotiate before encoding."""
+    """Contract revision 1 field; consumers must negotiate before encoding."""
     if protocol_version != 1 or QUERY_CAPABILITY not in capabilities:
         raise ProfileUnavailable("query_embedding_capability_unavailable")
     if not text.strip():
