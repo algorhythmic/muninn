@@ -83,6 +83,7 @@ def build_generation(db_path=None, *, binary: Path | str = "braid", namespaces=N
     conn = connect(db_path)
     allocated = False
     client = None
+    ownership = None
     try:
         corpus_id = registry.ensure_corpus(conn)
         with registry.publisher_lease(conn) as lease:
@@ -128,9 +129,16 @@ def build_generation(db_path=None, *, binary: Path | str = "braid", namespaces=N
                 conn.rollback()  # Read snapshot ends before any embedding inference.
             lease.assert_owned()
             dataset_id = corpus_id + ":scope:" + hashlib.sha256(encoded(scope)).hexdigest()[:24]
+            from muninn.index.ownership import generation_lock
+            ownership = generation_lock(generation_id, paths=paths)
             factory = client_factory or BraidClient.create
-            client = factory(binary=Path(binary), generation_dir=staging,
-                             dataset_id=dataset_id, profile_id=profile.profile_id)
+            client_options = dict(binary=Path(binary), generation_dir=staging,
+                                  dataset_id=dataset_id, profile_id=profile.profile_id)
+            if client_factory is None:
+                # The child inherits ownership, so a publisher parent crash
+                # cannot authorize unlinking a still-open staging database.
+                client_options["ownership_fd"] = ownership.fd
+            client = factory(**client_options)
             phase("nodes")
             client.publish_nodes(r["value"] for r in _records(spool) if r["kind"] == "node")
             phase("vectors")
@@ -177,9 +185,13 @@ def build_generation(db_path=None, *, binary: Path | str = "braid", namespaces=N
             build_finished(conn, generation_id, failed=True)
         raise
     finally:
-        if client is not None:
-            client.close()
-        conn.close()
+        try:
+            if client is not None:
+                client.close()
+        finally:
+            if ownership is not None:
+                ownership.close()
+            conn.close()
 
 
 def activate_generation(generation_id: str, db_path=None) -> Manifest:

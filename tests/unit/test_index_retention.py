@@ -145,3 +145,27 @@ def test_failed_local_client_close_keeps_os_lease_until_verified_exit(setup, tmp
     assert publisher.cleanup_generations(path, runtime=runtime).removed == (manifest.generation_id,)
     assert clients[0].closed
     runtime.close()
+
+
+def test_publisher_passes_generation_ownership_to_default_child_factory(setup, monkeypatch):
+    import os
+    from muninn.index.braid_client import BraidClient
+    from muninn.index.ownership import generation_lock, GenerationBusy
+    from tests.unit.test_index_publisher import FakeBraid
+    path, _, _, build = setup
+    def factory(**kwargs):
+        descriptor = kwargs.pop("ownership_fd")
+        os.fstat(descriptor)
+        identity = kwargs["generation_dir"].name
+        client = FakeBraid(**kwargs)
+        original = client.finish
+        def finish():
+            with pytest.raises(GenerationBusy):
+                generation_lock(identity, exclusive=True)
+            return original()
+        client.finish = finish
+        return client
+    monkeypatch.setattr(BraidClient, "create", factory)
+    manifest = build(client_factory=None)
+    with generation_lock(manifest.generation_id, exclusive=True):
+        pass

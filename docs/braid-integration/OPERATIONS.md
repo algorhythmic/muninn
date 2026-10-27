@@ -36,6 +36,8 @@ lock, preserves the canonical active and previous generations, and closes local
 sessions before attempting an exclusive generation lock. Every runtime session
 holds a shared lock across opening, requests, idle time and verified process exit.
 Other processes therefore prevent cleanup until their SQLite handles close.
+Publisher children inherit the same shared ownership descriptor; a publisher
+parent crash cannot authorize deleting staging while its child still runs.
 Stable lock files under `data/index/leases` are never unlinked.
 
 Cleanup only removes registry-owned, unreferenced generation/staging directories,
