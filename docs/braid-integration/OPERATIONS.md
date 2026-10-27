@@ -10,6 +10,19 @@ path. `MUNINN_BRAID_SHA256` optionally pins the binary's lowercase SHA256;
 generation manifests additionally bind the negotiated binary/protocol identity.
 No binary or embedding model is downloaded by these commands.
 
+Pilot retrieval is OFF unless `MUNINN_BRAID_PILOT_CONFIG` points to an absolute
+private JSON file with `schema: "muninn-braid-pilot/1"`, `enabled: true`,
+`binary_path`, `binary_sha256` and `source_commit`. The executable must match its
+SHA256 and adjacent `<binary>.provenance.json` containing `source_commit` and
+`binary_sha256`. The sidecar records build provenance, not a signed attestation.
+The pin applies to ordinary search and `search_context`; configuration parsing
+never starts a child. First retrieval starts stdio, idle sessions close after
+60 seconds (plus polling), and server shutdown closes managed children. Setting
+`enabled: false` rejects new admission and drains cached sessions. Keep
+`MUNINN_SEARCH_BACKEND=fts5-qdrant` as the ordinary search default; the pilot flag
+does not activate a generation or change that default. A rejected pin, failed
+start, timeout or incompatible contract uses the existing structured fallback.
+
 * `muninn index sync --backend braid`: explicitly build a ready generation.
 * `muninn index status`: inspect configuration intent, latest ready build,
   active pointer, epoch/inventory, profile, Braid identity, publisher state,

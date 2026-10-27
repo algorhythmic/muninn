@@ -44,6 +44,8 @@ def load_pilot_pin() -> PilotPin:
     if not path:
         raise BraidError("pilot_disabled")
     try:
+        if not Path(path).is_absolute():
+            raise ValueError("absolute config path required")
         value = _read(path)
         if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
             raise ValueError("invalid flag")
@@ -73,7 +75,11 @@ def load_pilot_pin() -> PilotPin:
 
 
 def open_pilot(runtime, *, context=False, **kwargs):
-    pin = load_pilot_pin()
+    try:
+        pin = load_pilot_pin()
+    except BraidError:
+        runtime.close()  # Revocation stops cached sessions as well as new admission.
+        raise
     requested = Path(kwargs.pop("binary", "braid"))
     if requested != Path("braid") and requested.resolve() != pin.binary:
         raise BraidError("binary_identity_mismatch")

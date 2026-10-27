@@ -30,7 +30,7 @@ def test_default_off_and_lazy_stub_start(tmp_path, monkeypatch):
     with pytest.raises(BraidError, match="pilot_disabled"):
         open_pilot(pool, **options)
     assert opened == []
-    pin(tmp_path, monkeypatch)
+    path, value = pin(tmp_path, monkeypatch)
     assert opened == []  # Parsing config never starts a process.
     # Low-level fake pool has no canonical watcher; intercept only watcher flag.
     class Runtime:
@@ -40,6 +40,11 @@ def test_default_off_and_lazy_stub_start(tmp_path, monkeypatch):
     lease = open_pilot(Runtime(), **options)
     assert len(opened) == 1
     lease.close()
+    value["enabled"] = False
+    path.write_text(json.dumps(value))
+    with pytest.raises(BraidError, match="pilot_disabled"):
+        open_pilot(pool, **options)
+    assert opened[0].closed
     pool.shutdown()
     assert opened[0].closed
 
