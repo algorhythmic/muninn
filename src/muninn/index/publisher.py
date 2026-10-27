@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import stat
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from muninn.config import load_paths
@@ -244,11 +246,8 @@ def retained_generations(conn) -> set[str]:
 
 
 def retention_candidates(db_path=None, *, leased=()) -> tuple[str, ...]:
-    """Conservative retention report; destructive cross-process GC is deferred.
+    """Advisory identities only; cleanup separately obtains OS reader exclusion.
 
-    An in-process lease list cannot establish that another process has closed a
-    SQLite file. Until a cross-process reader lease is installed this function
-    returns eligible identities without unlinking any files or registry rows.
     Canonical sources, authored files and cache are never cleanup candidates.
     """
     from muninn.index import registry
@@ -257,7 +256,117 @@ def retention_candidates(db_path=None, *, leased=()) -> tuple[str, ...]:
         with registry.publisher_lease(conn):
             keep = retained_generations(conn) | set(leased)
             return tuple(row[0] for row in conn.execute(
-                "SELECT generation_id FROM index_generations WHERE state IN ('ready','failed') ORDER BY generation_id"
+                "SELECT generation_id FROM index_generations WHERE state IN ('ready','failed') "
+                "AND failure_reason IS NOT 'derived_files_removed' ORDER BY generation_id"
             ) if row[0] not in keep)
+    finally:
+        conn.close()
+
+
+@dataclass(frozen=True)
+class CleanupResult:
+    removed: tuple[str, ...]
+    skipped: tuple[tuple[str, str], ...]
+
+
+def _remove_derived_directory(paths, generation_id, *, staging=False):
+    """Unlink only beneath opened, non-symlink private directory handles."""
+    parent = "staging" if staging else "generations"
+    root_fd = os.open(paths.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        except FileNotFoundError:
+            return False
+        try:
+            try:
+                info = os.stat(generation_id, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            if not stat.S_ISDIR(info.st_mode):
+                raise PublishError("cleanup_path_unsafe")
+            if not shutil.rmtree.avoids_symlink_attacks:
+                raise PublishError("cleanup_platform_unsafe")
+            shutil.rmtree(generation_id, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            return True
+        finally:
+            os.close(parent_fd)
+    finally:
+        os.close(root_fd)
+
+
+def cleanup_generations(db_path=None, *, limit=100, runtime=None) -> CleanupResult:
+    """Explicit bounded GC of unreferenced private generations and staging.
+
+    Stable OS reader locks are held until clients close, including SQLite
+    sidecars. Registry rows/journal history remain as audit identities. A crash
+    during unlink is reconciled by rerunning this idempotent cleanup; an absent
+    or partial manifest always fails closed. Nothing activates automatically.
+    """
+    from muninn.index import registry
+    from muninn.index.ownership import GenerationBusy, generation_lock
+    if runtime is None:
+        from muninn.index.runtime import runtime
+    if type(limit) is not int or not 1 <= limit <= 1000:
+        raise ValueError("cleanup limit must be between 1 and 1000")
+    paths, settings = load_index_paths(), load_paths()
+    removed, skipped = [], []
+    conn = connect(db_path)
+    try:
+        with registry.publisher_lease(conn):
+            for row in conn.execute("SELECT generation_id FROM index_generations WHERE state='staging' LIMIT ?", (limit,)).fetchall():
+                registry.mark_failed(conn, row[0], "interrupted_build")
+            keep = retained_generations(conn)
+            database = Path(next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main")).resolve()
+            protected = [database, settings.db_path, settings.raw_dir, settings.scrape_cache_dir,
+                         settings.http_cache_dir, settings.vault_dir, settings.personal_vault_dir]
+            protected = [path.resolve() for path in protected if path is not None]
+            excludes = tuple(sorted(keep)) or ("",)
+            placeholders = ",".join("?" for _ in excludes)
+            rows = conn.execute("SELECT generation_id FROM index_generations "
+                                "WHERE state IN ('ready','failed') AND failure_reason IS NOT 'derived_files_removed' AND generation_id NOT IN (" + placeholders + ") "
+                                "ORDER BY generation_id LIMIT ?", (*excludes, limit)).fetchall()
+            for row in rows:
+                generation_id = row[0]
+                if generation_id in keep:
+                    continue
+                if len(removed) + len(skipped) >= limit:
+                    break
+                try:
+                    final = paths.generation_dir(generation_id)
+                    staging = paths.generation_dir(generation_id, staging=True)
+                    # Resolve all aliases before unlinking, and reject overlap in
+                    # either direction with configured canonical/authored paths.
+                    if (paths.root.resolve() != paths.root.absolute()
+                            or any(path.resolve() != path.absolute() for path in (final, staging))):
+                        raise PublishError("cleanup_path_unsafe")
+                    if any(candidate == safe or candidate in safe.parents or safe in candidate.parents
+                           for candidate in (final, staging) for safe in protected):
+                        raise PublishError("cleanup_protected_path")
+                    generation = registry.get_generation(conn, generation_id)
+                    if (generation.manifest_path is not None
+                            and Path(generation.manifest_path).absolute() != (final / "manifest.json").absolute()):
+                        raise PublishError("generation_path_mismatch")
+                    if not runtime.close_generation(generation_id):
+                        skipped.append((generation_id, "generation_in_use"))
+                        continue
+                    with generation_lock(generation_id, exclusive=True, paths=paths):
+                        changed = _remove_derived_directory(paths, generation_id)
+                        changed = _remove_derived_directory(paths, generation_id, staging=True) or changed
+                        with registry._write(conn):
+                            conn.execute("UPDATE index_generations SET state='failed',failure_reason='derived_files_removed' "
+                                         "WHERE generation_id=?", (generation_id,))
+                        if changed:
+                            removed.append(generation_id)
+                except GenerationBusy:
+                    skipped.append((generation_id, "generation_in_use"))
+                except PublishError as exc:
+                    skipped.append((generation_id, str(exc)))
+                except ValueError:
+                    skipped.append((generation_id, "cleanup_path_unsafe"))
+                except OSError:
+                    skipped.append((generation_id, "cleanup_io_failed"))
+        return CleanupResult(tuple(removed), tuple(skipped))
     finally:
         conn.close()

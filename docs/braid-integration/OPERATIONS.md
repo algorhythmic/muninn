@@ -30,7 +30,19 @@ including older writers. Authored inventory is bounded and digest-bound; an
 incomplete/missing scan is unavailable, not a deletion or an empty corpus.
 Retrieval rechecks source digests and visibility before returning text.
 
-Retention currently reports candidates without deleting files. Destructive
-garbage collection is deferred until cross-process session leases can prove
-that all readers closed their SQLite handles and sidecars. This conservatively
-retains more private derived data and never removes canonical or authored data.
+Retention is explicit through `publisher.cleanup_generations(db_path, limit=100)`;
+`retention_candidates` remains an advisory report. Cleanup holds the publisher OS
+lock, preserves the canonical active and previous generations, and closes local
+sessions before attempting an exclusive generation lock. Every runtime session
+holds a shared lock across opening, requests, idle time and verified process exit.
+Other processes therefore prevent cleanup until their SQLite handles close.
+Stable lock files under `data/index/leases` are never unlinked.
+
+Cleanup only removes registry-owned, unreferenced generation/staging directories,
+including their SQLite sidecars. It refuses symlink escapes and overlap with
+configured canonical databases, raw captures, caches or authored vaults. It never
+cleans embedding caches, authored Markdown or canonical captures. Interrupted
+staging is marked failed before cleanup. A partial unlink can be retried safely;
+only after directory fsync does the registry record `derived_files_removed`.
+Audit rows and activation journals remain intact, while cleaned generations are
+excluded from future ready-build selection. No worker or activation invokes GC.
