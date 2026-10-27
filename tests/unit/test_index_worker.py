@@ -55,7 +55,7 @@ def test_explicit_request_builds_ready_without_activation(database):
     second = worker.enqueue(conn)
     assert first.job_id == second.job_id
     conn.close()
-    result = worker.run_once(database, build=ready_builder)
+    result = worker.run_once(database, namespaces=("bookmarks",), build=ready_builder)
     assert result.state == 'ready'
     assert result.pending_epoch is None
     assert result.generation_id == 'fake-ready'
@@ -69,7 +69,7 @@ def test_explicit_request_builds_ready_without_activation(database):
 def test_idle_does_not_build(database):
     def forbidden(*args, **kwargs):
         raise AssertionError('idle worker must not build')
-    assert worker.run_once(database, build=forbidden).state is None
+    assert worker.run_once(database, namespaces=("bookmarks",), build=forbidden).state is None
 
 
 def test_new_mutation_during_build_is_one_pending_epoch(database):
@@ -79,7 +79,7 @@ def test_new_mutation_during_build_is_one_pending_epoch(database):
         mutate(path, 'later')
         mutate(path, 'newest')
         return manifest
-    result = worker.run_once(database, build=build)
+    result = worker.run_once(database, namespaces=("bookmarks",), build=build)
     assert result.state == 'stale'
     assert result.pending_epoch == 3
     conn = connect(database)
@@ -95,7 +95,7 @@ def test_failure_preserves_active_and_safe_category(database):
     conn.close()
     def fail(*args, **kwargs):
         raise RuntimeError('SECRET fake query/source text')
-    result = worker.run_once(database, build=fail)
+    result = worker.run_once(database, namespaces=("bookmarks",), build=fail)
     assert result.state == 'failed'
     assert result.failure_category == 'build_failed'
     assert 'SECRET' not in repr(result)
@@ -116,7 +116,7 @@ def test_restart_reconciles_staging_before_retry(database):
         assert registry.get_generation(check, 'abandoned').state == 'failed'
         check.close()
         return ready_builder(path)
-    result = worker.run_once(database, build=verify)
+    result = worker.run_once(database, namespaces=("bookmarks",), build=verify)
     assert result.state == 'ready'
 
 
@@ -145,7 +145,7 @@ def test_busy_owner_does_not_change_job_or_build(database):
     assert entered.wait(5)
     try:
         with pytest.raises(registry.RegistryError, match='publisher_lease_busy'):
-            worker.run_once(database, build=ready_builder)
+            worker.run_once(database, namespaces=("bookmarks",), build=ready_builder)
         check = connect(database)
         assert worker.status(check) == before
         check.close()
@@ -164,7 +164,7 @@ def test_explicit_enqueue_while_building_is_not_lost(database):
         worker.enqueue(other)  # authored inventory can change without an epoch.
         other.close()
         return ready_builder(path)
-    result = worker.run_once(database, build=build)
+    result = worker.run_once(database, namespaces=("bookmarks",), build=build)
     assert result.state == 'ready'
     assert result.pending_epoch == 0
 
@@ -197,3 +197,163 @@ def test_explicit_restart_reconciles_old_job_identity(database):
     assert worker.status(conn).job_id != identity
     assert registry.get_generation(conn, 'abandoned').state == 'failed'
     conn.close()
+
+
+@pytest.fixture
+def authored(database, tmp_path, monkeypatch):
+    vault = tmp_path / 'vault'
+    page = vault / 'wiki/concepts/synthetic.md'
+    page.parent.mkdir(parents=True)
+    page.write_text('# Synthetic\n\nA synthetic authored body.')
+    monkeypatch.setenv('MUNINN_VAULT_DIR', str(vault))
+    monkeypatch.delenv('MUNINN_PERSONAL_VAULT_DIR', raising=False)
+    return page
+
+
+def observation(path):
+    conn = connect(path)
+    try:
+        return worker.authored_status(conn)
+    finally:
+        conn.close()
+
+
+def authored_builder(path, **kwargs):
+    import uuid
+    from muninn.index.publisher import _inventory
+    conn = connect(path)
+    scope = kwargs['namespaces']
+    digest = _inventory(conn, scope).digest
+    name = 'synthetic-' + uuid.uuid4().hex
+    registry.allocate_generation(conn, name, scope)
+    registry.mark_ready(conn, name, '/synthetic/manifest.json', 'a' * 64)
+    epoch = registry.source_epoch(conn)
+    conn.close()
+    return SimpleNamespace(generation_id=name, source_epoch=epoch, authored_inventory_digest=digest)
+
+
+def test_first_authored_observation_builds_once_then_idle(database, authored):
+    result = worker.run_once(database, namespaces=('concepts',), build=authored_builder)
+    assert result.state == 'ready'
+    assert observation(database).inventory_digest is not None
+    assert observation(database).inventory_failure_category is None
+    identity = result.job_id
+    again = worker.run_once(database, build=authored_builder)
+    assert again.job_id == identity
+    assert again.pending_epoch is None
+
+
+def test_authored_edit_without_epoch_coalesces_new_build(database, authored):
+    before = worker.run_once(database, namespaces=('concepts',), build=authored_builder)
+    conn = connect(database)
+    epoch = registry.source_epoch(conn)
+    conn.close()
+    before_observation = observation(database)
+    authored.write_text('# Synthetic\n\nChanged authored body.')
+    after = worker.run_once(database, build=authored_builder)
+    assert after.state == 'ready'
+    assert after.job_id != before.job_id
+    assert observation(database).inventory_digest != before_observation.inventory_digest
+    conn = connect(database)
+    assert registry.source_epoch(conn) == epoch
+    assert registry.active_generation(conn) is None
+    conn.close()
+
+
+def test_authored_edit_during_inference_retains_pending(database, authored):
+    def changing(path, **kwargs):
+        manifest = authored_builder(path, **kwargs)
+        authored.write_text('# Synthetic\n\nEdited during fake inference.')
+        return manifest
+    result = worker.run_once(database, namespaces=('concepts',), build=changing)
+    assert result.state == 'stale'
+    assert result.pending_epoch == 0
+
+
+def test_missing_scan_preserves_digest_and_active(database, authored):
+    before = worker.run_once(database, namespaces=('concepts',), build=authored_builder)
+    conn = connect(database)
+    registry.activate(conn, before.generation_id, registry.source_epoch(conn))
+    conn.close()
+    before_observation = observation(database)
+    authored.parent.parent.rename(authored.parent.parent.with_name('unavailable'))
+    after = worker.run_once(database, build=authored_builder)
+    assert after.state == 'stale'
+    assert observation(database).inventory_digest == before_observation.inventory_digest
+    assert observation(database).inventory_failure_category == 'authored_inventory_unavailable'
+    assert after.pending_epoch == 0
+    conn = connect(database)
+    assert registry.active_generation(conn).id == before.generation_id
+    conn.close()
+
+
+def test_failed_postbuild_scan_does_not_erase_complete_digest(database, authored):
+    def vanished(path, **kwargs):
+        manifest = authored_builder(path, **kwargs)
+        authored.parent.parent.rename(authored.parent.parent.with_name('unavailable'))
+        return manifest
+    result = worker.run_once(database, namespaces=('concepts',), build=vanished)
+    assert result.state == 'stale'
+    assert observation(database).inventory_digest is not None
+    assert observation(database).inventory_failure_category == 'authored_inventory_unavailable'
+    assert result.pending_epoch == 0
+
+
+def test_explicit_bookmark_scope_does_not_scan_authored(database, monkeypatch):
+    from muninn.index import publisher
+    def forbidden(*args):
+        raise AssertionError('bookmarks scope must not scan vault')
+    monkeypatch.setattr(publisher, '_inventory', forbidden)
+    result = worker.run_once(database, namespaces=('bookmarks',), build=ready_builder)
+    assert result.state is None
+    assert observation(database).inventory_digest is None
+
+
+def test_incomplete_scan_keeps_last_complete_observation(database, authored, monkeypatch):
+    from muninn.index import publisher
+    from muninn.index.authored import Inventory
+    worker.run_once(database, namespaces=('concepts',), build=authored_builder)
+    before = observation(database)
+    monkeypatch.setattr(publisher, '_inventory', lambda *_: Inventory((), (), (('wiki', 'max_files'),), False))
+    result = worker.run_once(database, build=authored_builder)
+    assert result.state == 'stale'
+    assert observation(database).inventory_digest == before.inventory_digest
+    assert observation(database).inventory_observed_at == before.inventory_observed_at
+    assert observation(database).inventory_failure_category == 'authored_inventory_unavailable'
+
+
+def test_verified_ready_manifest_seeds_observation_without_rebuild(tmp_path, monkeypatch):
+    from tests.unit.test_index_publisher import FakeTokenizer, FakeBraid
+    from muninn.index.embedding_profile import EmbeddingProfile
+    from muninn.index.publisher import build_generation
+    monkeypatch.setenv('MUNINN_DATA_DIR', str(tmp_path / 'data'))
+    vault = tmp_path / 'vault'
+    (vault / 'wiki/concepts').mkdir(parents=True)
+    (vault / 'wiki/concepts/a.md').write_text('# Synthetic\n\nA fake authored note.')
+    monkeypatch.setenv('MUNINN_VAULT_DIR', str(vault))
+    monkeypatch.delenv('MUNINN_PERSONAL_VAULT_DIR', raising=False)
+    path = tmp_path / 'synthetic.db'
+    init_db(path).close()
+    profile = EmbeddingProfile('synthetic-model', 'a' * 40, 2, 'query-digest', 'document-digest',
+                               'synthetic-tokenizer', (('fake-runtime', '1'),))
+    manifest = build_generation(path, namespaces=('concepts',), profile=profile, tokenizer=FakeTokenizer(),
+                                client_factory=FakeBraid,
+                                encoder=lambda texts, profile, **kwargs: ([0.6, 0.8] for _ in texts))
+    def forbidden(*args, **kwargs):
+        raise AssertionError('verified unchanged ready manifest must not rebuild')
+    result = worker.run_once(path, build=forbidden)
+    assert result.state == 'ready'
+    assert result.generation_id == manifest.generation_id
+    assert result.pending_epoch is None
+    assert observation(path).inventory_digest == manifest.authored_inventory_digest
+
+
+def test_missing_initial_authored_scan_never_builds_empty_corpus(database, monkeypatch):
+    monkeypatch.delenv('MUNINN_VAULT_DIR', raising=False)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('missing inventory cannot build empty corpus')
+    result = worker.run_once(database, namespaces=('concepts',), build=forbidden)
+    assert result.state == 'failed'
+    assert result.failure_category == 'authored_inventory_unavailable'
+    assert result.pending_epoch == 0
+    assert observation(database).inventory_digest is None
