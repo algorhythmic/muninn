@@ -8,7 +8,8 @@ from pathlib import Path
 
 from muninn.db import connect, SchemaVersionError
 from muninn.index import registry
-from muninn.index.braid_client import BraidClient, BraidError
+from muninn.index.braid_client import BraidError
+from muninn.index.runtime import open_context
 from muninn.index.embedding_profile import ProfileUnavailable, query_embedding, validate_vector
 from muninn.index.manifest import Manifest
 from muninn.index.paths import load_index_paths
@@ -71,7 +72,7 @@ class BraidContextBackend:
             if manifest.braid.get("context_schema") != "muninn-context/1":
                 raise DocumentBackendUnavailable("context_generation_unavailable")
             profile = manifest.profile()
-            factory = self.client_factory or BraidClient.open_context
+            factory = self.client_factory or open_context
             client = factory(binary=self.binary, generation_dir=path.parent,
                              dataset_id=manifest.dataset_id, profile_id=profile.profile_id)
             if client.state != manifest.braid["state"]:
