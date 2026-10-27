@@ -48,6 +48,14 @@ HEAVY = (
         "muninn.index.chunking",
         "muninn.index.sources",
         "muninn.index.authored",
+        "muninn.index.braid_client",
+        "muninn.index.manifest",
+        "muninn.index.projection",
+        "muninn.index.publisher",
+        "muninn.index.registry",
+        "muninn.search.documents",
+        "muninn.search.routing",
+        "muninn.search.braid",
     ],
 )
 def test_module_does_not_import_heavy_deps(module: str) -> None:

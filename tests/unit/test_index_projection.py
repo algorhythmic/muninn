@@ -49,6 +49,7 @@ def test_deterministic_wire_records_exact_spans_and_prefix_mapping(fresh_db):
     # Every wire object and the stream envelope are JSON ready.
     json.dumps([{"kind": r.kind, "value": r.value, "embedding_input": r.embedding_input} for r in first])
     nodes = [r for r in first if r.kind == "node"]
+    assert all(record.value["cost"] == 1 for record in nodes)
     document = next(r for r in nodes if r.value["type"] == "document")
     chunks = [r for r in nodes if r.value["type"] == "chunk"]
     assert len(chunks) > 1
@@ -79,7 +80,16 @@ def test_missing_body_keeps_metadata_and_explicit_omission(fresh_db):
     assert node["attrs"]["coverage"] == "unavailable"
     assert node["attrs"]["source_ref"] == "bookmarks:1"
     assert [r.value["reason"] for r in result if r.kind == "omission"] == ["body_missing"]
+    assert all(r.value["namespace"] == "bookmarks" for r in result if r.kind == "omission")
     assert not any(r.value.get("type") == "chunk" for r in result)
+
+
+def test_partial_body_reports_scoped_incomplete_coverage(fresh_db):
+    bid = bookmark(fresh_db, "partial", body="Synthetic partial capture")
+    fresh_db.execute("UPDATE scrape_results SET scrape_status='partial' WHERE bookmark_id=?", (bid,))
+    result = records(fresh_db)
+    assert {"document_id": next(r.value["id"] for r in result if r.kind == "node"),
+            "namespace": "bookmarks", "reason": "body_partial"} in [r.value for r in result if r.kind == "omission"]
 
 
 def test_relationship_endpoints_visibility_and_provenance(fresh_db):

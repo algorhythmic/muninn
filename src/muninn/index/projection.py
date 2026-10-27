@@ -77,7 +77,8 @@ def _document_records(
             raise ValueError("tokenizer must return a nonnegative integer")
         if count + settings.prompt_overhead > settings.max_tokens:
             embedding_input = None
-            yield ProjectionRecord("omission", {"document_id": document_id, "reason": "metadata_embedding_exceeds_token_budget"})
+            yield ProjectionRecord("omission", {"document_id": document_id, "namespace": attrs["namespace"],
+                                                "reason": "metadata_embedding_exceeds_token_budget"})
     yield ProjectionRecord("node", _node(document_id, "document", metadata_text,
                            {**common, "kind": "document", "title": title}, timestamp), embedding_input)
     # Chunk failures abort the disposable build rather than publish partial body
@@ -138,7 +139,11 @@ def project(
                 metadata_text, body.text if body else "", attrs, profile, tokenizer, settings,
                 _time(body.retrieved_at if body else source.captured_at))
             for reason in source.omissions:
-                yield ProjectionRecord("omission", {"document_id": source.document_id, "reason": reason})
+                yield ProjectionRecord("omission", {"document_id": source.document_id,
+                                                    "namespace": "bookmarks", "reason": reason})
+            if body and body.coverage != "full":
+                yield ProjectionRecord("omission", {"document_id": source.document_id,
+                                                    "namespace": "bookmarks", "reason": "body_partial"})
     for source in inventory.sources:
         if source.namespace not in namespaces:
             continue
@@ -154,7 +159,7 @@ def project(
     for path, reason in inventory.omissions:
         namespace = path.split("/")[1] if len(path.split("/")) > 1 else None
         if namespace in namespaces:
-            yield ProjectionRecord("omission", {"path": path, "reason": reason})
+            yield ProjectionRecord("omission", {"path": path, "namespace": namespace, "reason": reason})
     if "bookmarks" not in namespaces:
         return
     # Relationship prose is intentionally omitted: persisted explanations can

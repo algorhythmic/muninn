@@ -45,9 +45,10 @@ class BraidDocumentBackend:
                 or any(ns not in NAMESPACES for ns in namespaces)):
             raise ValueError("invalid_scope_or_limit")
         options = {} if options is None else options
-        if (not isinstance(options, dict) or set(options) - {"semantic_only", "mode"}
+        if (not isinstance(options, dict) or set(options) - {"semantic_only", "mode", "allow_partial"}
                 or options.get("mode", "hybrid") not in ("keyword", "semantic", "hybrid")
-                or type(options.get("semantic_only", False)) is not bool):
+                or type(options.get("semantic_only", False)) is not bool
+                or type(options.get("allow_partial", False)) is not bool):
             raise ValueError("unsupported_search_option")
         conn = client = None
         try:
@@ -65,6 +66,19 @@ class BraidDocumentBackend:
             if (manifest.generation_id != generation.generation_id or manifest.corpus_id != generation.corpus_id
                     or not set(namespaces).issubset(manifest.namespaces)):
                 raise DocumentBackendUnavailable("scope_unavailable")
+            incomplete = []
+            for omission in manifest.omissions:
+                if omission.get("reason") in {"hidden", "symlink", "not_markdown", "not_visible", "excluded_symlink", "enrichment_withheld"}:
+                    continue
+                namespace = omission.get("namespace")
+                if namespace is None and omission.get("path", "").startswith("wiki/"):
+                    namespace = omission["path"].split("/")[1]
+                if namespace is None and omission.get("document_id", "").startswith("captured:"):
+                    namespace = "bookmarks"
+                if namespace is None or namespace in namespaces:
+                    incomplete.append(omission)
+            if incomplete and not options.get("allow_partial", False):
+                raise DocumentBackendUnavailable("incomplete_coverage")
             if registry.source_epoch(conn) != manifest.source_epoch:
                 raise DocumentBackendUnavailable("stale_index")
             inventory = _inventory(conn, manifest.namespaces)
@@ -177,10 +191,13 @@ class BraidDocumentBackend:
             if type(considered) is not int or considered < 0:
                 raise DocumentBackendUnavailable("protocol_fault")
             warnings = ("candidate_cap_reached",) if max(len(response["items"]), considered) >= cap else ()
+            if incomplete:
+                warnings += ("partial_coverage",)
             return DocumentSearchResult(tuple(hits[:limit]), generation={"corpus_id": manifest.corpus_id,
                 "generation_id": manifest.generation_id, "source_epoch": manifest.source_epoch, **client.state},
-                coverage={"namespaces": list(namespaces), "complete": True,
-                          "candidate_limit": cap, "top_k_complete": False if warnings else None}, warnings=warnings)
+                coverage={"namespaces": list(namespaces), "complete": not incomplete,
+                          "omissions": incomplete, "candidate_limit": cap,
+                          "top_k_complete": False if warnings else None}, warnings=warnings)
         except DocumentBackendUnavailable:
             raise
         except (BraidError, ProfileUnavailable) as exc:

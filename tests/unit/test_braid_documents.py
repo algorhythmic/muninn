@@ -220,3 +220,34 @@ def test_unavailable_binary_is_typed_infrastructure_failure(setup):
     engine.client_factory = unavailable
     with pytest.raises(DocumentBackendUnavailable, match="generation_unavailable"):
         engine.search_documents("synthetic", ("bookmarks",), 5)
+
+
+@pytest.mark.parametrize("omission,partial,refuses", [
+    ({"namespace": "bookmarks", "reason": "body_missing"}, False, True),
+    ({"namespace": "bookmarks", "reason": "body_partial"}, True, False),
+    ({"reason": "unknown_omission"}, False, True),
+    ({"namespace": "people", "reason": "body_missing"}, False, False),
+    ({"namespace": "bookmarks", "reason": "not_visible"}, False, False),
+    ({"namespace": "bookmarks", "reason": "enrichment_withheld"}, False, False),
+])
+def test_requested_scope_coverage_and_explicit_partial_policy(setup, omission, partial, refuses):
+    from dataclasses import replace
+    from muninn.index.manifest import Manifest
+    engine, _, requests = backend(setup)
+    path = next(load_index_paths().generations_dir.iterdir()) / "manifest.json"
+    manifest = replace(Manifest.read(path), omissions=(omission,))
+    manifest.write(path)
+    conn = connect(setup[0])
+    conn.execute("UPDATE index_generations SET manifest_digest=? WHERE generation_id=?", (manifest.digest, manifest.generation_id))
+    conn.commit()
+    conn.close()
+    if refuses:
+        with pytest.raises(DocumentBackendUnavailable, match="incomplete_coverage"):
+            engine.search_documents("synthetic", ("bookmarks",), 5)
+        assert not requests
+    else:
+        result = engine.search_documents("synthetic", ("bookmarks",), 5, {"allow_partial": partial})
+        assert result.coverage["complete"] is not partial
+        assert ("partial_coverage" in result.warnings) is partial
+        if partial:
+            assert result.coverage["omissions"] == [omission]

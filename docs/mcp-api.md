@@ -58,7 +58,9 @@ The vault is `<MUNINN_VAULT_DIR>/wiki/`, and its namespaces are its top-level di
 | `people` | authored | People notes | A bounded keyword scan of the files |
 | `projects` | authored | Operator reference notes. They are **not canonical**: Odin owns project state. | A bounded keyword scan of the files |
 
-`sessions/` is retired and is not a namespace. Authored pages live only in the vault (git is canonical); they are not in SQLite or in any search index.
+`sessions/` is retired and is not a namespace. Authored pages are canonical in
+the vault's git repository and are never mirrored into canonical SQLite.
+The opt-in Braid backend may index a disposable projection of permitted pages.
 
 ## Privacy and visibility
 
@@ -73,6 +75,7 @@ These rules hold for every tool:
   - replaces with `[hidden link]` every wikilink whose target isn't a currently visible compiled bookmark page.
 
   Titles and summaries in results come from SQLite and are masked the same way the vault masks them. An enrichment written before a linked item was hidden can paraphrase around its locator, so when the summary, key quotes or entities quote a hidden locator (case-, scheme- and `www.`-insensitive), all three are withheld: `summary` is `null`, the lists are empty, and `get_bookmark` adds `"enrichment_withheld": true`. Re-running `muninn enrich` clears this. Recompiling after a policy change is still the fix; the masking is defence in depth.
+- **Derived enrichment is withheld when recorded deep-pass inputs become hidden or missing.** This also applies when its paraphrase contains no locator. Because mutable enrichment retains no exact accepted-output identity, any unsafe historical deep pass conservatively withholds the bookmark's summary and tags from index projection and search hydration; `get_bookmark` also withholds quotes and entities. Re-enrichment alone does not override this provenance guard.
 - **The personal vault is never read.** A vault directory that overlaps it is refused outright. A symlink resolving into it, or anywhere outside `<vault>/wiki/`, is refused.
 - **Refusals carry no host paths.** Vault and path errors never name a filesystem location.
 
@@ -101,6 +104,34 @@ How it ranks:
 - **Merging**: the two lanes are interleaved by reciprocal rank (`1/(60 + rank within lane)`), with ties going to the captured lane. `score` is that final value: higher is better, and it is comparable only within one response.
 
 If `MUNINN_VAULT_DIR` is unset or refused and `namespace` is `None`, the search returns bookmark results only, with a warning. For an explicit authored namespace, it returns the vault error instead.
+
+#### Opt-in Braid document search
+
+The default remains `MUNINN_SEARCH_BACKEND=fts5-qdrant`. With `braid` selected,
+`search` pins one explicitly activated generation and ranks captured documents
+and authored notes together using lexical and dense stages. Graph and temporal
+weights are zero. Chunks collapse by their strongest score; source identities,
+revisions and exact spans are checked against current canonical material.
+Scores belong to that single ranking. A candidate-cap warning means that a
+globally complete top-k is not established.
+
+Incomplete coverage for a requested scope selects legacy fallback. Internal
+callers can explicitly permit partial search with `allow_partial=True`; that
+result reports its omissions and `partial_coverage`. Intentional privacy and
+file-policy exclusions do not count as incomplete eligible-source coverage.
+
+The response retains the fields below and adds `backend`, `generation`,
+`coverage` and `fallback_reason`. The effective backend can differ from the
+requested configuration. Missing or stale generations, unavailable binaries,
+unsupported capabilities, incompatible embeddings and failed protocol reads
+select one complete legacy request, including its bounded authored scan.
+The short `fallback_reason` code explains the switch. A valid empty Braid result
+stays empty; rankings from separate engines are never mixed to fill it.
+
+`fts_search` always preserves the existing FTS5 MATCH path and raw syntax.
+`semantic_search` uses dense Braid retrieval for captured material, with legacy
+fallback only when Braid is unavailable. See [generation commands](braid-integration/GENERATIONS.md)
+for building and activating the derived index.
 
 ```json
 {
