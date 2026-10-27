@@ -102,3 +102,34 @@ def test_context_uses_separate_readonly_session_and_bounds_drain(tmp_path):
     first.close()
     context.close()
     assert all(c.closed for c in opened)
+
+
+def test_expired_drain_closes_even_a_leaked_proxy(tmp_path):
+    pool, kwargs, opened = setup(tmp_path, drain_seconds=.005)
+    lease = pool.acquire(**kwargs)
+    closed = threading.Event()
+    original = opened[0].close
+    def close():
+        original()
+        closed.set()
+    opened[0].close = close
+    assert not pool.close_generation("generation")
+    assert closed.wait(timeout=1)
+    assert not pool.leased_generations()
+    with pytest.raises(BraidError, match="generation_drained"):
+        lease.request("query")
+    # Releasing the old proxy cannot remove a newly created session.
+    next_lease = pool.acquire(**kwargs)
+    lease.close()
+    assert pool.leased_generations() == {"generation"}
+    next_lease.close()
+    pool.close()
+
+
+def test_absolute_binary_honors_configured_digest(tmp_path, monkeypatch):
+    pool, kwargs, opened = setup(tmp_path)
+    monkeypatch.setenv("MUNINN_BRAID_BINARY", str(kwargs["binary"]))
+    monkeypatch.setenv("MUNINN_BRAID_SHA256", "0" * 64)
+    with pytest.raises(BraidError, match="binary_identity_mismatch"):
+        pool.acquire(**kwargs)
+    assert not opened

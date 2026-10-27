@@ -26,6 +26,7 @@ class _Session:
     draining: bool = False
     idle_since: float = 0
     drain_at: float = 0
+    disposed: bool = False
 
 
 class ReadLease:
@@ -39,6 +40,8 @@ class ReadLease:
     def request(self, method, **payload):
         if self._closed:
             raise BraidError("session_abandoned")
+        if self._session.disposed:
+            raise BraidError("generation_drained")
         if method not in READ_METHODS:
             raise BraidError("read_only_session")
         if self._session.draining and time.monotonic() >= self._session.drain_at:
@@ -64,7 +67,11 @@ class BraidRuntime:
         self._sessions, self._failures, self._identities = {}, {}, {}
 
     def _dispose(self, session):
-        self._sessions.pop(session.key, None)
+        if session.disposed:
+            return
+        session.disposed = True
+        if self._sessions.get(session.key) is session:
+            self._sessions.pop(session.key, None)
         try:
             session.client.close()
         except (BraidError, OSError):
@@ -73,12 +80,13 @@ class BraidRuntime:
     def acquire(self, *, binary, generation_dir, dataset_id, profile_id,
                 context=False, **kwargs):
         binary = Path(binary)
-        expected_digest = None
+        from muninn.config import load_braid_settings
+        settings = load_braid_settings()
+        expected_digest = settings.sha256 if (settings.binary is not None
+            and binary.is_absolute() and binary.resolve() == settings.binary.resolve()) else None
         if not binary.is_absolute():
             if str(binary) != "braid":
                 raise BraidError("binary_path_required")
-            from muninn.config import load_braid_settings
-            settings = load_braid_settings()
             binary = settings.binary
             expected_digest = settings.sha256
             if binary is None:
@@ -154,6 +162,11 @@ class BraidRuntime:
         with self._lock:
             return frozenset(s.generation for s in self._sessions.values())
 
+    def _expire(self, session):
+        with self._lock:
+            if session.draining:
+                self._dispose(session)
+
     def close_generation(self, generation_id):
         """Stop admission, drain bounded requests, close before file removal."""
         with self._lock:
@@ -162,6 +175,10 @@ class BraidRuntime:
                 if not session.draining:
                     session.draining = True
                     session.drain_at = time.monotonic() + self.drain_seconds
+                    if session.references:
+                        timer = threading.Timer(self.drain_seconds, self._expire, args=(session,))
+                        timer.daemon = True
+                        timer.start()
                 if not session.references:
                     self._dispose(session)
             return not any(s.references for s in sessions)
