@@ -80,6 +80,9 @@ class BraidSettings:
     discovered or downloaded automatically. MUNINN_BRAID_SHA256 optionally pins
     its SHA256 in addition to the generation manifest's negotiated identity.
     These settings never activate a generation or change the search default.
+    Retrieval additionally requires MUNINN_BRAID_PILOT_CONFIG: private JSON
+    with schema muninn-braid-pilot/1, enabled=true, binary_path, binary_sha256
+    and source_commit. No configuration means pilot OFF (index.pilot).
     """
 
     binary: Path | None
@@ -97,6 +100,21 @@ def load_braid_settings() -> BraidSettings:
     if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("MUNINN_BRAID_SHA256 must be lowercase SHA256")
     return BraidSettings(binary, digest)
+
+
+def load_braid_context_min_score() -> float:
+    """Conservative fused-RRF policy, not calibrated semantic confidence.
+
+    MUNINN_BRAID_CONTEXT_MIN_SCORE defaults to 0.02. With the pinned context
+    weights lexical=dense=1, graph=temporal=0 and Braid's default k=60, a dense-
+    only root scores at most 1/61 (~0.0164). Lowering the floor needs consumer
+    qualification; explicit required sources remain independently admissible.
+    """
+    import math
+    value = float(os.environ.get("MUNINN_BRAID_CONTEXT_MIN_SCORE", "0.02"))
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("invalid context minimum fused score")
+    return value
 
 
 # ── Model IDs ─────────────────────────────────────────────────────

@@ -36,7 +36,8 @@ def engine(setup, *, build_options=None):
                 if predicate["op"] == "and":
                     document = predicate["children"][1]["value"]
                     selected = [n for n in selected if n["attrs"]["document_id"] == document]
-                return {"dataset": self.state, "items": copy.deepcopy(selected[:q["budget"]["max"]])}
+                return {"dataset": self.state, "items": [{**copy.deepcopy(node), "score": 0.03}
+                    for node in selected[:q["budget"]["max"]]]}
             assert method == "export_context"
             q = kwargs["export"]["query"]
             rows = [{k: copy.deepcopy(n[k]) for k in ("id", "type", "text", "attrs")}
@@ -246,6 +247,70 @@ def test_native_mandatory_abstention_is_preserved(setup):
     result = backend.build(request(required_sources=("bookmark:1",), budget=0))
     assert result.context == () and result.state == "abstained"
     assert result.reason == "infeasible_budget"
+
+
+def test_dense_only_rank_noise_abstains_without_export_or_fallback(setup):
+    backend, client, calls, _, _ = engine(setup)
+    original = client.request
+    def low_score(method, **kwargs):
+        result = original(method, **kwargs)
+        if method == "query":
+            for item in result["items"]:
+                item["score"] = 1 / 61  # Max dense-only RRF at pinned k=60.
+        return result
+    client.request = low_score
+    result = backend.build(request())
+    assert result.backend == "braid" and result.state == "abstained"
+    assert result.context == () and result.reason == "no_relevant_context"
+    assert result.fallback_reason is None
+    assert all(method != "export_context" for method, _ in calls)
+    assert calls[0][1]["query"]["min_score"] == .02
+
+
+def test_native_no_candidates_signal_is_a_valid_empty_context(setup):
+    backend, client, calls, _, _ = engine(setup)
+    original = client.request
+    def abstain(method, **kwargs):
+        result = original(method, **kwargs)
+        if method == "query":
+            result.update(items=[], abstained=True, abstention_reason="evidence_policy")
+        return result
+    client.request = abstain
+    result = backend.build(request())
+    assert not result.context and result.state == "abstained"
+    assert result.backend == "braid" and result.fallback_reason is None
+
+
+@pytest.mark.parametrize("minimum,state", [("0.02", "ok"), ("0.04", "abstained"), ("0", "ok")])
+def test_context_floor_is_explicit_operator_policy(setup, monkeypatch, minimum, state):
+    monkeypatch.setenv("MUNINN_BRAID_CONTEXT_MIN_SCORE", minimum)
+    backend, _, _, _, _ = engine(setup)
+    assert backend.build(request()).state == state
+
+
+@pytest.mark.parametrize("minimum", ["nan", "inf", "-1", "invalid"])
+def test_context_floor_refuses_invalid_values(monkeypatch, minimum):
+    from muninn.config import load_braid_context_min_score
+    monkeypatch.setenv("MUNINN_BRAID_CONTEXT_MIN_SCORE", minimum)
+    with pytest.raises(ValueError):
+        load_braid_context_min_score()
+
+
+def test_explicit_required_source_is_not_removed_by_optional_floor(setup, monkeypatch):
+    monkeypatch.setenv("MUNINN_BRAID_CONTEXT_MIN_SCORE", "1")
+    backend, _, calls, _, _ = engine(setup)
+    result = backend.build(request(required_sources=("bookmark:1",)))
+    assert result.context and result.backend == "braid"
+    assert "min_score" not in calls[0][1]["query"]
+    assert calls[-1][1]["export"]["query"]["min_score"] == 1
+
+
+def test_invalid_context_policy_has_safe_failure_reason(setup, monkeypatch):
+    monkeypatch.setenv("MUNINN_BRAID_CONTEXT_MIN_SCORE", "nan")
+    backend, _, calls, _, _ = engine(setup)
+    with pytest.raises(DocumentBackendUnavailable, match="context_policy_invalid"):
+        backend.build(request())
+    assert calls == []
 
 
 def test_final_cost_recheck_rejects_oversized_native_result(setup):

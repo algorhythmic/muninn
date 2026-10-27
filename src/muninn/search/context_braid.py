@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from pathlib import Path
 
@@ -49,6 +50,9 @@ class BraidContextBackend:
     def _build(self, request):
         conn = client = None
         try:
+            if self.client_factory is None or self.client_factory is open_context:
+                from muninn.index.pilot import require_pilot_enabled
+                require_pilot_enabled()
             conn = connect(self.db_path)
             conn.execute("BEGIN")
             generation = registry.active_generation(conn)
@@ -87,6 +91,11 @@ class BraidContextBackend:
             if not isinstance(vector, dict) or vector.get("model") != profile.profile_id:
                 raise DocumentBackendUnavailable("embedding_model_mismatch")
             vector = {"model": profile.profile_id, "vector": validate_vector(vector.get("vector", ()), profile.dimension)}
+            from muninn.config import load_braid_context_min_score
+            try:
+                min_score = load_braid_context_min_score()
+            except ValueError as exc:
+                raise DocumentBackendUnavailable("context_policy_invalid") from exc
             base = {"text": request.query, "dataset_id": manifest.dataset_id,
                     "expected_revision": client.state["revision"], "query_embedding": vector,
                     "weights": {"lexical": 1, "dense": 1, "graph": 0, "temporal": 0},
@@ -109,6 +118,8 @@ class BraidContextBackend:
                 if not size:
                     return []
                 query = {**base, "budget": {"max": size, "unit": "muninn_candidate", "estimator": "node-cost-one/1"}}
+                if document is None:
+                    query["min_score"] = min_score
                 if document is not None:
                     query["text"] = source_text[:2048]
                     query["weights"] = {"lexical": 1, "dense": 0, "graph": 0, "temporal": 0}
@@ -125,7 +136,13 @@ class BraidContextBackend:
                             or (document is not None and attrs.get("document_id") != document)
                             or not isinstance(item.get("id"), str)):
                         raise DocumentBackendUnavailable("protocol_fault")
-                return result["items"]
+                    score = item.get("score")
+                    if type(score) not in (int, float) or not math.isfinite(score):
+                        raise DocumentBackendUnavailable("protocol_fault")
+                # Enforce the consumer policy too, even if a stub or future
+                # engine returns a below-floor root. A valid empty shortlist
+                # is an abstention, never an infrastructure fallback.
+                return [item for item in result["items"] if document is not None or item["score"] >= min_score]
 
             mandatory, roots = [], {}
             for ref in dict.fromkeys((*request.required_sources, *request.anchors)):
@@ -144,6 +161,11 @@ class BraidContextBackend:
                 if sum("context:" + key not in mandatory for key in roots) >= request.optional_roots:
                     break
                 roots[node["id"]] = node
+            if not roots and request.optional_roots > 0:
+                return finalize_context((), request, backend="braid", state="abstained",
+                    reason="no_relevant_context", accounting={"min_fused_score": min_score},
+                    generation={"generation_id": manifest.generation_id, "corpus_id": manifest.corpus_id,
+                                "source_epoch": manifest.source_epoch, **client.state})
             ids, requires = [], {}
             for node in roots.values():
                 attrs = node["attrs"]
@@ -154,6 +176,7 @@ class BraidContextBackend:
                 ids.extend((excerpt, citation))
                 requires[excerpt] = [citation]
             query = {**base, "requires": requires,
+                     "min_score": min_score,
                      "mandatory_ids": list(dict.fromkeys(mandatory)),
                      "filters": {"types": ["context_excerpt", "attribution"], "allowed_ids": list(dict.fromkeys(ids)), "predicate": base["filters"]["predicate"]},
                      "budget": {"max": request.budget, "unit": "estimated_text_cost", "estimator": CONTEXT_ESTIMATOR}}
@@ -279,7 +302,7 @@ class BraidContextBackend:
                 coverage_omissions[safe_reason] = coverage_omissions.get(safe_reason, 0) + 1
             return finalize_context(entries, request, backend="braid", generation={"generation_id": manifest.generation_id,
                 "corpus_id": manifest.corpus_id, "source_epoch": manifest.source_epoch, **client.state},
-                accounting={"diversity_lambda": 0.7}, coverage={"namespaces": list(request.namespaces),
+                accounting={"diversity_lambda": 0.7, "min_fused_score": min_score}, coverage={"namespaces": list(request.namespaces),
                 "candidate_roots": len(roots), "optional_root_limit": request.optional_roots, "complete": not bool(coverage_omissions),
                 "omission_counts": coverage_omissions},
                 state="abstained" if result.get("abstained") else "ok", reason=result.get("abstention_reason"),

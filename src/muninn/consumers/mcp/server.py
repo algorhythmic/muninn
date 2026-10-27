@@ -286,7 +286,11 @@ def main(
         for notice in plan.notices:
             print(notice, file=sys.stderr)
         print(f"muninn MCP (streamable HTTP) at {plan.url}", file=sys.stderr)
-    mcp.run(transport=plan.transport)
+    try:
+        mcp.run(transport=plan.transport)
+    finally:
+        from muninn.index.runtime import runtime
+        runtime.shutdown()
 
 
 if __name__ == "__main__":
