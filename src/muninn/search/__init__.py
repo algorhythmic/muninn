@@ -39,6 +39,7 @@ DEFAULT_BACKEND = "fts5-qdrant"
 # name → "module:attr" (imported on first use) or a callable factory.
 _REGISTRY: dict[str, str | Callable[..., SearchBackend]] = {
     DEFAULT_BACKEND: "muninn.search.fts5_qdrant:Fts5QdrantBackend",
+    "braid": "muninn.search.routing:BraidBookmarkBackend",
 }
 
 
