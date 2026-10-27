@@ -83,6 +83,62 @@ These rules hold for every tool:
 
 Every tool returns a JSON string. An error is an object with `error` (a human-readable message) and, for the tools added in Phase 2, `code` (stable and machine-readable).
 
+### `search_context(query, namespaces=None, budget=2500, max_bytes=16384, anchors=None, required_sources=None, expected_generation=None)`
+
+An additive briefing API returning complete, exact excerpt/citation bundles.
+The existing `search`, `semantic_search` and `fts_search` contracts are unchanged.
+Defaults are 2,500 estimated text-cost units, 16,384 context bytes and at most
+12 optional roots. Hard upper bounds are 10,000 units, 65,536 bytes, 12 optional
+roots and 24 references in each of `anchors` and `required_sources`.
+
+`namespaces` is a list drawn from the five namespaces above. Trusted source
+references are `bookmark:42` or `vault:wiki/concepts/synthetic.md` (also infra,
+people and projects). Filesystem paths and compiled bookmark paths are refused.
+References are resolved through current canonical visibility and the pinned
+generation. An `expected_generation` names a generation ID; mismatch returns
+`state: "conflict"`, and an unavailable precondition returns `"unavailable"`.
+It never silently answers from a different generation or legacy source boundary.
+
+The versioned `muninn-context/1` result includes `backend`, `generation`,
+`context`, `context_bytes`, `accounting`, `coverage`, `state`, `reason`,
+`fallback_reason`, `omissions` and `warnings`. Each context row has `id`, `type`,
+`text` and `attrs`:
+
+- A `context_excerpt` row's `text` is an exact normalized-body excerpt.
+  `attrs` identifies its document, namespace, source reference/revision,
+  character `start`/`end`, SHA-256 `text_digest` and `attribution_id`.
+- An `attribution` row has empty `text` and a source-level `attrs.citation`.
+  Its exact locator/provenance is shared once by all admitted excerpts of that
+  revision. Braid excerpts label embedding prefixes separately as
+  `embedding_only_not_cited_body`; these prefixes are never cited as body text.
+
+`context_bytes` is the UTF-8 length of the **actual final compact JSON context
+array**, including metadata/citations, string escaping, commas and brackets.
+It is at most `max_bytes`; admitted excerpts or citations are never truncated.
+The diagnostic envelope is outside this number and has a separate 4,096-byte
+cap. Consumers sending a model prompt must reserve their own surrounding text.
+The estimator `muninn-json-utf8-quarter/1` charges each distinct delivered row
+`max(1, ceil(compact UTF-8 JSON row bytes / 4))` units. It includes metadata and
+attribution and is explicitly an estimate, not model-exact token accounting.
+
+The Braid path shortlists bounded optional chunk roots, then delegates complete
+bundle admission to native `export_context` using `requires` and `mandatory_ids`.
+Separate context nodes carry estimated costs; ordinary search nodes retain their
+unit candidate costs. Immutable `braid-context.json` uses diversity lambda 0.7;
+ordinary `braid.json` remains at 1. Graph and temporal weights remain zero, with
+no automatic graph seeding. Missing or infeasible mandatory content causes an
+explicit empty abstention. Canonical sources/spans are checked again after
+selection; a changed source permits one complete retry.
+
+Newly built generations include the context projection and configuration.
+Older generations cannot be reinterpreted as context-ready. On unavailability,
+the labelled legacy path uses C's complete search and B's canonical bodies,
+selecting exact lexical windows of at most 512 characters. It admits ordered
+whole bundles within the same limits; coverage reports keyword-only authored
+recall and no Braid graph/diversity explanation. Explicit required sources are
+resolved independently of recall. Unmet required sources or generation
+preconditions return abstained/unavailable outcomes.
+
 ### `search(query, namespace=None, top_k=10)`
 
 Hybrid recall across the vault. This is the main entry point for consumers.

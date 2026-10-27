@@ -17,7 +17,15 @@ from muninn.consumers.packets.canonical import TEXT_NORMALIZATION
 from muninn.index.publisher import _inventory, PublishError
 from muninn.index.sources import resolve_captured
 from muninn.search.context import context_json, estimate_entry_cost, finalize_context
-from muninn.search.documents import CONTEXT_ESTIMATOR, ContextEntry, DocumentBackendUnavailable
+from muninn.search.documents import (
+    CONTEXT_ESTIMATOR, CONTEXT_EXCERPT_ATTRS, CONTEXT_EXPORT_ATTRS,
+    ContextEntry, DocumentBackendUnavailable,
+)
+
+
+# No summaries, titles, tags, embedding prefixes, or index-owned URLs enter
+# the model payload. Citation URLs are checked against canonical sources.
+CONTEXT_ATTRS = CONTEXT_EXPORT_ATTRS
 
 
 class BraidContextBackend:
@@ -148,7 +156,7 @@ class BraidContextBackend:
                      "filters": {"types": ["context_excerpt", "attribution"], "allowed_ids": list(dict.fromkeys(ids)), "predicate": base["filters"]["predicate"]},
                      "budget": {"max": request.budget, "unit": "estimated_text_cost", "estimator": CONTEXT_ESTIMATOR}}
             result = client.request("export_context", timeout_ms=2000,
-                export={"query": query, "output": {"fields": ["id", "type", "text", "attrs"], "max_bytes": request.max_bytes}})
+                export={"query": query, "output": {"fields": ["id", "type", "text", "attrs"], "attrs": list(CONTEXT_ATTRS), "max_bytes": request.max_bytes}})
             if result.get("dataset") != client.state or not isinstance(result.get("context"), list):
                 raise DocumentBackendUnavailable("protocol_fault")
             rows = result["context"]
@@ -173,21 +181,36 @@ class BraidContextBackend:
                         raise DocumentBackendUnavailable("protocol_fault")
                     original_attrs = original["attrs"]
                     expected_attrs = {**original_attrs, "kind": "context_excerpt", "requires": requires[entry.id], "cost_estimator": CONTEXT_ESTIMATOR}
+                    expected_attrs = {k: v for k, v in expected_attrs.items() if k in CONTEXT_EXCERPT_ATTRS}
                     if attrs != expected_attrs or entry.text != original["text"]:
                         raise DocumentBackendUnavailable("stale_index")
                     if any(attrs.get(k) != original_attrs.get(k) for k in ("document_id", "source_ref", "source_revision", "start", "end", "text_digest")):
                         raise DocumentBackendUnavailable("stale_index")
-                    if attrs.get("cost_estimator") != CONTEXT_ESTIMATOR or attrs.get("kind") != "context_excerpt":
+                    if (attrs.get("cost_estimator") != CONTEXT_ESTIMATOR or attrs.get("kind") != "context_excerpt"
+                            or attrs.get("projection_schema") != PROJECTION_SCHEMA or attrs.get("profile_id") != profile.profile_id
+                            or attrs.get("normalization") != TEXT_NORMALIZATION
+                            or attrs.get("span_coordinate_system") != "normalized_body_unicode_codepoints"
+                            or attrs.get("embedding_prefix_role") != "embedding_only_not_cited_body"):
                         raise DocumentBackendUnavailable("context_generation_unavailable")
                     if attrs["namespace"] == "bookmarks":
+                        if type(attrs.get("bookmark_id")) is not int:
+                            raise DocumentBackendUnavailable("protocol_fault")
                         source = resolve_captured(conn, manifest.corpus_id, attrs["bookmark_id"], expected_revision=attrs["source_revision"])
                         body = source.body.text if source is not None and source.body and source.document_id == attrs["document_id"] else None
+                        if attrs.get("path") is not None:
+                            raise DocumentBackendUnavailable("stale_index")
                         if source is not None and source.body and attrs.get("source_ref") != source.body.source_reference:
                             raise DocumentBackendUnavailable("stale_index")
                     else:
                         source = authored.get(attrs["path"])
                         body = source.body if source is not None and source.file_digest == attrs["source_revision"] else None
-                        if source is not None and attrs.get("source_ref") != "vault:" + source.path:
+                        expected_id = "authored:" + hashlib.sha256(json.dumps(
+                            [manifest.corpus_id, attrs["path"]], sort_keys=True, ensure_ascii=False,
+                            separators=(",", ":")).encode()).hexdigest()
+                        if attrs["document_id"] != expected_id:
+                            raise DocumentBackendUnavailable("stale_index")
+                        if source is not None and (attrs.get("source_ref") != "vault:" + source.path
+                                or attrs.get("bookmark_id") != source.bookmark_id):
                             raise DocumentBackendUnavailable("stale_index")
                     citation = {"schema": ATTRIBUTION_SCHEMA, "document_id": attrs["document_id"],
                                 "namespace": attrs["namespace"], "source_ref": attrs["source_ref"],

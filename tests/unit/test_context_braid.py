@@ -41,6 +41,8 @@ def engine(setup, *, build_options=None):
             q = kwargs["export"]["query"]
             rows = [{k: copy.deepcopy(n[k]) for k in ("id", "type", "text", "attrs")}
                     for n in nodes if n["id"] in q["filters"]["allowed_ids"]]
+            for row in rows:
+                row["attrs"] = {k: v for k, v in row["attrs"].items() if k in kwargs["export"]["output"]["attrs"]}
             return {"dataset": self.state, "context": rows, "context_bytes": len(context_json(rows)), "abstained": False}
 
         def close(self):
@@ -250,3 +252,43 @@ def test_final_cost_recheck_rejects_oversized_native_result(setup):
     backend, client, calls, nodes, _ = engine(setup)
     with pytest.raises(DocumentBackendUnavailable, match="export_bound_mismatch"):
         backend.build(request(budget=0))
+
+
+def test_index_metadata_never_enters_exported_context(setup):
+    backend, client, calls, nodes, _ = engine(setup)
+    for node in nodes:
+        if node["type"] in ("chunk", "context_excerpt"):
+            node["attrs"].update(summary="UNVERIFIED PRIVATE SUMMARY", tags=["PRIVATE TAG"],
+                                 url="https://unverified.invalid", embedding_prefix="UNVERIFIED PREFIX")
+    result = backend.build(request())
+    encoded = json.dumps(result.to_dict())
+    assert "UNVERIFIED" not in encoded and "PRIVATE TAG" not in encoded and "unverified.invalid" not in encoded
+    excerpt = next(e for e in result.context if e.type == "context_excerpt")
+    assert not {"summary", "tags", "url", "embedding_prefix", "title"}.intersection(excerpt.attrs)
+    assert calls[-1][1]["export"]["output"]["attrs"]
+
+
+def test_excerpt_cannot_smuggle_a_second_unverified_citation(setup):
+    backend, client, calls, nodes, _ = engine(setup)
+    for node in nodes:
+        if node["type"] in ("chunk", "context_excerpt"):
+            node["attrs"]["citation"] = {"url": "https://unverified.invalid/private"}
+    with pytest.raises(DocumentBackendUnavailable, match="stale_index"):
+        backend.build(request())
+
+
+def test_multiple_excerpts_share_one_attribution_within_root_limit(setup):
+    path = setup[0]
+    conn = connect(path)
+    conn.execute("UPDATE scrape_results SET content_text=?", ("Synthetic body paragraph. " * 100,))
+    conn.commit()
+    conn.close()
+    backend, client, calls, nodes, _ = engine(setup)
+    result = backend.build(request(optional_roots=2, budget=10000, max_bytes=65536))
+    excerpts = [entry for entry in result.context if entry.type == "context_excerpt"]
+    citations = [entry for entry in result.context if entry.type == "attribution"]
+    assert len(excerpts) == 2 and len(citations) == 1
+    assert {entry.attrs["attribution_id"] for entry in excerpts} == {citations[0].id}
+    assert result.context_bytes == len(context_json(result.context))
+    from muninn.search.context import estimate_entry_cost
+    assert result.accounting["delivered"] == sum(estimate_entry_cost(entry) for entry in result.context)

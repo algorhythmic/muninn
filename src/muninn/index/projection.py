@@ -21,7 +21,7 @@ from muninn.index.chunking import ChunkSettings, PinnedTokenizer, chunk_document
 from muninn.index.embedding_profile import EmbeddingProfile
 from muninn.index.sources import iter_captured
 from muninn.search.context import estimate_entry_cost
-from muninn.search.documents import CONTEXT_ESTIMATOR
+from muninn.search.documents import CONTEXT_ESTIMATOR, CONTEXT_EXCERPT_ATTRS
 
 PROJECTION_SCHEMA = "muninn-braid-projection/2"
 ATTRIBUTION_SCHEMA = "muninn-attribution/1"
@@ -152,6 +152,7 @@ def _document_records(
         # twice while Braid can rank context roots without an ID remapping.
         excerpt_attrs = {**chunk_attrs, "kind": "context_excerpt",
                          "requires": [citation_id], "cost_estimator": CONTEXT_ESTIMATOR}
+        excerpt_attrs = {key: value for key, value in excerpt_attrs.items() if key in CONTEXT_EXCERPT_ATTRS}
         excerpt = _node("context:" + chunk.chunk_id, "context_excerpt", chunk.text,
                         excerpt_attrs, timestamp)
         excerpt["cost"] = estimate_entry_cost({k: excerpt[k] for k in ("id", "type", "text", "attrs")})

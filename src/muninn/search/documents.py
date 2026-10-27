@@ -8,6 +8,15 @@ CONTEXT_ESTIMATOR = "muninn-json-utf8-quarter/1"
 CONTEXT_MAX_BUDGET = 10000
 CONTEXT_MAX_BYTES = 65536
 CONTEXT_MAX_ROOTS = 12
+# Keep final context metadata separate from the richer retrieval projection.
+# Every delivered field is either canonical source identity, a verified span,
+# or a fixed interpretation label; retrieval summaries/prefixes stay private.
+CONTEXT_EXCERPT_ATTRS = (
+    "document_id", "namespace", "source_ref", "source_revision", "bookmark_id", "path",
+    "start", "end", "text_digest", "normalization", "span_coordinate_system", "profile_id",
+    "attribution_id", "requires", "cost_estimator", "kind", "projection_schema", "embedding_prefix_role",
+)
+CONTEXT_EXPORT_ATTRS = (*CONTEXT_EXCERPT_ATTRS, "attribution_schema", "citation")
 
 
 @dataclass(frozen=True)

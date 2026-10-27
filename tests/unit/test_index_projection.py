@@ -208,6 +208,7 @@ def test_attribution_is_shared_exact_and_never_embedded(fresh_db):
         assert chunk["attrs"]["context_excerpt_id"] == excerpt.value["id"]
         assert excerpt.value["text"] == chunk["text"]
         assert excerpt.value["attrs"]["requires"] == [attribution.value["id"]]
+        assert not {"summary", "tags", "url", "embedding_prefix", "title", "citation"}.intersection(excerpt.value["attrs"])
         assert excerpt.embedding_input == next(
             r.embedding_input for r in nodes if r.value["id"] == chunk["id"])
         assert excerpt.value["cost"] == estimate_entry_cost({
