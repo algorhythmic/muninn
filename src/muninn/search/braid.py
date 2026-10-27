@@ -53,6 +53,9 @@ class BraidDocumentBackend:
             raise ValueError("unsupported_search_option")
         conn = client = None
         try:
+            if self.client_factory is open_search:
+                from muninn.index.pilot import require_pilot_enabled
+                require_pilot_enabled()
             conn = connect(self.db_path)
             conn.execute("BEGIN")
             generation = registry.active_generation(conn)

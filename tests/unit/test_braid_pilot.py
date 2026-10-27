@@ -119,3 +119,19 @@ def test_mcp_shutdown_closes_runtime_even_when_server_raises(monkeypatch):
     with pytest.raises(RuntimeError):
         server.main()
     assert closed == [True]
+
+
+@pytest.mark.parametrize("kind", ["document", "context"])
+def test_disabled_pilot_never_scans_canonical_sources(monkeypatch, kind):
+    from muninn.search import braid, context_braid
+    from muninn.search.documents import ContextRequest, DocumentBackendUnavailable
+    monkeypatch.delenv("MUNINN_BRAID_PILOT_CONFIG", raising=False)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("disabled pilot must not read the canonical database")
+    monkeypatch.setattr(braid, "connect", forbidden)
+    monkeypatch.setattr(context_braid, "connect", forbidden)
+    with pytest.raises(DocumentBackendUnavailable, match="pilot_disabled"):
+        if kind == "document":
+            braid.BraidDocumentBackend().search_documents("synthetic", ("bookmarks",), 5)
+        else:
+            context_braid.BraidContextBackend().build(ContextRequest("synthetic"))

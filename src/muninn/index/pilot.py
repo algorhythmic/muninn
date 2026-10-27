@@ -74,6 +74,31 @@ def load_pilot_pin() -> PilotPin:
         raise BraidError("pilot_config_invalid") from None
 
 
+def require_pilot_enabled():
+    """Cheap admission gate before any canonical read or authored inventory.
+
+    Full pin verification remains immediately before acquiring the subprocess.
+    Disabled pilots must have the legacy request's cost, not an index scan's.
+    """
+    try:
+        path = os.environ.get("MUNINN_BRAID_PILOT_CONFIG")
+        if not path:
+            raise BraidError("pilot_disabled")
+        if not Path(path).is_absolute():
+            raise BraidError("pilot_config_invalid")
+        value = _read(path)
+        if not isinstance(value, dict) or type(value.get("enabled")) is not bool:
+            raise BraidError("pilot_config_invalid")
+        if not value["enabled"]:
+            raise BraidError("pilot_disabled")
+    except (OSError, ValueError, TypeError):
+        raise BraidError("pilot_config_invalid") from None
+    except BraidError:
+        from muninn.index.runtime import runtime
+        runtime.close()
+        raise
+
+
 def open_pilot(runtime, *, context=False, **kwargs):
     try:
         pin = load_pilot_pin()

@@ -49,6 +49,9 @@ class BraidContextBackend:
     def _build(self, request):
         conn = client = None
         try:
+            if self.client_factory is None or self.client_factory is open_context:
+                from muninn.index.pilot import require_pilot_enabled
+                require_pilot_enabled()
             conn = connect(self.db_path)
             conn.execute("BEGIN")
             generation = registry.active_generation(conn)
