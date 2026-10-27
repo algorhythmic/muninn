@@ -384,6 +384,18 @@ def _scrape_row(conn: sqlite3.Connection, bookmark_id: int, pass_: str) -> sqlit
     ).fetchone()
 
 
+def selected_scrape_pass(row: sqlite3.Row, *, for_body: bool = False) -> str:
+    """Canonical enrichment-selected capture, or live when none is selected.
+
+    A post's source text is always the current API/live text; its enrichment
+    retrieval metadata can still name another pass. Index projections use
+    ``for_body=True`` to retain that distinction without concatenating captures.
+    """
+    if for_body and row["source"] == "x":
+        return "live"
+    return _SOURCE_TO_PASS.get(row["enrichment_source"] or "", "live")
+
+
 def _history_published_at(conn: sqlite3.Connection, bookmark_id: int) -> int | None:
     if not has_table(conn, "scrape_history"):
         return None
@@ -436,7 +448,7 @@ def build_view(
     author = author_from(meta) if bm["source"] in ("x", "x_article") else None
 
     # The current retrieval: the pass the enrichment read, else 'live'.
-    canonical_pass = _SOURCE_TO_PASS.get(bm["enrichment_source"] or "", "live")
+    canonical_pass = selected_scrape_pass(bm)
     scrape = _scrape_row(conn, bid, canonical_pass) or _scrape_row(conn, bid, "live")
 
     text = None

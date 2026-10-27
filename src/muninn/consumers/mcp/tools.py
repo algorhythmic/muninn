@@ -24,6 +24,12 @@ from pathlib import Path
 from muninn.consumers.mcp import vault_fs
 from muninn.consumers.vault import x_pages
 from muninn.db import connect
+from muninn.index.sources import (
+    hidden_urls as _hidden_urls,
+    visible_row as _visible_row,
+    visible_summary as _summary,
+    visible_title as _title,
+)
 from muninn.search import (
     DEFAULT_BACKEND,
     RRF_K,
@@ -51,37 +57,6 @@ def _item_kind(row: sqlite3.Row) -> str | None:
     if row["source"] not in x_pages.X_SOURCES:
         return None
     return x_pages.item_kind_for(row)
-
-
-def _hidden_urls(conn: sqlite3.Connection, row: sqlite3.Row) -> set[str]:
-    """Locators of hidden items an X-lane row links to (masked in its
-    title and summary, as in the vault)."""
-    if row["source"] not in x_pages.X_SOURCES:
-        return set()
-    return x_pages.hidden_child_urls(conn, row["bookmark_id"])
-
-
-def _title(row: sqlite3.Row, hidden: set[str]) -> str | None:
-    """``bookmarks.title``. An X post's title is the start of its text, so
-    a locator of a link hidden since the last sync is masked; a post
-    without a title (known only from an ``errors[]`` entry or a bare
-    reference) falls back to ``@handle``."""
-    if row["source"] != "x":
-        return row["title"]
-    if not row["title"]:
-        return x_pages.display_name(row)
-    return x_pages.mask_hidden_title(row["title"], hidden)
-
-
-def _summary(row: sqlite3.Row, hidden: set[str]) -> str | None:
-    """``enriched.summary``; one written before a policy change hid a
-    linked item can quote (or paraphrase around) its locator, so a summary
-    that quotes one is withheld until re-enrichment, as in the vault."""
-    summary = row["summary"] if "summary" in row.keys() else None
-    if not (summary and hidden):
-        return summary
-    summary, _, _, _ = x_pages.withhold_enrichment(hidden, summary, None, None)
-    return summary
 
 
 def _bookmark_summary(
@@ -141,19 +116,6 @@ def _hydrate(
         return output
     finally:
         conn.close()
-
-
-_VISIBLE_ROW_SQL = (
-    "SELECT b.bookmark_id, b.title, b.url, b.era_label, b.domain, "
-    "       b.source, b.source_id, b.source_metadata, e.summary "
-    "FROM bookmarks b LEFT JOIN enriched e "
-    "  ON e.bookmark_id = b.bookmark_id "
-    "WHERE b.bookmark_id = ? AND b.content_visible = 1"
-)
-
-
-def _visible_row(conn: sqlite3.Connection, bookmark_id: int) -> sqlite3.Row | None:
-    return conn.execute(_VISIBLE_ROW_SQL, (bookmark_id,)).fetchone()
 
 
 def _error(code: str, message: str) -> str:

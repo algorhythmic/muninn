@@ -21,6 +21,11 @@ class FakeTokenizer:
 
     def __init__(self):
         self.backend_tokenizer = SimpleNamespace(to_str=lambda: '{"synthetic":true}')
+        self.calls = []
+
+    def encode(self, text, **kwargs):
+        self.calls.append((text, kwargs))
+        return [0] + list(text.encode("utf-8")) + [1]
 
 
 class FakeModel:
@@ -252,6 +257,16 @@ def test_document_cache_reuses_only_completed_vectors(model, tmp_path):
     assert not model.calls
 
 
+def test_duplicate_inputs_encoded_once_per_batch(model, tmp_path):
+    profile = profiles.available_profile()
+    stream = profiles.document_embeddings(["same", "same"], profile,
+                                         cache=EmbeddingCache(tmp_path))
+    first = next(stream)
+    first[0] = 99
+    assert next(stream) == [0.6, 0.8]
+    assert [texts for texts, _ in model.calls] == [["same"]]
+
+
 def test_cancelled_stream_retains_complete_cache_without_encoding_rest(model, tmp_path):
     profile = profiles.available_profile()
     cache = EmbeddingCache(tmp_path)
@@ -288,3 +303,51 @@ def test_array_encoder_output_uses_native_numeric_values(model, monkeypatch):
     profile = profiles.available_profile()
     monkeypatch.setattr(model, "encode", lambda *args, **kwargs: [FakeArray()])
     assert profiles.query_embedding("input", profile, capabilities=["query_embedding"])["vector"] == [0.6, 0.8]
+
+
+def test_document_tokenizer_counts_actual_prompt_and_special_tokens_untruncated(model):
+    profile = profiles.available_profile()
+    adapter = profiles.document_tokenizer(profile)
+    assert adapter.digest == profile.tokenizer_digest
+    assert adapter.max_seq_length == 128
+    text = "é" * 200
+    assert adapter.count_tokens(text) == len((model.prompts["document"] + text).encode("utf-8")) + 2
+    assert model.first.tokenizer.calls == [
+        (model.prompts["document"] + text, {"add_special_tokens": True, "truncation": False})
+    ]
+    assert not model.calls  # Counting never performs embedding inference.
+
+
+def test_document_tokenizer_checks_exact_profile_on_creation_and_each_count(model):
+    profile = profiles.available_profile()
+    adapter = profiles.document_tokenizer(profile)
+    model.prompts["document"] = "changed prompt"
+    with pytest.raises(profiles.ProfileUnavailable, match="profile_mismatch"):
+        profiles.document_tokenizer(profile)
+    with pytest.raises(profiles.ProfileUnavailable, match="profile_mismatch"):
+        adapter.count_tokens("input")
+    assert not model.first.tokenizer.calls
+
+
+@pytest.mark.parametrize("maximum", [None, 0, -1, True, "128"])
+def test_document_tokenizer_refuses_unknown_model_limit(model, maximum):
+    model.max_seq_length = maximum
+    with pytest.raises(profiles.ProfileUnavailable, match="max_length_unavailable"):
+        profiles.document_tokenizer(profiles.available_profile())
+
+
+def test_document_tokenizer_unavailable_and_hash_are_typed(model, monkeypatch):
+    profile = profiles.available_profile()
+    adapter = profiles.document_tokenizer(profile)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("synthetic tokenizer failure")
+
+    monkeypatch.setattr(model.first.tokenizer, "encode", broken)
+    with pytest.raises(profiles.ProfileUnavailable, match="tokenizer_unavailable"):
+        adapter.count_tokens("input")
+    monkeypatch.setenv("MUNINN_EMBEDDING_BACKEND", "hash")
+    with pytest.raises(profiles.ProfileUnavailable, match="semantic_backend_unavailable"):
+        profiles.document_tokenizer(profile)
+    with pytest.raises(profiles.ProfileUnavailable, match="semantic_backend_unavailable"):
+        adapter.count_tokens("input")

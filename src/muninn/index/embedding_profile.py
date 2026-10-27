@@ -181,6 +181,65 @@ def query_embedding(text: str, profile: EmbeddingProfile, *,
             "vector": _encode(profile, [text], profile.query_prompt_name)[0]}
 
 
+@dataclass(frozen=True)
+class DocumentTokenizer:
+    """Count complete prompted document inputs without model truncation.
+
+    This adapter includes the actual document prompt and special tokens. Pass
+    zero additional prompt overhead to the chunker and cap its max_tokens at
+    max_seq_length. Tokenization serializes with inference on the shared model.
+    """
+
+    profile: EmbeddingProfile
+    digest: str
+    max_seq_length: int
+
+    def count_tokens(self, text: str) -> int:
+        from muninn.vector import embed
+
+        if embed._backend() != "sentence-transformers":
+            raise ProfileUnavailable("semantic_backend_unavailable")
+        try:
+            with embed._st_inference_lock:
+                model = embed._get_st_model()
+                if _model_profile(model).profile_id != self.profile.profile_id:
+                    raise ProfileUnavailable("profile_mismatch")
+                tokenizer = model._first_module().tokenizer
+                prompt = model.prompts[self.profile.document_prompt_name]
+                tokens = tokenizer.encode(prompt + text, add_special_tokens=True,
+                                          truncation=False)
+                return len(tokens)
+        except ProfileUnavailable:
+            raise
+        except (RuntimeError, OSError, ValueError, KeyError, AttributeError, TypeError) as exc:
+            raise ProfileUnavailable("tokenizer_unavailable") from exc
+
+
+def document_tokenizer(profile: EmbeddingProfile) -> DocumentTokenizer:
+    """Resolve a tokenizer only for the exact complete profile requested."""
+    from muninn.vector import embed
+
+    profile.require_complete()
+    if not profile.semantic_eligible or embed._backend() != "sentence-transformers":
+        raise ProfileUnavailable("semantic_backend_unavailable")
+    try:
+        with embed._st_inference_lock:
+            model = embed._get_st_model()
+            if _model_profile(model).profile_id != profile.profile_id:
+                raise ProfileUnavailable("profile_mismatch")
+            maximum = getattr(model, "max_seq_length", None)
+            if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+                raise ProfileUnavailable("tokenizer_max_length_unavailable")
+            tokenizer = getattr(model._first_module(), "tokenizer", None)
+            if not callable(getattr(tokenizer, "encode", None)):
+                raise ProfileUnavailable("tokenizer_unavailable")
+            return DocumentTokenizer(profile, profile.tokenizer_digest, maximum)
+    except ProfileUnavailable:
+        raise
+    except (RuntimeError, OSError, ValueError, KeyError, AttributeError, TypeError) as exc:
+        raise ProfileUnavailable("tokenizer_unavailable") from exc
+
+
 def document_embeddings(texts: Iterable[str], profile: EmbeddingProfile, *,
                         cache: EmbeddingCache | None = None, batch_size: int = 32,
                         max_batch_bytes: int = 262144,
@@ -200,11 +259,14 @@ def document_embeddings(texts: Iterable[str], profile: EmbeddingProfile, *,
         results = [cache.get(profile, text) if cache else None for text in batch]
         missing = [i for i, result in enumerate(results) if result is None]
         if missing:
-            vectors = _encode(profile, [batch[i] for i in missing], profile.document_prompt_name)
-            for i, vector in zip(missing, vectors):
+            unique = list(dict.fromkeys(batch[i] for i in missing))
+            vectors = _encode(profile, unique, profile.document_prompt_name)
+            by_text = dict(zip(unique, vectors))
+            for text, vector in by_text.items():
                 if cache:
-                    cache.put(profile, batch[i], vector)
-                results[i] = vector
+                    cache.put(profile, text, vector)
+            for i in missing:
+                results[i] = by_text[batch[i]].copy()
         return results  # type: ignore[return-value]
 
     batch: list[str] = []

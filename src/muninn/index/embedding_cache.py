@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 
 def default_cache_dir() -> Path:
     # Lazy config import keeps model libraries out of module import paths.
-    from muninn.config import load_paths
+    from muninn.index.paths import load_index_paths
 
-    return load_paths().data_dir / "index" / "embedding-cache"
+    return load_index_paths().embedding_cache_dir
 
 
 def _digest(text: str) -> str:
