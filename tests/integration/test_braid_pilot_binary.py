@@ -109,5 +109,9 @@ def test_native_context_exports_exact_attribution_with_bounds(setup, tmp_path, m
         assert result["context_bytes"] <= 16384 and result["accounting"]["delivered"] <= 2500
         assert any(row["type"] == "context_excerpt" and "Synthetic body" in row["text"] for row in result["context"])
         assert any(row["type"] == "attribution" for row in result["context"])
+        absent = json.loads(tools.search_context("lunar cheese production quota", namespaces=["bookmarks"],
+            db_path=path, context_backend=backend))
+        assert absent["backend"] == "braid" and absent["state"] == "abstained", absent
+        assert absent["context"] == [] and absent["fallback_reason"] is None
     finally:
         runtime.shutdown()

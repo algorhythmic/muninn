@@ -102,6 +102,21 @@ def load_braid_settings() -> BraidSettings:
     return BraidSettings(binary, digest)
 
 
+def load_braid_context_min_score() -> float:
+    """Conservative fused-RRF policy, not calibrated semantic confidence.
+
+    MUNINN_BRAID_CONTEXT_MIN_SCORE defaults to 0.02. With the pinned context
+    weights lexical=dense=1, graph=temporal=0 and Braid's default k=60, a dense-
+    only root scores at most 1/61 (~0.0164). Lowering the floor needs consumer
+    qualification; explicit required sources remain independently admissible.
+    """
+    import math
+    value = float(os.environ.get("MUNINN_BRAID_CONTEXT_MIN_SCORE", "0.02"))
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("invalid context minimum fused score")
+    return value
+
+
 # ── Model IDs ─────────────────────────────────────────────────────
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 

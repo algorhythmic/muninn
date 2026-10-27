@@ -130,6 +130,16 @@ no automatic graph seeding. Missing or infeasible mandatory content causes an
 explicit empty abstention. Canonical sources/spans are checked again after
 selection; a changed source permits one complete retry.
 
+Optional Braid context roots must clear `MUNINN_BRAID_CONTEXT_MIN_SCORE`
+(default `0.02`) in both the shortlist and native export. This is a fused RRF
+score, not calibrated semantic confidence. At the pinned weights (lexical and
+dense 1, graph and temporal 0) and Braid's default rank constant 60, a dense-only
+root scores at most `1/61`, below the floor. No admitted roots returns empty
+context with `state=abstained`, reason `no_relevant_context`, and no fallback.
+Explicit required sources remain independently admissible. Changing the floor
+requires separate model/profile qualification; hash-stub recall is only a
+plumbing smoke result. Ordinary search scores and behavior are unchanged.
+
 Newly built generations include the context projection and configuration.
 Older generations cannot be reinterpreted as context-ready. On unavailability,
 the labelled legacy path uses C's complete search and B's canonical bodies,

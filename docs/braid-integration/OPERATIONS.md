@@ -77,3 +77,11 @@ staging is marked failed before cleanup. A partial unlink can be retried safely;
 only after directory fsync does the registry record `derived_files_removed`.
 Audit rows and activation journals remain intact, while cleaned generations are
 excluded from future ready-build selection. No worker or activation invokes GC.
+
+Context admission uses `MUNINN_BRAID_CONTEXT_MIN_SCORE` (default `0.02`) as
+a conservative native fused-RRF floor for optional roots. At pinned unit
+lexical/dense weights and Braid's rank constant 60, dense-only support cannot
+clear it. Explicit required sources are admitted separately. An empty shortlist
+is a valid empty context, not a transport failure or reason to fall back.
+This setting is not calibrated semantic confidence; qualify a real embedding
+profile before changing the floor or enabling retrieval for operator data.
