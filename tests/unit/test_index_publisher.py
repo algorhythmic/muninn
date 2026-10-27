@@ -318,3 +318,28 @@ def test_all_default_artifact_paths_resolve_under_configured_data_dir(setup):
     for path in (paths.root, paths.generations_dir, paths.staging_dir, paths.build_dir,
                  paths.embedding_cache_dir, default_cache_dir(), paths.manifest_path("synthetic")):
         assert path.resolve().is_relative_to(root.resolve())
+
+
+def test_rollback_obeys_current_epoch_and_retains_previous(setup):
+    path, profile, clients, build = setup
+    first, second, third = build(), build(), build()
+    publisher.activate_generation(first.generation_id, path)
+    publisher.activate_generation(second.generation_id, path)
+    conn = connect(path)
+    assert publisher.retained_generations(conn) == {first.generation_id, second.generation_id}
+    conn.close()
+    assert publisher.retention_candidates(path) == (third.generation_id,)
+    with pytest.raises(publisher.PublishError, match="rollback_generation_not_retained"):
+        publisher.rollback_generation(third.generation_id, path)
+    # GC is advisory until cross-process reader ownership can be proved.
+    assert load_index_paths().generation_dir(third.generation_id).exists()
+    publisher.rollback_generation(first.generation_id, path)
+    conn = connect(path)
+    conn.execute("UPDATE bookmarks SET content_visible=0")
+    conn.commit()
+    conn.close()
+    with pytest.raises(registry.RegistryError, match="source_epoch_changed"):
+        publisher.rollback_generation(second.generation_id, path)
+    conn = connect(path)
+    assert registry.active_generation(conn).id == first.generation_id
+    conn.close()

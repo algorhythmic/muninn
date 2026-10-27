@@ -188,12 +188,57 @@ def activate_generation(generation_id: str, db_path=None) -> Manifest:
             if Path(generation.manifest_path).resolve() != expected_path.resolve():
                 raise PublishError("generation_path_mismatch")
             manifest = Manifest.read(expected_path, expected_digest=generation.manifest_digest)
+            if manifest.projection_version != "muninn-braid-projection/2":
+                raise PublishError("projection_version_mismatch")
             if manifest.generation_id != generation_id or manifest.corpus_id != registry.ensure_corpus(conn):
                 raise PublishError("generation_identity_mismatch")
             inventory = _inventory(conn, manifest.namespaces)
             if manifest.authored_inventory_digest is not None and inventory.digest != manifest.authored_inventory_digest:
                 raise PublishError("authored_inventory_changed")
-            registry.activate(conn, generation_id, manifest.source_epoch, lease_token=lease.token)
+            identity = registry.prepare_activation(conn, generation_id, manifest.source_epoch)
+            registry.activate(conn, generation_id, manifest.source_epoch, lease_token=lease.token,
+                              activation_id=identity)
             return manifest
+    finally:
+        conn.close()
+
+
+def rollback_generation(generation_id: str, db_path=None) -> Manifest:
+    """Explicitly reselect a retained generation under today's source rules.
+
+    Rollback deliberately uses exactly the activation checks, including epoch,
+    inventory, manifest integrity and scope. It cannot resurrect removed content.
+    """
+    conn = connect(db_path)
+    try:
+        if generation_id not in retained_generations(conn):
+            raise PublishError("rollback_generation_not_retained")
+    finally:
+        conn.close()
+    return activate_generation(generation_id, db_path)
+
+
+def retained_generations(conn) -> set[str]:
+    """Canonical active/previous references; reader-owned data must also survive."""
+    row = conn.execute("SELECT active_generation_id,previous_generation_id FROM index_corpus WHERE singleton=1").fetchone()
+    return {value for value in row if value is not None}
+
+
+def retention_candidates(db_path=None, *, leased=()) -> tuple[str, ...]:
+    """Conservative retention report; destructive cross-process GC is deferred.
+
+    An in-process lease list cannot establish that another process has closed a
+    SQLite file. Until a cross-process reader lease is installed this function
+    returns eligible identities without unlinking any files or registry rows.
+    Canonical sources, authored files and cache are never cleanup candidates.
+    """
+    from muninn.index import registry
+    conn = connect(db_path)
+    try:
+        with registry.publisher_lease(conn):
+            keep = retained_generations(conn) | set(leased)
+            return tuple(row[0] for row in conn.execute(
+                "SELECT generation_id FROM index_generations WHERE state IN ('ready','failed') ORDER BY generation_id"
+            ) if row[0] not in keep)
     finally:
         conn.close()
