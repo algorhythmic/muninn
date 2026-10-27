@@ -72,6 +72,33 @@ def load_paths() -> Paths:
     )
 
 
+@dataclass(frozen=True)
+class BraidSettings:
+    """Optional Braid process identity; derived storage is always data_dir/index.
+
+    MUNINN_BRAID_BINARY must be an absolute executable path. No binary is
+    discovered or downloaded automatically. MUNINN_BRAID_SHA256 optionally pins
+    its SHA256 in addition to the generation manifest's negotiated identity.
+    These settings never activate a generation or change the search default.
+    """
+
+    binary: Path | None
+    sha256: str | None
+
+
+def load_braid_settings() -> BraidSettings:
+    import re
+
+    raw = os.environ.get("MUNINN_BRAID_BINARY")
+    binary = Path(raw).expanduser() if raw else None
+    if binary is not None and not binary.is_absolute():
+        raise ValueError("MUNINN_BRAID_BINARY must be absolute")
+    digest = os.environ.get("MUNINN_BRAID_SHA256") or None
+    if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("MUNINN_BRAID_SHA256 must be lowercase SHA256")
+    return BraidSettings(binary, digest)
+
+
 # ── Model IDs ─────────────────────────────────────────────────────
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 

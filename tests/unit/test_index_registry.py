@@ -180,17 +180,62 @@ def test_lease_exclusion_expiry_and_fencing(tmp_path):
                 pytest.fail("second publisher must not acquire live lease")
         first.execute("UPDATE index_corpus SET lease_expires_at=unixepoch()-1")
         first.commit()
-        with r.publisher_lease(second) as current:
-            with pytest.raises(r.RegistryError, match="lease_lost"):
-                old.assert_owned()
-            with pytest.raises(r.RegistryError, match="lease_lost"):
-                r.allocate_generation(first, "stale", ("captured",), lease_token=old.token)
-            ready(second, "valid", lease_token=current.token)
-            with pytest.raises(r.RegistryError, match="lease_lost"):
-                r.activate(first, "valid", r.source_epoch(first), lease_token=old.token)
-            r.activate(second, "valid", r.source_epoch(second), lease_token=current.token)
+        with pytest.raises(r.RegistryError, match="lease_busy"):
+            with r.publisher_lease(second):
+                pytest.fail("expiry cannot steal a live OS lock")
+        with pytest.raises(r.RegistryError, match="lease_lost"):
+            old.assert_owned()
+        with pytest.raises(r.RegistryError, match="lease_lost"):
+            r.allocate_generation(first, "stale", ("captured",), lease_token=old.token)
+    with r.publisher_lease(second) as current:
+        ready(second, "valid", lease_token=current.token)
+        with pytest.raises(r.RegistryError, match="lease_lost"):
+            r.activate(first, "valid", r.source_epoch(first), lease_token=old.token)
+        r.activate(second, "valid", r.source_epoch(second), lease_token=current.token)
     assert r.active_generation(first).generation_id == "valid"
     with r.publisher_lease(first) as new:
         new.assert_owned()
     first.close()
     second.close()
+
+
+def test_activation_journal_resolves_pointer_and_supersession(fresh_db):
+    conn = fresh_db
+    ready(conn, "first")
+    ready(conn, "second")
+    epoch = r.source_epoch(conn)
+    identity = r.prepare_activation(conn, "first", epoch)
+    assert r.activation_outcome(conn, identity) == "not_committed"
+    r.activate(conn, "first", epoch, activation_id=identity)
+    assert r.activation_outcome(conn, identity) == "active"
+    # A lost return is resolved from pointer identity, not by replaying activate.
+    assert r.activation_outcome(conn, identity) == "active"
+    r.activate(conn, "second", epoch)
+    assert r.activation_outcome(conn, identity) == "superseded"
+    assert conn.execute("SELECT previous_generation_id FROM index_corpus").fetchone()[0] == "first"
+    assert r.activation_outcome(conn, "missing") == "unknown"
+
+
+def test_orphaned_token_reconciles_only_after_os_ownership(fresh_db):
+    fresh_db.execute("UPDATE index_corpus SET lease_token='dead-owner',lease_expires_at=unixepoch()+3600")
+    fresh_db.commit()
+    with r.publisher_lease(fresh_db) as lease:
+        assert lease.token != "dead-owner"
+        lease.assert_owned()
+
+
+def test_publisher_lease_holds_kernel_lock_after_ttl_expiry(tmp_path):
+    import fcntl
+    import os
+    path = tmp_path / "synthetic.db"
+    conn = init_db(path)
+    with r.publisher_lease(conn):
+        conn.execute("UPDATE index_corpus SET lease_expires_at=unixepoch()-1")
+        conn.commit()
+        fd = os.open(str(path) + ".publisher.lock", os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+    conn.close()

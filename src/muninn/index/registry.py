@@ -10,6 +10,9 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import fcntl
+import os
+import threading
 from pathlib import Path
 import re
 import sqlite3
@@ -155,7 +158,7 @@ def active_generation(conn: sqlite3.Connection) -> Generation | None:
 
 
 def activate(conn: sqlite3.Connection, generation_id: str, expected_epoch: int, *,
-             lease_token: str | None = None) -> None:
+             lease_token: str | None = None, activation_id: str | None = None) -> None:
     with _write(conn):
         _fence(conn, lease_token)
         generation = get_generation(conn, generation_id)
@@ -163,7 +166,83 @@ def activate(conn: sqlite3.Connection, generation_id: str, expected_epoch: int, 
             raise RegistryError("generation_not_ready")
         if generation.source_epoch != expected_epoch or source_epoch(conn) != expected_epoch:
             raise RegistryError("source_epoch_changed")
-        conn.execute("UPDATE index_corpus SET active_generation_id=? WHERE singleton=1", (generation_id,))
+        if activation_id is None:
+            activation_id = uuid.uuid4().hex
+            conn.execute("INSERT INTO index_activations(activation_id,generation_id,previous_generation_id,expected_epoch,state) "
+                         "SELECT ?,?,active_generation_id,?,'prepared' FROM index_corpus WHERE singleton=1",
+                         (activation_id, generation_id, expected_epoch))
+        intent = conn.execute("SELECT generation_id,expected_epoch,state FROM index_activations WHERE activation_id=?",
+                              (activation_id,)).fetchone()
+        if intent is None or tuple(intent) != (generation_id, expected_epoch, "prepared"):
+            raise RegistryError("activation_identity_mismatch")
+        conn.execute("UPDATE index_corpus SET previous_generation_id=CASE WHEN active_generation_id IS NOT ? "
+                     "THEN active_generation_id ELSE previous_generation_id END,active_generation_id=?,activation_id=? WHERE singleton=1",
+                     (generation_id, generation_id, activation_id))
+        conn.execute("UPDATE index_activations SET state='committed',committed_at=unixepoch() WHERE activation_id=?", (activation_id,))
+
+
+
+def prepare_activation(conn: sqlite3.Connection, generation_id: str, expected_epoch: int) -> str:
+    """Persist an intent before the pointer transaction; identity resolves lost returns."""
+    identity = uuid.uuid4().hex
+    with _write(conn):
+        conn.execute("INSERT INTO index_activations(activation_id,generation_id,previous_generation_id,expected_epoch,state) "
+                     "SELECT ?,?,active_generation_id,?,'prepared' FROM index_corpus WHERE singleton=1",
+                     (identity, generation_id, expected_epoch))
+    return identity
+
+
+def activation_outcome(conn: sqlite3.Connection, identity: str) -> str:
+    """Read the canonical pointer; never retry an unknown activation blindly."""
+    row = conn.execute("SELECT a.state,c.activation_id,c.active_generation_id,a.generation_id "
+                       "FROM index_activations a CROSS JOIN index_corpus c WHERE a.activation_id=?", (identity,)).fetchone()
+    if row is None:
+        return "unknown"
+    if row[1] == identity and row[2] == row[3]:
+        return "active"
+    return "superseded" if row[0] == "committed" else "not_committed"
+
+
+_lock_guard = threading.Lock()
+_locks: dict[str, tuple[int, int, int]] = {}
+
+
+@contextmanager
+def publisher_lock(conn: sqlite3.Connection) -> Iterator[None]:
+    """Nonblocking OS lock; lease expiry never authorizes stealing live work.
+
+    Nested acquisition by the owning thread is allowed for the supervised worker.
+    The lock is tied to the canonical database inode's adjacent private lock file.
+    """
+    database = next((r[2] for r in conn.execute("PRAGMA database_list") if r[1] == "main"), "")
+    if not database:
+        raise RegistryError("publisher_requires_file_database")
+    key = str(Path(database).resolve()) + ".publisher.lock"
+    owner = threading.get_ident()
+    with _lock_guard:
+        held = _locks.get(key)
+        if held is not None:
+            if held[0] != owner:
+                raise RegistryError("publisher_lease_busy")
+            _locks[key] = (owner, held[1], held[2] + 1)
+        else:
+            fd = os.open(key, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                os.close(fd)
+                raise RegistryError("publisher_lease_busy") from exc
+            _locks[key] = (owner, fd, 1)
+    try:
+        yield
+    finally:
+        with _lock_guard:
+            held = _locks[key]
+            if held[2] > 1:
+                _locks[key] = (owner, held[1], held[2] - 1)
+            else:
+                del _locks[key]
+                os.close(held[1])
 
 
 @dataclass(frozen=True)
@@ -175,27 +254,33 @@ class PublisherLease:
         _fence(self.conn, self.token)
 
 
+_active_leases: set[str] = set()
+
+
 @contextmanager
 def publisher_lease(conn: sqlite3.Connection, *, ttl_seconds: int = 3600) -> Iterator[PublisherLease]:
-    """Crash-expiring lease. Final mutators must pass lease_token for fencing.
+    """OS ownership plus short canonical fencing lease; crashed owners reconcile.
 
-    No heartbeat is implicit: work exceeding its TTL fails closed at the next
-    ownership check. Reacquiring after expiry never restores an older token.
+    The OS lock, never a stored PID or elapsed TTL, authorizes reclaiming an
+    orphaned token. Expiry still fences a publisher whose build exceeded its TTL.
     """
     if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or ttl_seconds <= 0:
         raise ValueError("positive lease TTL required")
-    token = uuid.uuid4().hex
-    with _write(conn):
-        changed = conn.execute(
-            "UPDATE index_corpus SET lease_token=?,lease_expires_at=unixepoch()+? WHERE singleton=1 "
-            "AND (lease_token IS NULL OR lease_expires_at<=unixepoch())", (token, ttl_seconds),
-        ).rowcount
-        if not changed:
+    key = str(Path(conn.execute("PRAGMA database_list").fetchone()[2]).resolve())
+    with publisher_lock(conn):
+        if key in _active_leases:
             raise RegistryError("publisher_lease_busy")
-    lease = PublisherLease(conn, token)
-    try:
-        yield lease
-    finally:
-        with _write(conn):
-            conn.execute("UPDATE index_corpus SET lease_token=NULL,lease_expires_at=NULL "
-                         "WHERE singleton=1 AND lease_token=?", (token,))
+        _active_leases.add(key)
+        token = uuid.uuid4().hex
+        try:
+            with _write(conn):
+                conn.execute("UPDATE index_corpus SET lease_token=?,lease_expires_at=unixepoch()+? WHERE singleton=1",
+                             (token, ttl_seconds))
+            yield PublisherLease(conn, token)
+        finally:
+            try:
+                with _write(conn):
+                    conn.execute("UPDATE index_corpus SET lease_token=NULL,lease_expires_at=NULL "
+                                 "WHERE singleton=1 AND lease_token=?", (token,))
+            finally:
+                _active_leases.remove(key)

@@ -9,7 +9,8 @@ from pathlib import Path
 
 from muninn.db import connect, SchemaVersionError
 from muninn.index import registry
-from muninn.index.braid_client import BraidClient, BraidError
+from muninn.index.braid_client import BraidError
+from muninn.index.runtime import open_search
 from muninn.index.embedding_profile import ProfileUnavailable, query_embedding, validate_vector
 from muninn.index.manifest import Manifest
 from muninn.index.paths import load_index_paths
@@ -32,7 +33,7 @@ def _verify_chunks(body, chunks, items, revision):
 
 
 class BraidDocumentBackend:
-    def __init__(self, db_path=None, binary="braid", client_factory=BraidClient.open_existing,
+    def __init__(self, db_path=None, binary="braid", client_factory=open_search,
                  query_encoder=query_embedding):
         self.db_path, self.binary = db_path, Path(binary)
         self.client_factory, self.query_encoder = client_factory, query_encoder
@@ -85,8 +86,9 @@ class BraidDocumentBackend:
             if manifest.authored_inventory_digest is not None and inventory.digest != manifest.authored_inventory_digest:
                 raise DocumentBackendUnavailable("stale_index")
             profile = manifest.profile()
+            runtime_options = {"db_path": self.db_path} if self.client_factory is open_search else {}
             client = self.client_factory(binary=self.binary, generation_dir=expected_path.parent,
-                dataset_id=manifest.dataset_id, profile_id=profile.profile_id)
+                dataset_id=manifest.dataset_id, profile_id=profile.profile_id, **runtime_options)
             if client.state != manifest.braid["state"]:
                 raise DocumentBackendUnavailable("dataset_mismatch")
             if client.identity != manifest.braid["identity"]:

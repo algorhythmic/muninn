@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import subprocess
 import time
+import threading
 from typing import Iterable, Protocol
 
 REQUIRED_CAPABILITIES = (
@@ -42,10 +43,11 @@ class Transport(Protocol):
 
 class StdioTransport:
     """Sequential pipe transport, bounded in bytes and by one wall deadline."""
-    def __init__(self, command: list[str], *, cwd: Path | None = None):
+    def __init__(self, command: list[str], *, cwd: Path | None = None, ownership_fd: int | None = None):
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, bufsize=0, cwd=cwd,
-            env={"PATH": os.defpath, "LANG": "C.UTF-8"})
+            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+            pass_fds=() if ownership_fd is None else (ownership_fd,))
         os.set_blocking(self.process.stdin.fileno(), False)
         os.set_blocking(self.process.stdout.fileno(), False)
 
@@ -124,11 +126,12 @@ class BraidClient:
         self.profile_id = profile_id
         self.timeout = timeout
         self.max_request_bytes = min(max_request_bytes, 16 * 1024 * 1024)
-        self.max_response_bytes = max_response_bytes
+        self.max_response_bytes = min(max_response_bytes, 16 * 1024 * 1024)
         self.generation_dir = generation_dir
         self.poisoned = False
         self.closed = False
         self._sequence = 0
+        self._request_lock = threading.Lock()
         self._phase = "nodes"
         hello = self.request("hello", versions=[1], required_capabilities=list(REQUIRED_CAPABILITIES))
         caps = hello.get("capabilities")
@@ -204,7 +207,7 @@ class BraidClient:
         return cls._open(binary, generation_dir, dataset_id, profile_id, **kwargs)
 
     @classmethod
-    def _open(cls, binary, generation_dir, dataset_id, profile_id, *, config_name="braid.json", **kwargs):
+    def _open(cls, binary, generation_dir, dataset_id, profile_id, *, config_name="braid.json", ownership_fd=None, **kwargs):
         candidate = str(binary)
         if not Path(candidate).is_absolute() and len(Path(candidate).parts) == 1:
             candidate = shutil.which(candidate)
@@ -214,7 +217,7 @@ class BraidClient:
         with binary.open("rb") as file:
             digest = hashlib.file_digest(file, "sha256").hexdigest()
         transport = StdioTransport([str(binary), "serve", "--stdio", "--config", str(generation_dir / config_name)],
-                                   cwd=generation_dir)
+                                   cwd=generation_dir, ownership_fd=ownership_fd)
         try:
             return cls(transport, dataset_id=dataset_id, profile_id=profile_id,
                        generation_dir=generation_dir, binary_digest=digest, **kwargs)
@@ -236,15 +239,21 @@ class BraidClient:
         return {"id": str(self._sequence + 1), "method": method, **payload}
 
     def request(self, method: str, **payload):
+        deadline = time.monotonic() + self.timeout
+        acquired = self._request_lock.acquire(timeout=max(0, deadline - time.monotonic()))
+        if not acquired:
+            self.poisoned = True
+            raise BraidError("transport_timeout")
         try:
-            return self._request(method, **payload)
+            return self._request(method, deadline=deadline, **payload)
         except BaseException:
-            # A timed-out read can leave a late response in the pipe too.
-            # Never reuse a stream once its request/response pairing is lost.
+            # Late responses cannot be paired with another caller's request.
             self.poisoned = True
             raise
+        finally:
+            self._request_lock.release()
 
-    def _request(self, method: str, **payload):
+    def _request(self, method: str, *, deadline: float, **payload):
         if self.poisoned or self.closed:
             raise BraidError("session_abandoned")
         if "id" in payload or "method" in payload:
@@ -254,7 +263,10 @@ class BraidClient:
         if len(encoded) >= self.max_request_bytes:
             raise BraidError("request_too_large")
         self._sequence += 1
-        raw = self.transport.exchange(encoded, timeout=self.timeout, max_response_bytes=self.max_response_bytes)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BraidError("transport_timeout")
+        raw = self.transport.exchange(encoded, timeout=remaining, max_response_bytes=self.max_response_bytes)
         if len(raw) > self.max_response_bytes:
             raise BraidError("response_too_large")
         try:

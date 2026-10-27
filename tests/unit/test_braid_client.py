@@ -181,7 +181,7 @@ def test_create_relocate_reopen_and_checkpoint(tmp_path, monkeypatch):
     binary = tmp_path / "synthetic-binary"
     binary.write_bytes(b"synthetic identity; never executed")
     captures = []
-    def transport(command, *, cwd):
+    def transport(command, *, cwd, ownership_fd=None):
         captures.append((command, cwd))
         config = json.loads((cwd / "braid.json").read_text())
         assert config["store"]["path"] == "braid.db"
@@ -232,3 +232,52 @@ def test_context_configuration_is_separate_and_validated(tmp_path, monkeypatch):
     context_path.write_text(json.dumps(context))
     with pytest.raises(BraidError, match="context_config_mismatch"):
         BraidClient.open_context(tmp_path / "unused-binary", directory, "synthetic", "fake-profile")
+
+
+def test_queue_wait_counts_inside_request_deadline_and_invalidates_session():
+    import threading
+    fake = FakeTransport()
+    instance = client(fake, timeout=.03)
+    instance._request_lock.acquire()
+    outcome = []
+    def queued():
+        try:
+            instance.request("dataset")
+        except BraidError as exc:
+            outcome.append(exc.code)
+    thread = threading.Thread(target=queued)
+    thread.start()
+    thread.join(timeout=1)
+    instance._request_lock.release()
+    assert not thread.is_alive()
+    assert outcome == ["transport_timeout"]
+    assert instance.poisoned
+    assert len(fake.requests) == 1  # hello only; queued call never reached pipe
+
+
+def test_request_response_pairing_is_serialized_for_concurrent_callers():
+    import threading
+    import time
+    fake = FakeTransport()
+    instance = client(fake)
+    original = fake.exchange
+    active = 0
+    overlap = []
+    def exchange(*args, **kwargs):
+        nonlocal active
+        active += 1
+        overlap.append(active)
+        time.sleep(.005)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            active -= 1
+    fake.exchange = exchange
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(instance.request("dataset"))) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=1)
+    assert len(results) == 4 and max(overlap) == 1
+    assert [req[1]["id"] for req in fake.requests] == [str(i) for i in range(1, 6)]
