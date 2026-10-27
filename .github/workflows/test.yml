@@ -1,0 +1,33 @@
+name: Tests
+
+on:
+  push:
+    branches: [x-slice, main]
+  pull_request:
+    branches: [x-slice, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: src
+      MUNINN_ENV_FILE: /dev/null
+      MUNINN_EMBEDDING_BACKEND: hash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install locked development dependencies
+        run: uv sync --locked --extra dev
+      - name: Run tests
+        run: uv run pytest -q -rs
