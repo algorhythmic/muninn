@@ -110,6 +110,9 @@ def test_build_ready_without_implicit_activation_then_explicit_switch(setup):
     generation = registry.generation(conn, manifest.generation_id)
     assert generation.state == "ready"
     assert generation.manifest_digest == manifest.digest
+    from muninn.index.worker import status
+    job = status(conn)
+    assert job.state == "ready" and job.job_id and job.generation_id == manifest.generation_id
     assert manifest.source_count == 1
     assert manifest.chunk_count == 1
     assert manifest.profile_id == profile.profile_id

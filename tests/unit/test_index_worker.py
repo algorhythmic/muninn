@@ -167,3 +167,33 @@ def test_explicit_enqueue_while_building_is_not_lost(database):
     result = worker.run_once(database, build=build)
     assert result.state == 'ready'
     assert result.pending_epoch == 0
+
+
+def test_publisher_hook_preserves_same_epoch_authored_notification(database):
+    conn = connect(database)
+    registry.allocate_generation(conn, 'synthetic', ('bookmarks',))
+    worker.build_started(conn, 'synthetic')
+    identity = worker.status(conn).job_id
+    worker.enqueue(conn)
+    worker.build_started(conn, 'synthetic')
+    assert worker.status(conn).pending_epoch == registry.source_epoch(conn)
+    assert worker.status(conn).job_id == identity
+    worker.build_finished(conn, 'synthetic')
+    assert worker.status(conn).state == 'ready'
+    assert worker.status(conn).pending_epoch == 0
+    conn.close()
+
+
+def test_explicit_restart_reconciles_old_job_identity(database):
+    conn = connect(database)
+    registry.allocate_generation(conn, 'abandoned', ('bookmarks',))
+    worker.build_started(conn, 'abandoned')
+    identity = worker.status(conn).job_id
+    with registry.publisher_lock(conn):
+        assert worker.reconcile_staging(conn) == 1
+        assert worker.status(conn).failure_category == 'interrupted_build'
+        registry.allocate_generation(conn, 'replacement', ('bookmarks',))
+        worker.build_started(conn, 'replacement')
+    assert worker.status(conn).job_id != identity
+    assert registry.get_generation(conn, 'abandoned').state == 'failed'
+    conn.close()

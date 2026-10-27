@@ -15,6 +15,7 @@ def index_status(db_path=None):
     conn = connect_readonly(db_path)
     try:
         active = registry.active_generation(conn)
+        pointer = conn.execute("SELECT previous_generation_id,activation_id FROM index_corpus WHERE singleton=1").fetchone()
         ready = conn.execute("SELECT generation_id FROM index_generations WHERE state='ready' ORDER BY ready_at DESC, generation_id DESC LIMIT 1").fetchone()
         from muninn.index.worker import status
         publisher = asdict(status(conn))
@@ -24,6 +25,7 @@ def index_status(db_path=None):
                   "corpus_id": registry.ensure_corpus(conn), "source_epoch": registry.source_epoch(conn),
                   "ready_build": ready[0] if ready else None, "active_generation": active.generation_id if active else None,
                   "active": asdict(active) if active else None,
+                  "previous_generation": pointer[0], "activation_id": pointer[1],
                   "backend_actually_used": None, "backend_observation": "no_request_observation",
                   "publisher": publisher, "inventory": None, "profile": None, "braid": None,
                   "counts": None, "fallback_reason": "generation_unavailable" if active is None else None}

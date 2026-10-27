@@ -84,8 +84,11 @@ def build_generation(db_path=None, *, binary: Path | str = "braid", namespaces=N
     try:
         corpus_id = registry.ensure_corpus(conn)
         with registry.publisher_lease(conn) as lease:
+            from muninn.index.worker import reconcile_staging, build_started, build_finished
+            reconcile_staging(conn)
             registry.allocate_generation(conn, generation_id, scope, lease_token=lease.token)
             allocated = True
+            build_started(conn, generation_id)
             staging.mkdir(parents=True, mode=0o700)
             staging.chmod(0o700)
             journal = staging / "journal.json"
@@ -161,12 +164,15 @@ def build_generation(db_path=None, *, binary: Path | str = "braid", namespaces=N
             fsync_dir(paths.staging_dir)
             registry.mark_ready(conn, generation_id, str(final / "manifest.json"), manifest.digest,
                                 lease_token=lease.token)
+            build_finished(conn, generation_id)
             return manifest
     except BaseException:
         if conn.in_transaction:
             conn.rollback()
         if allocated:
             registry.mark_failed(conn, generation_id, "build_failed")
+            from muninn.index.worker import build_finished
+            build_finished(conn, generation_id, failed=True)
         raise
     finally:
         if client is not None:
@@ -198,6 +204,15 @@ def activate_generation(generation_id: str, db_path=None) -> Manifest:
             identity = registry.prepare_activation(conn, generation_id, manifest.source_epoch)
             registry.activate(conn, generation_id, manifest.source_epoch, lease_token=lease.token,
                               activation_id=identity)
+            previous = conn.execute("SELECT previous_generation_id FROM index_corpus WHERE singleton=1").fetchone()[0]
+            if previous is not None and previous != generation_id:
+                # Pointer commit is authoritative even if local session cleanup
+                # fails. Other processes retain their own bounded read leases.
+                try:
+                    from muninn.index.runtime import runtime
+                    runtime.close_generation(previous)
+                except (OSError, RuntimeError):
+                    pass
             return manifest
     finally:
         conn.close()
@@ -209,13 +224,17 @@ def rollback_generation(generation_id: str, db_path=None) -> Manifest:
     Rollback deliberately uses exactly the activation checks, including epoch,
     inventory, manifest integrity and scope. It cannot resurrect removed content.
     """
+    from muninn.index import registry
     conn = connect(db_path)
     try:
-        if generation_id not in retained_generations(conn):
-            raise PublishError("rollback_generation_not_retained")
+        # Keep membership and the switch under one OS ownership interval. The
+        # inner activation acquires its canonical fencing lease reentrantly.
+        with registry.publisher_lock(conn):
+            if generation_id not in retained_generations(conn):
+                raise PublishError("rollback_generation_not_retained")
+            return activate_generation(generation_id, db_path)
     finally:
         conn.close()
-    return activate_generation(generation_id, db_path)
 
 
 def retained_generations(conn) -> set[str]:

@@ -52,7 +52,33 @@ def reconcile_staging(conn) -> int:
     rows = conn.execute("SELECT generation_id FROM index_generations WHERE state='staging'").fetchall()
     for row in rows:
         registry.mark_failed(conn, row[0], "interrupted_build")
+    if rows:
+        with registry._write(conn):
+            conn.execute("UPDATE index_corpus SET publisher_state='failed',publisher_failure_category='interrupted_build',"
+                         "publisher_pending_epoch=source_epoch,publisher_updated_at=unixepoch() "
+                         "WHERE singleton=1 AND publisher_state='building'")
     return len(rows)
+
+
+def build_started(conn, generation_id):
+    """Record explicit sync in the same job slot used by the optional worker."""
+    with registry._write(conn):
+        conn.execute("UPDATE index_corpus SET publisher_job_id=CASE WHEN publisher_state='building' "
+                     "THEN publisher_job_id ELSE ? END,publisher_state='building',publisher_generation_id=?,"
+                     "publisher_pending_epoch=CASE WHEN publisher_state='building' THEN publisher_pending_epoch ELSE NULL END,"
+                     "publisher_failure_category=NULL,publisher_updated_at=unixepoch() "
+                     "WHERE singleton=1", (uuid.uuid4().hex, generation_id))
+
+
+def build_finished(conn, generation_id, *, failed=False):
+    with registry._write(conn):
+        generation = registry.get_generation(conn, generation_id)
+        stale = generation is not None and generation.source_epoch != registry.source_epoch(conn)
+        conn.execute("UPDATE index_corpus SET publisher_state=?,publisher_failure_category=?,"
+                     "publisher_pending_epoch=CASE WHEN ? THEN source_epoch ELSE publisher_pending_epoch END,"
+                     "publisher_updated_at=unixepoch() WHERE singleton=1 AND publisher_generation_id=?",
+                     ("failed" if failed else "stale" if stale else "ready",
+                      "build_failed" if failed else None, failed or stale, generation_id))
 
 
 def run_once(db_path=None, *, build: Callable | None = None, **build_options) -> PublisherStatus:
