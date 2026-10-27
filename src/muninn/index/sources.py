@@ -36,6 +36,21 @@ def hidden_urls(conn: sqlite3.Connection, row: sqlite3.Row) -> set[str]:
     return x_pages.hidden_child_urls(conn, row["bookmark_id"])
 
 
+def derived_inputs_hidden(conn: sqlite3.Connection, bookmark_id: int) -> bool:
+    """Conservatively identify enrichment with unavailable deep-pass inputs.
+
+    Mutable enrichment retains no exact accepted-output identity, so a match
+    against any historical deep pass is sufficient to withhold its derivatives.
+    Callers may skip this lookup when they have no derived fields to disclose.
+    """
+    return conn.execute(
+        "SELECT 1 FROM deep_pass_results r, json_each(r.material_bookmark_ids_json) input "
+        "LEFT JOIN bookmarks material ON material.bookmark_id=input.value "
+        "WHERE r.bookmark_id=? AND (material.bookmark_id IS NULL OR material.content_visible<>1) LIMIT 1",
+        (bookmark_id,),
+    ).fetchone() is not None
+
+
 def visible_title(row: sqlite3.Row, hidden: set[str]) -> str | None:
     if row["source"] != "x":
         return row["title"]
@@ -161,6 +176,16 @@ def resolve_captured(
     omissions = []
     tags = json.loads(row["tags"] or "[]")
     tags = [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else []
+    # Mutable enrichment does not retain an exact deep-pass output identity.
+    # If any accepted derivation for this bookmark used an input that is now
+    # unavailable, conservatively withhold derived metadata even when its
+    # paraphrase contains no hidden URL. A historical match may over-withhold,
+    # but cannot authorize disclosing a hidden input through a newer summary.
+    unsafe_derivation = derived_inputs_hidden(conn, bookmark_id)
+    if unsafe_derivation:
+        summary = None
+        tags = []
+        omissions.append("enrichment_withheld")
     if hidden:
         summary, _, _, withheld = x_pages.withhold_enrichment(
             hidden, summary, row["key_quotes"], row["entities"]
@@ -170,7 +195,8 @@ def resolve_captured(
         if withheld or x_pages.enrichment_quotes_hidden(hidden, tags):
             summary = None
             tags = []
-            omissions.append("enrichment_withheld")
+            if "enrichment_withheld" not in omissions:
+                omissions.append("enrichment_withheld")
     tags = tuple(tags)
     body, omission = _body(conn, row, hidden)
     if omission:

@@ -5,7 +5,7 @@ import json
 import pytest
 
 from muninn.consumers.packets.canonical import content_digest
-from muninn.index.sources import iter_captured, resolve_captured
+from muninn.index.sources import derived_inputs_hidden, iter_captured, resolve_captured
 from muninn.revisions import record_revision
 
 
@@ -23,6 +23,60 @@ def scrape(conn, bid, text, *, pass_="live", status="ok"):
         "VALUES (?, ?, 200, ?, ?, ?)",
         (bid, pass_, status, text, 50 if pass_ != "live" else None),
     ).lastrowid
+
+
+@pytest.mark.parametrize("mutation", ["UPDATE bookmarks SET content_visible=0 WHERE bookmark_id=?",
+                                      "DELETE FROM bookmarks WHERE bookmark_id=?"])
+def test_hidden_or_deleted_deep_pass_input_withholds_paraphrased_metadata(fresh_db, mutation):
+    from muninn.index.authored import Inventory
+    from muninn.index.embedding_profile import EmbeddingProfile
+    from muninn.index.projection import project
+    from muninn.index.registry import source_epoch
+
+    bid = bookmark(fresh_db)
+    material = bookmark(fresh_db)
+    scrape(fresh_db, bid, "Visible source body remains readable")
+    fresh_db.execute(
+        "INSERT INTO enriched(bookmark_id,summary,tags,enrichment_model,enrichment_prompt_version,content_hash,enriched_at) "
+        "VALUES(?,'Paraphrased secret fact without any URL','[\"derived secret topic\"]','fake','1','hash',1)",
+        (bid,),
+    )
+    digest = "sha256:" + "a" * 64
+    fresh_db.execute(
+        "INSERT INTO deep_pass_results(task_id,attempt,bookmark_id,model,prompt_version,source_content_hash,"
+        "materials_digest,material_bookmark_ids_json,output_json,output_digest,started_at,completed_at) "
+        "VALUES('synthetic',1,?,'fake','1',?, ?,?,'{}',?,1,2)",
+        (bid, digest, digest, json.dumps([bid, material]), digest),
+    )
+    original = resolve_captured(fresh_db, "synthetic", bid)
+    assert not derived_inputs_hidden(fresh_db, bid)
+    assert original.summary == "Paraphrased secret fact without any URL"
+    assert original.tags == ("derived secret topic",)
+    prior_epoch = source_epoch(fresh_db)
+    fresh_db.execute(mutation, (material,))
+    assert derived_inputs_hidden(fresh_db, bid)
+    assert source_epoch(fresh_db) > prior_epoch
+    current = resolve_captured(fresh_db, "synthetic", bid)
+    assert current.summary is None
+    assert current.tags == ()
+    assert "enrichment_withheld" in current.omissions
+    assert current.body.text == "Visible source body remains readable"
+    assert resolve_captured(fresh_db, "synthetic", bid, expected_revision=original.projection_revision) is None
+
+    class FakeTokenizer:
+        digest = "synthetic-tokenizer"
+
+        def count_tokens(self, text):
+            return len(text)
+
+    profile = EmbeddingProfile("fake", "immutable-test", 2, "query", "document",
+                               FakeTokenizer.digest, backend="hash")
+    records = list(project(fresh_db, "synthetic", Inventory((), (), (), True), profile,
+                           FakeTokenizer(), namespaces=("bookmarks",)))
+    serialized = json.dumps([{"value": record.value, "embedding_input": record.embedding_input}
+                             for record in records])
+    assert "Paraphrased secret fact" not in serialized
+    assert "derived secret topic" not in serialized
 
 
 def test_selected_capture_is_exact_and_not_concatenated(fresh_db):
