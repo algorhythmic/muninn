@@ -392,6 +392,24 @@ def list_eras(db_path: str | Path | None = None) -> str:
 
 # ── recall over the whole vault (Phase 2) ──────────────────────────
 
+
+def search_context(query: str, namespaces: list[str] | None = None, budget: int = 2500,
+                   max_bytes: int = 16384, anchors: list[str] | None = None,
+                   required_sources: list[str] | None = None,
+                   expected_generation: str | None = None, *, db_path=None,
+                   context_backend=None) -> str:
+    """Exact cited excerpt bundles; only the context array counts toward max_bytes."""
+    from muninn.search.context import build_context
+
+    try:
+        result = build_context(query, namespaces, budget, max_bytes, anchors or (),
+                               required_sources or (), expected_generation,
+                               db_path=db_path, backend=context_backend)
+    except (ValueError, TypeError):
+        return _error("invalid_context_request", "Invalid context request")
+    return json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
+
 #: Upper bound on ``search(top_k=…)``.
 SEARCH_MAX_TOP_K = 50
 #: Hybrid hits requested per result slot, so hidden rows dropped at

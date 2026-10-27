@@ -14,13 +14,17 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Iterator
 
+from muninn.consumers.packets.canonical import TEXT_NORMALIZATION
 from muninn.consumers.mcp.vault_fs import AUTHORED_NAMESPACES
 from muninn.index.authored import Inventory
 from muninn.index.chunking import ChunkSettings, PinnedTokenizer, chunk_document
 from muninn.index.embedding_profile import EmbeddingProfile
 from muninn.index.sources import iter_captured
+from muninn.search.context import estimate_entry_cost
+from muninn.search.documents import CONTEXT_ESTIMATOR, CONTEXT_EXCERPT_ATTRS
 
 PROJECTION_SCHEMA = "muninn-braid-projection/2"
+ATTRIBUTION_SCHEMA = "muninn-attribution/1"
 NAMESPACES = ("bookmarks", *AUTHORED_NAMESPACES)
 
 
@@ -38,6 +42,26 @@ def _hash(value: object) -> str:
 
 def _captured_id(corpus_id: str, bookmark_id: int) -> str:
     return "captured:" + json.dumps([corpus_id, bookmark_id], separators=(",", ":"))
+
+
+def attribution_id(document_id: str, source_revision: str) -> str:
+    """Stable shared citation identity for all chunks of this exact source."""
+    return "attribution:" + _hash([ATTRIBUTION_SCHEMA, document_id, source_revision])
+
+
+def attribution_requirements(records: Iterator[ProjectionRecord]) -> dict[str, list[str]]:
+    """Translate projection dependency edges to Braid's explicit requires map.
+
+    Merely storing graph edges does not activate required-context semantics.
+    Consumers must pass this mapping on the pinned export/query request.
+    """
+    result: dict[str, list[str]] = {}
+    for record in records:
+        if record.kind == "edge" and record.value["type"] == "requires":
+            destinations = result.setdefault(record.value["src"], [])
+            if record.value["dst"] not in destinations:
+                destinations.append(record.value["dst"])
+    return result
 
 
 def _time(epoch: int | float | None) -> str | None:
@@ -81,6 +105,26 @@ def _document_records(
                                                 "reason": "metadata_embedding_exceeds_token_budget"})
     yield ProjectionRecord("node", _node(document_id, "document", metadata_text,
                            {**common, "kind": "document", "title": title}, timestamp), embedding_input)
+    citation_id = attribution_id(document_id, revision)
+    citation = {
+        "schema": ATTRIBUTION_SCHEMA, "document_id": document_id,
+        "namespace": attrs["namespace"], "source_ref": attrs["source_ref"],
+        "source_revision": revision, "normalization": attrs.get("normalization", TEXT_NORMALIZATION),
+    }
+    for key in ("url", "path", "normalization", "coverage", "source_digest", "body_digest",
+                "text_digest", "revision_ulid", "scrape_pass", "retrieved_at"):
+        if attrs.get(key) is not None:
+            citation[key] = attrs[key]
+    # The citation is source-level and shared by every excerpt of the source.
+    # Exact body offsets/digests remain on each chunk; embedding prefixes are
+    # neither copied into citation text nor mistaken for captured body text.
+    attribution = _node(citation_id, "attribution", "",
+        {"projection_schema": PROJECTION_SCHEMA, "document_id": document_id,
+         "source_revision": revision, "namespace": attrs["namespace"],
+         "source_ref": attrs["source_ref"], "kind": "attribution", "attribution_schema": ATTRIBUTION_SCHEMA,
+         "citation": citation, "cost_estimator": CONTEXT_ESTIMATOR}, timestamp)
+    attribution["cost"] = estimate_entry_cost({k: attribution[k] for k in ("id", "type", "text", "attrs")})
+    yield ProjectionRecord("node", attribution)
     # Chunk failures abort the disposable build rather than publish partial body
     # coverage as complete. Source-level missing bodies were already explicit.
     for chunk in chunk_document(document_id, revision, body, profile_id=profile.profile_id,
@@ -92,6 +136,9 @@ def _document_records(
                        "chunker_version": chunk.chunker_version,
                        "tokenizer_digest": chunk.tokenizer_digest,
                        "embedding_prefix": chunk.prefix,
+                       "embedding_prefix_role": "embedding_only_not_cited_body",
+                       "attribution_id": citation_id,
+                       "context_excerpt_id": "context:" + chunk.chunk_id,
                        "embedding_body_start": len(chunk.prefix),
                        "embedding_body_end": len(chunk.prefix) + len(chunk.text),
                        "embedding_coordinate_system": "unicode_codepoints",
@@ -100,6 +147,17 @@ def _document_records(
                                chunk_attrs, timestamp), chunk.embedding_input)
         yield _edge(document_id, chunk.chunk_id, "contains", timestamp)
         yield _edge(chunk.chunk_id, document_id, "belongs_to", timestamp)
+        # A separate context identity keeps document-search unit costs stable.
+        # Dense input is shared verbatim: the profile cache avoids inference
+        # twice while Braid can rank context roots without an ID remapping.
+        excerpt_attrs = {**chunk_attrs, "kind": "context_excerpt",
+                         "requires": [citation_id], "cost_estimator": CONTEXT_ESTIMATOR}
+        excerpt_attrs = {key: value for key, value in excerpt_attrs.items() if key in CONTEXT_EXCERPT_ATTRS}
+        excerpt = _node("context:" + chunk.chunk_id, "context_excerpt", chunk.text,
+                        excerpt_attrs, timestamp)
+        excerpt["cost"] = estimate_entry_cost({k: excerpt[k] for k in ("id", "type", "text", "attrs")})
+        yield ProjectionRecord("node", excerpt, chunk.embedding_input)
+        yield _edge(excerpt["id"], citation_id, "requires", timestamp)
 
 
 def project(
@@ -107,7 +165,7 @@ def project(
     profile: EmbeddingProfile, tokenizer: PinnedTokenizer, *,
     settings: ChunkSettings = ChunkSettings(), namespaces: tuple[str, ...] = NAMESPACES,
 ) -> Iterator[ProjectionRecord]:
-    """Stream documents/chunks/relations with complete source identity.
+    """Stream search nodes, costed context bundles and source relationships.
 
     A complete authored inventory is mandatory whenever authored namespaces are
     in scope. Profile and tokenizer identities must match even in fake tests.
