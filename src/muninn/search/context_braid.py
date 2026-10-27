@@ -73,8 +73,9 @@ class BraidContextBackend:
                 raise DocumentBackendUnavailable("context_generation_unavailable")
             profile = manifest.profile()
             factory = self.client_factory or open_context
+            runtime_options = {"db_path": self.db_path} if factory is open_context else {}
             client = factory(binary=self.binary, generation_dir=path.parent,
-                             dataset_id=manifest.dataset_id, profile_id=profile.profile_id)
+                             dataset_id=manifest.dataset_id, profile_id=profile.profile_id, **runtime_options)
             if client.state != manifest.braid["state"]:
                 raise DocumentBackendUnavailable("dataset_mismatch")
             if client.identity != manifest.braid["identity"]:

@@ -21,7 +21,7 @@ No binary or embedding model is downloaded by these commands.
 * `muninn index rollback GENERATION`: explicitly select a retained compatible
   previous generation. Source changes can refuse rollback; rollback never
   makes removed content eligible again.
-* `muninn index worker --once`: process an already pending change. Without
+* `muninn index worker --once`: observe changes and process at most one build. Without
   `--once`, poll in the foreground under external supervision. It builds only;
   it never activates. Explicit sync remains the primary publishing path.
 
@@ -29,6 +29,22 @@ Captured-source epoch triggers apply inside the canonical writer transaction,
 including older writers. Authored inventory is bounded and digest-bound; an
 incomplete/missing scan is unavailable, not a deletion or an empty corpus.
 Retrieval rechecks source digests and visibility before returning text.
+
+The optional worker observes authored files before and after each build through
+the same bounded inventory used by explicit sync. Only a complete scan replaces
+the stored scope/digest baseline. Missing or failed scans preserve the previous
+baseline, report an unavailable observation and leave work pending. Edits during
+inference coalesce into the existing job slot. A verified ready manifest can seed
+the initial baseline without a redundant build. The current shared authored
+digest includes every authored namespace, so a change outside a narrower authored
+scope may conservatively request a rebuild. No observer activates a generation.
+
+Each search request pins the canonical generation before opening its runtime
+session. Every process monitors the same canonical active pointer at a 250 ms
+interval. A changed or unavailable pointer stops admission to old sessions and
+drains them for at most 10 seconds; process closure adds its bounded transport
+shutdown wait (up to 4 seconds). Request deadlines remain 10 seconds including
+connection queue wait. There is no independent serving pointer or activation RPC.
 
 Retention is explicit through `publisher.cleanup_generations(db_path, limit=100)`;
 `retention_candidates` remains an advisory report. Cleanup holds the publisher OS

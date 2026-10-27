@@ -19,6 +19,11 @@ def index_status(db_path=None):
         ready = conn.execute("SELECT generation_id FROM index_generations WHERE state='ready' ORDER BY ready_at DESC, generation_id DESC LIMIT 1").fetchone()
         from muninn.index.worker import status
         publisher = asdict(status(conn))
+        observation = conn.execute(
+            "SELECT publisher_inventory_scope AS scope,publisher_inventory_digest AS digest,"
+            "publisher_inventory_observed_at AS observed_at,"
+            "publisher_inventory_failure_category AS failure_category FROM index_corpus WHERE singleton=1"
+        ).fetchone()
         if publisher.get("updated_at") is not None:
             publisher["age_seconds"] = max(0, int(time.time()) - publisher["updated_at"])
         result = {"config_intent": os.environ.get("MUNINN_SEARCH_BACKEND", "fts5-qdrant"),
@@ -28,6 +33,7 @@ def index_status(db_path=None):
                   "previous_generation": pointer[0], "activation_id": pointer[1],
                   "backend_actually_used": None, "backend_observation": "no_request_observation",
                   "publisher": publisher, "inventory": None, "profile": None, "braid": None,
+                  "authored_observation": dict(observation),
                   "counts": None, "fallback_reason": "generation_unavailable" if active is None else None}
         if active is not None:
             try:

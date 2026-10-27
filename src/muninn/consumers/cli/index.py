@@ -73,7 +73,7 @@ def rollback(ctx, generation_id):
 
 
 @index_group.command("worker")
-@click.option("--once", is_flag=True, help="Process one already-pending job and exit.")
+@click.option("--once", is_flag=True, help="Observe changes, process at most one build, and exit.")
 @click.option("--poll-seconds", default=5.0, type=click.FloatRange(min=0.1))
 @click.pass_context
 def worker(ctx, once, poll_seconds):

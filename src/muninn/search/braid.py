@@ -86,8 +86,9 @@ class BraidDocumentBackend:
             if manifest.authored_inventory_digest is not None and inventory.digest != manifest.authored_inventory_digest:
                 raise DocumentBackendUnavailable("stale_index")
             profile = manifest.profile()
+            runtime_options = {"db_path": self.db_path} if self.client_factory is open_search else {}
             client = self.client_factory(binary=self.binary, generation_dir=expected_path.parent,
-                dataset_id=manifest.dataset_id, profile_id=profile.profile_id)
+                dataset_id=manifest.dataset_id, profile_id=profile.profile_id, **runtime_options)
             if client.state != manifest.braid["state"]:
                 raise DocumentBackendUnavailable("dataset_mismatch")
             if client.identity != manifest.braid["identity"]:

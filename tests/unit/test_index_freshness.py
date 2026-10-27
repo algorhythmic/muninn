@@ -60,3 +60,5 @@ def test_status_separates_intent_build_pointer_and_observation(tmp_path, monkeyp
     assert value["config_intent"] == "fts5-qdrant"
     assert value["ready_build"] is value["active_generation"] is value["backend_actually_used"] is None
     assert value["fallback_reason"] == "generation_unavailable"
+    assert value["authored_observation"] == {"scope": None, "digest": None,
+                                            "observed_at": None, "failure_category": None}
