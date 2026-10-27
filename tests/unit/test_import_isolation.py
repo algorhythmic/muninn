@@ -42,6 +42,8 @@ HEAVY = (
         "muninn.consumers.vault.lint",
         "muninn.intake_records",
         "muninn.revisions",
+        "muninn.index.embedding_profile",
+        "muninn.index.embedding_cache",
     ],
 )
 def test_module_does_not_import_heavy_deps(module: str) -> None:

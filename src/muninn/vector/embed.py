@@ -43,6 +43,7 @@ def _backend() -> str:
 
 _st_model = None
 _st_lock = threading.Lock()
+_st_inference_lock = threading.Lock()
 
 
 def _get_st_model():
@@ -67,11 +68,12 @@ def _get_st_model():
 
 def _st_encode(text: str, prompt_name: str) -> list[float]:
     model = _get_st_model()
-    try:
-        vec = model.encode(text, prompt_name=prompt_name, normalize_embeddings=True)
-    except (KeyError, ValueError):
-        # Model config doesn't define this prompt; encode unprompted.
-        vec = model.encode(text, normalize_embeddings=True)
+    with _st_inference_lock:
+        try:
+            vec = model.encode(text, prompt_name=prompt_name, normalize_embeddings=True)
+        except (KeyError, ValueError):
+            # Model config doesn't define this prompt; encode unprompted.
+            vec = model.encode(text, normalize_embeddings=True)
     return [float(v) for v in vec]
 
 
