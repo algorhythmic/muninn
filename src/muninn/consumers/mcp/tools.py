@@ -17,6 +17,7 @@ row is visible.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -25,6 +26,7 @@ from muninn.consumers.mcp import vault_fs
 from muninn.consumers.vault import x_pages
 from muninn.db import connect
 from muninn.index.sources import (
+    derived_inputs_hidden,
     hidden_urls as _hidden_urls,
     visible_row as _visible_row,
     visible_summary as _summary,
@@ -74,6 +76,8 @@ def _bookmark_summary(
         "source": row["source"],
         "item_kind": _item_kind(row),
     }
+    if out["summary"] and derived_inputs_hidden(conn, row["bookmark_id"]):
+        out["summary"] = None
     if score is not None:
         out["score"] = score
     return out
@@ -280,9 +284,13 @@ def semantic_search(
     search = _backend(backend, db_path, client)
     try:
         hits = search.semantic(query, limit)
-        if not hits:
+        if not hits and search.name != "braid":
             return fts_search(query, limit, db_path=db_path, backend=search)
         return json.dumps(_hydrate(db_path, hits, with_score=True), indent=2)
+    except ValueError:
+        if search.name == "braid":
+            return _error("invalid_query", "query is invalid")
+        return fts_search(query, limit, db_path=db_path, backend=search)
     except Exception:
         return fts_search(query, limit, db_path=db_path, backend=search)
 
@@ -329,6 +337,8 @@ def get_bookmark(bookmark_id: int, db_path: str | Path | None = None) -> str:
         out = _row_to_dict(row)
         hidden = _hidden_urls(conn, row)
         out["title"] = _title(row, hidden)
+        if derived_inputs_hidden(conn, bookmark_id):
+            out.update(summary=None, tags="[]", key_quotes="[]", entities="{}", enrichment_withheld=True)
         if hidden:
             out["summary"], out["key_quotes"], out["entities"], withheld = (
                 x_pages.withhold_enrichment(
@@ -435,6 +445,9 @@ def search(
     if namespace is not None and namespace not in vault_fs.NAMESPACES:
         return _unknown_namespace(namespace)
     top_k = max(1, min(int(top_k), SEARCH_MAX_TOP_K))
+    chosen = getattr(backend, "name", None) if backend is not None else os.environ.get("MUNINN_SEARCH_BACKEND")
+    if chosen == "braid":
+        return _document_search(query, namespace, top_k, db_path, _backend(backend, db_path))
     want_captured = namespace in (None, vault_fs.CAPTURED_NAMESPACE)
     if namespace is None:
         authored: tuple[str, ...] = vault_fs.AUTHORED_NAMESPACES
@@ -493,6 +506,72 @@ def search(
         {"query": query, "namespace": namespace, "results": results, "warnings": warnings},
         indent=2,
     )
+
+
+def _document_search(query, namespace, top_k, db_path, adapter) -> str:
+    """One document ranking or one complete legacy request, with diagnostics."""
+    from muninn.search.documents import DocumentHit, DocumentSearchResult
+    from muninn.search.routing import DocumentRouter
+
+    legacy_response = None
+
+    def legacy(query, namespaces, limit, options=None):
+        nonlocal legacy_response
+        legacy_response = json.loads(search(query, namespace, limit, db_path, adapter.legacy))
+        hits = tuple(DocumentHit(
+            document_id=str(item.get("bookmark_id", item.get("path", ""))),
+            namespace=item["namespace"], source_ref=str(item.get("path") or item.get("bookmark_id")),
+            source_revision="", score=item.get("score"),
+            matched_stages=tuple(item.get("matched", ())), payload=item,
+        ) for item in legacy_response.get("results", ()))
+        return DocumentSearchResult(hits=hits, backend=DEFAULT_BACKEND,
+                                    warnings=tuple(legacy_response.get("warnings", ())),
+                                    coverage={"authored_scan_bounded": True})
+
+    router = DocumentRouter(adapter.document_backend, legacy)
+    result = router.search_documents(query, (namespace,) if namespace else vault_fs.NAMESPACES, top_k)
+    if legacy_response is not None and "error" in legacy_response:
+        return json.dumps(legacy_response)
+    items = []
+    vis = _Visibility(db_path)
+    try:
+        try:
+            wiki = vault_fs.vault_wiki_dir()
+        except vault_fs.VaultAccessError:
+            wiki = None
+        for hit in result.hits:
+            item = dict(hit.payload)
+            if hit.namespace == vault_fs.CAPTURED_NAMESPACE and result.backend == "braid":
+                row = vis.row(item["bookmark_id"])
+                if row is None:
+                    # The canonical source changed after backend hydration.
+                    fallback = json.loads(search(query, namespace, top_k, db_path, adapter.legacy))
+                    fallback.update(backend=DEFAULT_BACKEND, generation=None, fallback_reason="stale_index")
+                    return json.dumps(fallback)
+                current = _bookmark_summary(vis.conn, row)
+                # The exact source resolver may withhold more derived prose
+                # than the compact legacy view. Preserve that verdict.
+                current["summary"] = None if current["summary"] is None else item.get("summary")
+                item.update(current)
+                item["path"] = _compiled_path(wiki, row)
+            item.setdefault("namespace", hit.namespace)
+            item.setdefault("path", None)
+            item["score"] = hit.score
+            item["matched"] = list(hit.matched_stages)
+            items.append(item)
+        if result.backend == "braid" and result.generation and "source_epoch" in result.generation and vis.conn is not None:
+            from muninn.index.registry import source_epoch
+
+            if source_epoch(vis.conn) != result.generation.get("source_epoch"):
+                fallback = json.loads(search(query, namespace, top_k, db_path, adapter.legacy))
+                fallback.update(backend=DEFAULT_BACKEND, generation=None, fallback_reason="stale_index")
+                return json.dumps(fallback)
+    finally:
+        vis.close()
+    return json.dumps({"query": query, "namespace": namespace, "results": items,
+                       "warnings": list(result.warnings), "backend": result.backend,
+                       "generation": result.generation, "coverage": result.coverage,
+                       "fallback_reason": result.fallback_reason}, indent=2)
 
 
 def get_page(path: str, db_path: str | Path | None = None) -> str:

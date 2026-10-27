@@ -186,6 +186,8 @@ def test_create_relocate_reopen_and_checkpoint(tmp_path, monkeypatch):
         config = json.loads((cwd / "braid.json").read_text())
         assert config["store"]["path"] == "braid.db"
         assert config["embed"] == {"provider": "none", "model": "fake-profile"}
+        assert config["candidate_limit"] == 512
+        assert config["defaults"]["mmr_lambda"] == 1
         with sqlite3.connect(cwd / "braid.db") as db:
             db.execute("CREATE TABLE IF NOT EXISTS synthetic(id INTEGER)")
         return FakeTransport()

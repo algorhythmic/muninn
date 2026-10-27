@@ -56,7 +56,7 @@ class Manifest:
     omissions: tuple[dict, ...]
     braid: dict
     created_at: int
-    projection_version: str = "muninn-braid-projection/1"
+    projection_version: str = "muninn-braid-projection/2"
     schema: str = SCHEMA
     contract_revision: int = 1
 

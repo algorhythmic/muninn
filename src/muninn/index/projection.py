@@ -20,7 +20,7 @@ from muninn.index.chunking import ChunkSettings, PinnedTokenizer, chunk_document
 from muninn.index.embedding_profile import EmbeddingProfile
 from muninn.index.sources import iter_captured
 
-PROJECTION_SCHEMA = "muninn-braid-projection/1"
+PROJECTION_SCHEMA = "muninn-braid-projection/2"
 NAMESPACES = ("bookmarks", *AUTHORED_NAMESPACES)
 
 
@@ -46,6 +46,11 @@ def _time(epoch: int | float | None) -> str | None:
 
 def _node(identifier: str, kind: str, text: str, attrs: dict, timestamp: str | None = None) -> dict:
     value = {"id": identifier, "type": kind, "text": text, "attrs": attrs}
+    if kind in ("document", "chunk"):
+        # Document search requests a bounded candidate ranking. Explicit unit
+        # cost prevents the context packer's text-length heuristic dropping
+        # otherwise eligible documents before Muninn collapses their chunks.
+        value["cost"] = 1
     if timestamp is not None:
         value["ts"] = timestamp
     return value

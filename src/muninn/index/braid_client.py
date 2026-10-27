@@ -140,6 +140,7 @@ class BraidClient:
                 or not isinstance(hello.get("ranking_version"), str) or not hello["ranking_version"]):
             raise BraidError("capability_mismatch")
         self.max_request_bytes = min(self.max_request_bytes, advertised)
+        self.capabilities = frozenset(caps)
         self.state = self._state(hello.get("dataset"))
         self.identity = {"protocol_version": 1, "contract_revision": 1,
                          "ranking_version": hello["ranking_version"],
@@ -156,7 +157,9 @@ class BraidClient:
             "store": {"backend": "sqlite", "path": "braid.db"},
             "embed": {"provider": "none", "model": profile_id},
             "index": {"nodes": {"document": ["text"], "chunk": ["text"]}},
-            "defaults": {"weights": {"lexical": 1, "dense": 1, "graph": 0, "temporal": 0}}}
+            "candidate_limit": 512,
+            "defaults": {"mmr_lambda": 1,
+                         "weights": {"lexical": 1, "dense": 1, "graph": 0, "temporal": 0}}}
         fd = os.open(config, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as file:
             file.write(_encode(value))
