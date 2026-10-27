@@ -27,21 +27,26 @@ def _validate(query, namespaces, limit):
     return tuple(dict.fromkeys(namespaces))
 
 
+def route_request(primary, legacy):
+    """Share whole-request fallback policy across document and context APIs."""
+    from muninn.search.documents import DocumentBackendUnavailable
+
+    try:
+        return primary()
+    except DocumentBackendUnavailable as exc:
+        return replace(legacy(exc.reason), fallback_reason=exc.reason)
+
+
 class DocumentRouter:
     def __init__(self, primary, legacy):
         self.primary = primary
         self.legacy = legacy
 
     def search_documents(self, query, namespaces=None, limit=10, options=None):
-        from muninn.search.documents import DocumentBackendUnavailable
-
         scopes = _validate(query, namespaces, limit)
         operation = getattr(self.primary, "search_documents", self.primary)
-        try:
-            return operation(query, scopes, limit, options)
-        except DocumentBackendUnavailable as exc:
-            result = self.legacy(query, scopes, limit, options)
-            return replace(result, fallback_reason=exc.reason)
+        return route_request(lambda: operation(query, scopes, limit, options),
+                             lambda reason: self.legacy(query, scopes, limit, options))
 
 
 class BraidBookmarkBackend:

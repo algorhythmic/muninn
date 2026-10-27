@@ -211,3 +211,24 @@ def test_create_relocate_reopen_and_checkpoint(tmp_path, monkeypatch):
     from_path = BraidClient.create("synthetic-braid", tmp_path / "from-path", "synthetic", "fake-profile")
     from_path.finish()
     assert names == ["synthetic-braid"]
+
+
+def test_context_configuration_is_separate_and_validated(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(BraidClient, "_open", classmethod(lambda cls, *a, **kw: calls.append(kw) or "fake"))
+    directory = tmp_path / "generation"
+    BraidClient.create(tmp_path / "unused-binary", directory, "synthetic", "fake-profile")
+    sqlite3.connect(directory / "braid.db").close()
+    base = json.loads((directory / "braid.json").read_text())
+    context_path = directory / "braid-context.json"
+    context = json.loads(context_path.read_text())
+    assert base["defaults"]["mmr_lambda"] == 1
+    assert context["defaults"]["mmr_lambda"] == 0.7
+    assert context["index"]["nodes"]["context_excerpt"] == ["text"]
+    assert BraidClient.open_context(tmp_path / "unused-binary", directory, "synthetic", "fake-profile") == "fake"
+    assert calls[-1]["config_name"] == "braid-context.json"
+    assert json.loads((directory / "braid.json").read_text()) == base
+    context["store"]["path"] = "../untrusted.db"
+    context_path.write_text(json.dumps(context))
+    with pytest.raises(BraidError, match="context_config_mismatch"):
+        BraidClient.open_context(tmp_path / "unused-binary", directory, "synthetic", "fake-profile")

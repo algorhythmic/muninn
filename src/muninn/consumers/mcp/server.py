@@ -95,6 +95,22 @@ def search(query: str, namespace: str | None = None, top_k: int = 10) -> str:
 
 
 @mcp.tool()
+def search_context(query: str, namespaces: list[str] | None = None, budget: int = 2500,
+                   max_bytes: int = 16384, anchors: list[str] | None = None,
+                   required_sources: list[str] | None = None,
+                   expected_generation: str | None = None) -> str:
+    """Return exact cited excerpts in complete attribution bundles.
+
+    Defaults: 2500 estimated cost units, 16384 UTF-8 JSON context bytes.
+    References are bookmark:N or vault:wiki/<authored namespace>/<page>.md.
+    An expected generation is a consistency precondition; it never silently
+    switches to legacy recall. The diagnostic envelope has a separate cap.
+    """
+    return _tools.search_context(query, namespaces, budget, max_bytes, anchors,
+                                 required_sources, expected_generation)
+
+
+@mcp.tool()
 def get_page(path: str) -> str:
     """Fetch one vault page by its vault-relative path, e.g.
     "wiki/concepts/example.md" (as returned by search or list_namespace)."""

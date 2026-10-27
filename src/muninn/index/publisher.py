@@ -150,7 +150,8 @@ def build_generation(db_path=None, *, binary: Path | str = "braid", namespaces=N
             manifest = Manifest(corpus_id, dataset_id, generation_id, scope, epoch,
                                 inventory.digest if set(scope).intersection(AUTHORED_NAMESPACES) else None,
                                 asdict(profile), profile.profile_id, source_count, chunk_count,
-                                tuple(omissions), {"identity": identity, "state": state}, int(time.time()))
+                                tuple(omissions), {"identity": identity, "state": state,
+                                                  "context_schema": "muninn-context/1"}, int(time.time()))
             manifest.write(staging / "manifest.json")
             phase("complete")
             lease.assert_owned()

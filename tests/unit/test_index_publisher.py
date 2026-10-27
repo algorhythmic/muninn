@@ -115,9 +115,9 @@ def test_build_ready_without_implicit_activation_then_explicit_switch(setup):
     assert manifest.profile_id == profile.profile_id
     assert manifest.contract_revision == 1
     client = clients[0]
-    assert len(client.nodes) == 2
-    assert len(client.vectors) == 2
-    assert len(client.edges) == 2
+    assert len(client.nodes) == 4
+    assert len(client.vectors) == 3
+    assert len(client.edges) == 3
     assert {v["model"] for v in client.vectors} == {profile.profile_id}
     assert all(v["vec"] == [0.6, 0.8] for v in client.vectors)
     assert client.closed
@@ -208,7 +208,7 @@ def test_spool_bound_fails_before_client_creation(setup):
     conn.close()
 
 
-@pytest.mark.parametrize("count", [0, 3])
+@pytest.mark.parametrize("count", [0, 4])
 def test_encoder_count_mismatch_fails_without_ready_generation(setup, count):
     path, _, _, build = setup
 

@@ -5,10 +5,12 @@ from dataclasses import replace
 
 import pytest
 
-from muninn.index.authored import inventory_authored, Inventory
+from muninn.index.authored import AuthoredSource, inventory_authored, Inventory
 from muninn.index.chunking import ChunkSettings
 from muninn.index.embedding_profile import EmbeddingProfile
-from muninn.index.projection import PROJECTION_SCHEMA, project
+from muninn.index.projection import (
+    ATTRIBUTION_SCHEMA, PROJECTION_SCHEMA, attribution_id, attribution_requirements, project,
+)
 
 
 class FakeTokenizer:
@@ -49,7 +51,7 @@ def test_deterministic_wire_records_exact_spans_and_prefix_mapping(fresh_db):
     # Every wire object and the stream envelope are JSON ready.
     json.dumps([{"kind": r.kind, "value": r.value, "embedding_input": r.embedding_input} for r in first])
     nodes = [r for r in first if r.kind == "node"]
-    assert all(record.value["cost"] == 1 for record in nodes)
+    assert all(record.value["cost"] == 1 for record in nodes if record.value["type"] in ("document", "chunk"))
     document = next(r for r in nodes if r.value["type"] == "document")
     chunks = [r for r in nodes if r.value["type"] == "chunk"]
     assert len(chunks) > 1
@@ -68,8 +70,8 @@ def test_deterministic_wire_records_exact_spans_and_prefix_mapping(fresh_db):
         assert attrs["bookmark_id"] == 1
     assert covered == set(range(len(normalized)))
     edges = [r.value for r in first if r.kind == "edge"]
-    assert len(edges) == len(chunks) * 2
-    assert {e["type"] for e in edges} == {"contains", "belongs_to"}
+    assert len(edges) == len(chunks) * 3
+    assert {e["type"] for e in edges} == {"contains", "belongs_to", "requires"}
     assert all(e["ts"] == "1970-01-01T00:03:20Z" for e in edges)
 
 
@@ -173,3 +175,82 @@ def test_hidden_inputs_never_reach_projection_embedding_text(fresh_db):
     assert "Paraphrased tag" not in inputs
     assert "[hidden link]" in inputs
     assert any(r.kind == "omission" and r.value["reason"] == "enrichment_withheld" for r in result)
+
+
+def test_attribution_is_shared_exact_and_never_embedded(fresh_db):
+    bookmark(fresh_db, "one", body="Original body " * 100)
+    result = records(fresh_db)
+    nodes = [r for r in result if r.kind == "node"]
+    documents = [r.value for r in nodes if r.value["type"] == "document"]
+    chunks = [r.value for r in nodes if r.value["type"] == "chunk"]
+    attributions = [r for r in nodes if r.value["type"] == "attribution"]
+    assert len(documents) == len(attributions) == 1 and len(chunks) > 1
+    attribution = attributions[0]
+    document = documents[0]
+    citation = attribution.value["attrs"]["citation"]
+    assert attribution.embedding_input is None
+    assert attribution.value["id"] == attribution_id(document["id"], document["attrs"]["source_revision"])
+    assert citation["schema"] == ATTRIBUTION_SCHEMA
+    assert citation["namespace"] == "bookmarks"
+    assert citation["source_ref"] == document["attrs"]["source_ref"]
+    assert citation["source_revision"] == document["attrs"]["source_revision"]
+    assert citation["normalization"] == "muninn-text/1"
+    from muninn.search.context import estimate_entry_cost
+    assert attribution.value["text"] == ""
+    assert attribution.value["cost"] == estimate_entry_cost({
+        k: attribution.value[k] for k in ("id", "type", "text", "attrs")})
+    assert attribution.value["attrs"]["cost_estimator"] == "muninn-json-utf8-quarter/1"
+    requirements = attribution_requirements(iter(result))
+    excerpts = [r for r in nodes if r.value["type"] == "context_excerpt"]
+    assert len(excerpts) == len(chunks)
+    assert requirements == {excerpt.value["id"]: [attribution.value["id"]] for excerpt in excerpts}
+    for chunk, excerpt in zip(chunks, excerpts):
+        assert chunk["attrs"]["context_excerpt_id"] == excerpt.value["id"]
+        assert excerpt.value["text"] == chunk["text"]
+        assert excerpt.value["attrs"]["requires"] == [attribution.value["id"]]
+        assert excerpt.embedding_input == next(
+            r.embedding_input for r in nodes if r.value["id"] == chunk["id"])
+        assert excerpt.value["cost"] == estimate_entry_cost({
+            k: excerpt.value[k] for k in ("id", "type", "text", "attrs")})
+    for chunk in chunks:
+        assert chunk["attrs"]["attribution_id"] == attribution.value["id"]
+        assert chunk["attrs"]["embedding_prefix_role"] == "embedding_only_not_cited_body"
+    assert "embedding_prefix" not in citation
+    assert "summary" not in attribution.value["attrs"]
+    assert "Original body" not in attribution.value["text"]
+
+
+def test_attribution_identity_changes_with_source_revision(fresh_db):
+    bid = bookmark(fresh_db, "one", body="Synthetic original")
+    first = records(fresh_db)
+    fresh_db.execute("UPDATE scrape_results SET content_text='Synthetic changed' WHERE bookmark_id=?", (bid,))
+    second = records(fresh_db)
+    get_id = lambda values: next(r.value["id"] for r in values if r.kind == "node" and r.value["type"] == "attribution")
+    assert get_id(first) != get_id(second)
+
+
+def test_authored_attribution_preserves_file_identity_and_exact_body_mapping(fresh_db):
+    from muninn.consumers.packets.canonical import content_digest
+    body = "# Synthetic heading\n\n" + "Authored prose. " * 20
+    source = AuthoredSource(
+        path="wiki/concepts/synthetic.md", namespace="concepts", file_digest="a" * 64,
+        body_digest=content_digest(body), body=body, source_body_start=42,
+        normalization="muninn-text/1", title="Synthetic title", bookmark_id=None,
+        validation_stamp=(1, 2, len(body), 400000000000, 400000000000),
+    )
+    inventory = Inventory((source,), (("concepts", "present"),), (), True)
+    result = records(fresh_db, inventory, namespaces=("concepts",))
+    attribution = next(r.value for r in result if r.kind == "node" and r.value["type"] == "attribution")
+    citation = attribution["attrs"]["citation"]
+    assert citation["namespace"] == "concepts"
+    assert citation["path"] == source.path
+    assert citation["source_ref"] == "vault:" + source.path
+    assert citation["source_revision"] == source.file_digest
+    assert citation["body_digest"] == source.body_digest
+    assert citation["normalization"] == "muninn-text/1"
+    assert "url" not in citation
+    for record in result:
+        if record.kind == "node" and record.value["type"] == "chunk":
+            attrs = record.value["attrs"]
+            assert record.value["text"] == body[attrs["start"]:attrs["end"]]
+            assert attrs["attribution_id"] == attribution["id"]

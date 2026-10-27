@@ -18,7 +18,7 @@ def backend(setup, *, items=None, build_options=None):
         json.dumps({"candidate_limit": 512, "defaults": {"mmr_lambda": 1}})
     )
     activate_generation(manifest.generation_id, path)
-    nodes = published[0].nodes
+    nodes = [node for node in published[0].nodes if node["type"] in ("document", "chunk")]
     requests = []
 
     class Client:

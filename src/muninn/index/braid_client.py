@@ -156,7 +156,7 @@ class BraidClient:
         value = {"version": 1, "dataset_id": dataset_id,
             "store": {"backend": "sqlite", "path": "braid.db"},
             "embed": {"provider": "none", "model": profile_id},
-            "index": {"nodes": {"document": ["text"], "chunk": ["text"]}},
+            "index": {"nodes": {"document": ["text"], "chunk": ["text"], "context_excerpt": ["text"]}},
             "candidate_limit": 512,
             "defaults": {"mmr_lambda": 1,
                          "weights": {"lexical": 1, "dense": 1, "graph": 0, "temporal": 0}}}
@@ -165,7 +165,32 @@ class BraidClient:
             file.write(_encode(value))
             file.flush()
             os.fsync(file.fileno())
+        context_config = json.loads(json.dumps(value))
+        context_config["defaults"]["mmr_lambda"] = 0.7
+        context_fd = os.open(generation_dir / "braid-context.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(context_fd, "wb") as file:
+            file.write(_encode(context_config))
+            file.flush()
+            os.fsync(file.fileno())
         return cls._open(binary, generation_dir, dataset_id, profile_id, **kwargs)
+
+    @classmethod
+    def open_context(cls, binary: Path, generation_dir: Path, dataset_id: str, profile_id: str, **kwargs):
+        """Use a build-time context projection without changing search config."""
+        generation_dir = Path(generation_dir).resolve()
+        if not (generation_dir / "braid.db").is_file():
+            raise BraidError("generation_unavailable")
+        base = json.loads((generation_dir / "braid.json").read_text())
+        config = json.loads((generation_dir / "braid-context.json").read_text())
+        expected = json.loads(json.dumps(base))
+        expected.setdefault("defaults", {})["mmr_lambda"] = 0.7
+        if (config != expected or config.get("dataset_id") != dataset_id
+                or config.get("embed") != {"provider": "none", "model": profile_id}
+                or config.get("store") != {"backend": "sqlite", "path": "braid.db"}
+                or config.get("index", {}).get("nodes", {}).get("context_excerpt") != ["text"]):
+            raise BraidError("context_config_mismatch")
+        return cls._open(binary, generation_dir, dataset_id, profile_id,
+                         config_name="braid-context.json", **kwargs)
 
     @classmethod
     def open_existing(cls, binary: Path, generation_dir: Path, dataset_id: str, profile_id: str, **kwargs):
@@ -179,7 +204,7 @@ class BraidClient:
         return cls._open(binary, generation_dir, dataset_id, profile_id, **kwargs)
 
     @classmethod
-    def _open(cls, binary, generation_dir, dataset_id, profile_id, **kwargs):
+    def _open(cls, binary, generation_dir, dataset_id, profile_id, *, config_name="braid.json", **kwargs):
         candidate = str(binary)
         if not Path(candidate).is_absolute() and len(Path(candidate).parts) == 1:
             candidate = shutil.which(candidate)
@@ -188,7 +213,7 @@ class BraidClient:
         binary = Path(candidate).resolve()
         with binary.open("rb") as file:
             digest = hashlib.file_digest(file, "sha256").hexdigest()
-        transport = StdioTransport([str(binary), "serve", "--stdio", "--config", str(generation_dir / "braid.json")],
+        transport = StdioTransport([str(binary), "serve", "--stdio", "--config", str(generation_dir / config_name)],
                                    cwd=generation_dir)
         try:
             return cls(transport, dataset_id=dataset_id, profile_id=profile_id,
