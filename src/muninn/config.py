@@ -80,6 +80,9 @@ class BraidSettings:
     discovered or downloaded automatically. MUNINN_BRAID_SHA256 optionally pins
     its SHA256 in addition to the generation manifest's negotiated identity.
     These settings never activate a generation or change the search default.
+    Retrieval additionally requires MUNINN_BRAID_PILOT_CONFIG: private JSON
+    with schema muninn-braid-pilot/1, enabled=true, binary_path, binary_sha256
+    and source_commit. No configuration means pilot OFF (index.pilot).
     """
 
     binary: Path | None

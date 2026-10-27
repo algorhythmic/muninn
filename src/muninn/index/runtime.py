@@ -6,6 +6,7 @@ new generation: callers supply the generation pinned by their source snapshot.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import atexit
 import hashlib
 import math
 from pathlib import Path
@@ -109,7 +110,13 @@ class BraidRuntime:
             with self._lock:
                 sessions = list(self._sessions.values())
             for session in sessions:
-                if session.db_path is None or session.disposed or session.draining:
+                if session.disposed or session.draining:
+                    continue
+                with self._lock:
+                    if not session.references and time.monotonic() - session.idle_since >= self.idle_seconds:
+                        self.close_generation(session.generation)
+                        continue
+                if session.db_path is None:
                     continue
                 try:
                     active = self._active(session.db_path)
@@ -119,7 +126,8 @@ class BraidRuntime:
                     self.close_generation(session.generation)
 
     def acquire(self, *, binary, generation_dir, dataset_id, profile_id,
-                context=False, db_path=None, watch_active=False, ownership_paths=None, **kwargs):
+                context=False, db_path=None, watch_active=False, ownership_paths=None,
+                expected_binary_digest=None, **kwargs):
         binary = Path(binary)
         from muninn.config import load_braid_settings
         settings = load_braid_settings()
@@ -135,6 +143,8 @@ class BraidRuntime:
         binary = binary.resolve(strict=True)
         with binary.open("rb") as file:
             digest = hashlib.file_digest(file, "sha256").hexdigest()
+        if expected_binary_digest is not None and digest != expected_binary_digest:
+            raise BraidError("binary_identity_mismatch")
         if expected_digest is not None and digest != expected_digest:
             raise BraidError("binary_identity_mismatch")
         directory = Path(generation_dir).resolve()
@@ -195,7 +205,7 @@ class BraidRuntime:
                                        ownership=ownership, db_path=db_path)
                     self._sessions[key] = session
                     self._failures.pop(key, None)
-                    if db_path is not None and (self._watcher is None or self._stop.is_set() or not self._watcher.is_alive()):
+                    if self._watcher is None or self._stop.is_set() or not self._watcher.is_alive():
                         self._stop = threading.Event()
                         self._watcher = threading.Thread(target=self._watch, args=(self._stop,), name="muninn-generation-drain", daemon=True)
                         self._watcher.start()
@@ -264,13 +274,23 @@ class BraidRuntime:
         if watcher is not None and watcher is not threading.current_thread():
             watcher.join(timeout=self.poll_seconds + .5)
 
+    def shutdown(self):
+        """Process exit closes every child synchronously, including held proxies."""
+        with self._lock:
+            self._stop.set()
+            for session in list(self._sessions.values()):
+                self._dispose(session)
+
 
 runtime = BraidRuntime()
+atexit.register(runtime.shutdown)
 
 
 def open_search(**kwargs):
-    return runtime.acquire(watch_active=True, **kwargs)
+    from muninn.index.pilot import open_pilot
+    return open_pilot(runtime, **kwargs)
 
 
 def open_context(**kwargs):
-    return runtime.acquire(context=True, watch_active=True, **kwargs)
+    from muninn.index.pilot import open_pilot
+    return open_pilot(runtime, context=True, **kwargs)
